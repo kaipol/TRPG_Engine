@@ -77,7 +77,6 @@ class DicePlugin(Star):
         self.wakeup_prefix = [".", "。", "/", "!", "！"]
         self.uni_cache = {}
         self.initiative_manager = InitiativeManager()
-        self._recorded_log_message_ids = set()
         # install chromium for spell visualizing
         try:
             subprocess.run(
@@ -101,7 +100,7 @@ class DicePlugin(Star):
 
         super().__init__(context)
 
-    async def save_log(self, group_id, content, source_message_id=None) :
+    async def save_log(self, group_id, content) :
         if not group_id:
             return
 
@@ -111,8 +110,7 @@ class DicePlugin(Star):
             nickname="风铃Velinithra",
             timestamp=int(time.time()),
             text=content,
-            isDice = True,
-            message_id=source_message_id
+            isDice = True
         )
 
     def _event_context_id(self, event: AstrMessageEvent) -> str:
@@ -1877,37 +1875,6 @@ class DicePlugin(Star):
         ok, info = await logger_core.delete_session(group, name)
         return event.plain_result(info)
 
-    async def _cmd_log_deldice_impl(self, event: AstrMessageEvent):
-        if not self._command_enabled(event):
-            return
-        group = event.message_obj.group_id
-        parts = event.message_str.strip().split()
-        count = 1
-        name = None
-        all_flag = False
-
-        if len(parts) >= 3:
-            arg = parts[2].lower()
-            if arg in {"all", "全部"}:
-                all_flag = True
-                name = parts[3] if len(parts) >= 4 else None
-            elif arg.isdigit():
-                count = int(arg)
-                name = parts[3] if len(parts) >= 4 else None
-            else:
-                name = parts[2]
-
-        ok, info = await logger_core.delete_dice_messages(group, count=count, name=name, all_flag=all_flag)
-        return event.plain_result(info)
-
-    @log.command("deldice")
-    async def cmd_log_deldice(self, event: AstrMessageEvent):
-        return await self._cmd_log_deldice_impl(event)
-
-    @log.command("deletedice")
-    async def cmd_log_deletedice(self, event: AstrMessageEvent):
-        return await self._cmd_log_deldice_impl(event)
-
 
     @log.command("get")
     async def cmd_log_get(self, event: AstrMessageEvent):
@@ -2338,31 +2305,14 @@ class DicePlugin(Star):
         if not group_id:
             return
 
-        message_id = getattr(event.message_obj, "message_id", None)
-        sender_id = getattr(event.message_obj.sender, "user_id", "")
-        timestamp = getattr(event.message_obj, "timestamp", "")
-        record_key = (str(group_id), str(message_id or sender_id), str(timestamp), message)
-        if record_key and record_key in self._recorded_log_message_ids:
-            return
-
-        ok, _ = await logger_core.add_message(
+        await logger_core.add_message(
             group_id=group_id,
-            user_id=sender_id,
+            user_id=event.message_obj.sender.user_id,
             nickname=getattr(event.message_obj.sender, "nickname", ""),
-            timestamp=int(timestamp),
+            timestamp=int(event.message_obj.timestamp),
             text=message,
-            components=getattr(event.message_obj, "message", []),
-            message_id=message_id
+            components=getattr(event.message_obj, "message", [])
         )
-        if ok and record_key:
-            self._recorded_log_message_ids.add(record_key)
-            if len(self._recorded_log_message_ids) > 2048:
-                self._recorded_log_message_ids = set(list(self._recorded_log_message_ids)[-1024:])
-
-    @event_message_type(EventMessageType.GROUP_MESSAGE, priority=0)
-    async def record_group_message_before_commands(self, event: AstrMessageEvent):
-        message = event.message_obj.message_str
-        await self._record_group_message(event, message)
 
     @event_message_type(EventMessageType.GROUP_MESSAGE, priority=sys.maxsize)
     async def identify_command(self, event: AstrMessageEvent):

@@ -28,8 +28,6 @@ DEFAULT_OUTPUTS = {
     "log.ob.header": "log.ob.header",
     "log.ob.toggle_on": "log.ob.toggle_on",
     "log.session_exported": "{result_website}",
-    "log.dice_delete.success": "log.dice_delete.success",
-    "log.dice_delete.none": "log.dice_delete.none",
     "setting.website": "",
     "coc_rule.rule_1": "严格规则",
     "coc_rule.rule_2": "COC7版规则",
