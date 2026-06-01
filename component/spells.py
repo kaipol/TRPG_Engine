@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from .common.output import get_output
+
 
 DND5E_API_BASE = "https://www.dnd5eapi.co/api"
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -16,8 +18,8 @@ XLSX_REL_NS = {
     "m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
 }
-SEALDICE_DND_SOURCE = "资料源：SeaDice sealdice-builtins DND 查询资料；D&D 系列资料整理者主要为 DicePP 项目组成员。"
-SEALDICE_COC_SOURCE = "资料源：SeaDice sealdice-builtins CoC 魔法大典；整理者：魔骨、NULL、Dr.Amber。"
+SEALDICE_DND_SOURCE = get_output("spell.sealdice_dnd_source")
+SEALDICE_COC_SOURCE = get_output("spell.sealdice_coc_source")
 _SEALDICE_DND_CACHE = None
 _SEALDICE_COC_CACHE = None
 
@@ -468,7 +470,7 @@ def _lookup_sealdice_coc_spell(name: str) -> str | None:
     if key is None:
         return None
     display_key = re.sub(r"^coc\s+", "", key, flags=re.I).strip() or key
-    return f"【COC法术】{display_key}\n{entries[key]}\n{SEALDICE_COC_SOURCE}"
+    return get_output("spell.coc_result", name=display_key, content=entries[key], source=SEALDICE_COC_SOURCE)
 
 
 def _slugify_dnd_name(value: str) -> str:
@@ -479,7 +481,7 @@ def _slugify_dnd_name(value: str) -> str:
 
 def _join_api_values(values) -> str:
     if not values:
-        return "无"
+        return get_output("common.none")
     if isinstance(values, list):
         return "、".join(str(item) for item in values)
     return str(values)
@@ -503,43 +505,43 @@ def _format_dnd_spell(data: dict, slug: str) -> str:
     cn_name = DND_SPELL_CN_NAMES.get(slug)
     title = f"{cn_name} / {data.get('name', slug)}" if cn_name else data.get("name", slug)
     level = data.get("level", 0)
-    level_text = "戏法" if level == 0 else f"{level}环"
-    school = data.get("school", {}).get("name", "未知")
+    level_text = get_output("spell.cantrip_label") if level == 0 else get_output("spell.ring_level", level=level)
+    school = data.get("school", {}).get("name", get_output("common.unknown"))
     components = _join_api_values(data.get("components", []))
     material = data.get("material")
-    concentration = "是" if data.get("concentration") else "否"
-    ritual = "是" if data.get("ritual") else "否"
-    desc = "\n".join(data.get("desc", [])) or "暂无描述。"
+    concentration = get_output("common.yes") if data.get("concentration") else get_output("common.no")
+    ritual = get_output("common.yes") if data.get("ritual") else get_output("common.no")
+    desc = "\n".join(data.get("desc", [])) or get_output("spell.no_description")
     higher_level = "\n".join(data.get("higher_level", []))
 
     lines = [
-        f"【DND法术】{title}",
-        f"等级：{level_text}；学派：{school}",
-        f"施法时间：{data.get('casting_time', '未知')}；距离：{data.get('range', '未知')}",
-        f"成分：{components}；专注：{concentration}；仪式：{ritual}",
-        f"持续时间：{data.get('duration', '未知')}",
+        get_output("spell.dnd_title", title=title),
+        get_output("spell.dnd_level_school", level=level_text, school=school),
+        get_output("spell.dnd_casting_range", casting_time=data.get('casting_time', get_output("common.unknown")), range=data.get('range', get_output("common.unknown"))),
+        get_output("spell.dnd_components", components=components, concentration=concentration, ritual=ritual),
+        get_output("spell.dnd_duration", duration=data.get('duration', get_output("common.unknown"))),
     ]
     if material:
-        lines.append(f"材料：{material}")
-    lines.append(f"效果：{desc}")
+        lines.append(get_output("spell.dnd_material", material=material))
+    lines.append(get_output("spell.dnd_effect", desc=desc))
     if higher_level:
-        lines.append(f"升环：{higher_level}")
-    lines.append("资料源：D&D 5e SRD API（SRD/CC-BY-4.0）；英文描述来自 SRD。")
+        lines.append(get_output("spell.dnd_higher_level", higher_level=higher_level))
+    lines.append(get_output("spell.dnd_api_source"))
     return "\n".join(lines)
 
 
 def _format_local_dnd_spell(slug: str, reason: str = "") -> str:
     spell = DND_LOCAL_SPELLS[slug]
     lines = [
-        f"【DND法术】{spell['name']} / {spell['en_name']}",
-        f"等级：{spell['level']}；学派：{spell['school']}",
-        f"施法时间：{spell['casting_time']}；距离：{spell['range']}",
-        f"成分：{spell['components']}；持续时间：{spell['duration']}",
-        f"效果摘要：{spell['summary']}",
-        "资料源：D&D 5e SRD；当前为插件内置中文摘要。",
+        get_output("spell.dnd_title", title=f"{spell['name']} / {spell['en_name']}"),
+        get_output("spell.dnd_level_school", level=spell['level'], school=spell['school']),
+        get_output("spell.dnd_casting_range", casting_time=spell['casting_time'], range=spell['range']),
+        get_output("spell.dnd_local_components", components=spell['components'], duration=spell['duration']),
+        get_output("spell.dnd_local_summary", summary=spell['summary']),
+        get_output("spell.dnd_local_source"),
     ]
     if reason:
-        lines.append(f"联网查询未使用：{reason}")
+        lines.append(get_output("spell.dnd_network_skipped", reason=reason))
     return "\n".join(lines)
 
 
@@ -551,12 +553,12 @@ def _lookup_dnd_spell(name: str) -> str:
         if exc.code == 404:
             if slug in DND_LOCAL_SPELLS:
                 return _format_local_dnd_spell(slug)
-            return f"没有找到 DND SRD 法术：{name}\n可以试试英文名，如 .查询法术 dnd fireball。"
-        return f"DND 法术查询失败：HTTP {exc.code}"
+            return get_output("spell.dnd_not_found", name=name)
+        return get_output("spell.dnd_http_error", code=exc.code)
     except Exception as exc:
         if slug in DND_LOCAL_SPELLS:
             return _format_local_dnd_spell(slug, str(exc))
-        return f"DND 法术查询失败：{exc}"
+        return get_output("spell.dnd_error", error=str(exc))
     return _format_dnd_spell(data, slug)
 
 

@@ -2,6 +2,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from ..common.output import get_output
+
 
 STANDARD_CHECK_COMMANDS = {"ra", "rc"}
 HIDDEN_CHECK_COMMANDS = {"rah", "rch"}
@@ -65,9 +67,9 @@ def apply_difficulty(skill_value: int, difficulty: Optional[str]) -> int:
 
 def difficulty_label(difficulty: Optional[str]) -> str:
     if difficulty == "hard":
-        return "困难"
+        return get_output("skill_check.difficulty.hard")
     if difficulty == "extreme":
-        return "极难"
+        return get_output("skill_check.difficulty.extreme")
     return ""
 
 

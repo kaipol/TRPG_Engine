@@ -217,14 +217,8 @@ class DicePlugin(Star):
         return None
 
     def _bot_info_text(self, event: AstrMessageEvent) -> str:
-        status = "开启" if self._is_bot_enabled(self._group_id(event)) else "关闭"
-        return (
-            "“呼——！感觉到了吗？是我带来的风哦！”\n"
-            "“我是风铃，今天也请让我陪你一起出发吧！”\n\n"
-            "本骰娘采用Astrbot框架。如有需求请联系骰主(2995186695)\n"
-            "使用.bothelp学习如何使用本骰子。\n"
-            f"当前状态：{status}"
-        )
+        status_key = "bot.status_on" if self._is_bot_enabled(self._group_id(event)) else "bot.status_off"
+        return get_output("bot.info", status=get_output(status_key))
 
     def _get_user_aliases(self, user_id: str) -> dict:
         return self._load_settings("aliases", str(user_id))
@@ -278,7 +272,7 @@ class DicePlugin(Star):
             int_dice_count = int(dice_count)
             int_difficulty = int(difficulty)
         except ValueError:
-            err = get_output("dice.vampire.error", error="非法数值")
+            err = get_output("dice.vampire.error", error=get_output("common.invalid_number"))
             yield event.plain_result(err)
             return
 
@@ -355,7 +349,7 @@ class DicePlugin(Star):
             if user_id == operator_user_id:
                 yield event.plain_result(get_output("pc.show.no_active"))
             else:
-                yield event.plain_result("该玩家尚未在当前群组绑定人物卡哦。")
+                yield event.plain_result(get_output("pc.show.target_no_active"))
             return
 
         chara_data = charmod.load_character(group_id, user_id, chara_id)
@@ -396,10 +390,10 @@ class DicePlugin(Star):
                 num_updates = len(matches)
                 response = get_output("pc.update.batch_success", count=num_updates)
                 if user_id != operator_user_id:
-                    response = f"已代为更新 <{chara_data.get('name', user_id)}>：\n" + response
+                    response = get_output("pc.update.proxy_prefix", name=chara_data.get('name', user_id), content=response)
                 
                 if derived_tips:
-                        response += "\n自动更新: " + ", ".join(derived_tips)
+                        response += "\n" + get_output("pc.update.derived_suffix", tips=", ".join(derived_tips))
                 
                 await self.save_log(group_id=event.get_group_id(), content=response)
                 yield event.plain_result(response)
@@ -489,12 +483,12 @@ class DicePlugin(Star):
 
         response = get_output("pc.update.success", attr=attribute, old=current_value, new=new_value)
         if user_id != operator_user_id:
-            response = f"已代为更新 <{chara_data.get('name', user_id)}>：\n" + response
+            response = get_output("pc.update.proxy_prefix", name=chara_data.get('name', user_id), content=response)
         if roll_detail:
             response += "\n" + roll_detail
             
         if derived_tips:
-            response += "\n自动更新: " + ", ".join(derived_tips)
+            response += "\n" + get_output("pc.update.derived_suffix", tips=", ".join(derived_tips))
 
         await self.save_log(group_id=event.get_group_id(), content=response)
         yield event.plain_result(response)
@@ -528,7 +522,7 @@ class DicePlugin(Star):
             if target_user_id == str(event.get_sender_id()):
                 yield event.plain_result(get_output("pc.show.no_active"))
             else:
-                yield event.plain_result("该玩家尚未在当前群组绑定人物卡哦。")
+                yield event.plain_result(get_output("pc.show.target_no_active"))
             return
 
         chara_data = charmod.load_character(group_id, target_user_id, chara_id)
@@ -538,7 +532,7 @@ class DicePlugin(Star):
         
         chara_attrs = chara_data.get("attributes", {})
         if not chara_attrs:
-            yield event.plain_result(get_output("pc.show.attr_missing", attribute="任何属性"))
+            yield event.plain_result(get_output("pc.show.attr_missing", attribute=get_output("pc.show.attribute_any")))
             return
 
         base_str = args_str.split('@')[0] if '@' in args_str else args_str
@@ -601,7 +595,7 @@ class DicePlugin(Star):
                 header = get_output("pc.show.above_threshold_header", num=threshold)
                 response = header + "\n" + "\n".join(output_parts)
                 if target_user_id != str(event.get_sender_id()):
-                    response = f"【{chara_data['name']}】的属性：\n" + response
+                    response = get_output("pc.show.named_header", name=chara_data["name"], content=response)
                 yield event.plain_result(response)
             return
 
@@ -622,7 +616,7 @@ class DicePlugin(Star):
         
         output_parts = []
         if target_user_id != str(event.get_sender_id()):
-            output_parts.append(f"【{chara_data['name']}】的属性：")
+            output_parts.append(get_output("pc.show.named_title", name=chara_data["name"]))
             
         if found_attrs:
             output_parts.append("\n".join(found_attrs))
@@ -828,7 +822,7 @@ class DicePlugin(Star):
         chara_attrs = chara_data.get("attributes", {})
         
         if not chara_attrs:
-            yield event.plain_result(get_output("pc.show.attr_missing", attribute="任何属性"))
+            yield event.plain_result(get_output("pc.show.attr_missing", attribute=get_output("pc.show.attribute_any")))
             return
 
         # --- 核心逻辑：直接拼接 ---
@@ -842,7 +836,7 @@ class DicePlugin(Star):
 
         # 构建输出文案
         # 建议在 get_output 对应的模板中加入类似 "导出数据为：\n{data}" 的格式
-        response = get_output("pc.export.success", name=chara_data.get('name', '未命名'), data=export_str)
+        response = get_output("pc.export.success", name=chara_data.get('name', get_output("common.unnamed")), data=export_str)
         
         yield event.plain_result(response)
 
@@ -949,11 +943,11 @@ class DicePlugin(Star):
         for i, (name, ch_id) in enumerate(sorted_chars, 1):
             tags = []
             if ch_id == current:
-                tags.append("当前")
+                tags.append(get_output("pc.list.tag_current"))
             if charmod.is_local_binding(group_id, user_id, ch_id):
-                tags.append("隔离")
+                tags.append(get_output("pc.list.tag_local"))
             if charmod.is_global_character(user_id, ch_id):
-                tags.append("全局")
+                tags.append(get_output("pc.list.tag_global"))
             tag = f"({'/'.join(tags)})" if tags else ""
             chara_list.append(f"{i}. {name} {tag}")
             
@@ -970,17 +964,17 @@ class DicePlugin(Star):
         if not identifier:
             # 如果不填，执行解除绑定
             charmod.set_binding_info(user_id, group_id, None)
-            yield event.plain_result("已解除当前群组的角色绑定。")
+            yield event.plain_result(get_output("pc.tag.cleared"))
             return
 
         # 解析名字或序号
         chara_id = charmod.resolve_identifier(group_id, user_id, identifier)
         if not chara_id:
-            yield event.plain_result(f"未找到角色: {identifier}")
+            yield event.plain_result(get_output("pc.tag.not_found", identifier=identifier))
             return
 
         charmod.set_binding_info(user_id, group_id, chara_id)
-        yield event.plain_result(f"已将角色绑定到当前群组。")
+        yield event.plain_result(get_output("pc.tag.success"))
 
     @pc.command("tag")
     async def pc_tag_character(self, event, identifier: str = None):
@@ -1009,7 +1003,7 @@ class DicePlugin(Star):
             new_name = arg1
             chara_id = charmod.get_current_character_id(group_id, user_id)
             if not chara_id:
-                yield event.plain_result("当前群组未绑定角色，请指定要改名的角色。")
+                yield event.plain_result(get_output("pc.rename.no_active"))
                 return
         else:
             # 场景：.pc rename <旧名|序号> <新名字>
@@ -1017,19 +1011,19 @@ class DicePlugin(Star):
             new_name = arg2
             chara_id = charmod.resolve_identifier(group_id, user_id, identifier)
             if not chara_id:
-                yield event.plain_result(f"未找到角色: {identifier}")
+                yield event.plain_result(get_output("pc.tag.not_found", identifier=identifier))
                 return
 
         # 执行重命名
         success, info = charmod.rename_character(group_id, user_id, chara_id, new_name)
 
         if success:
-            response = f"已将角色「{info}」重命名为「{new_name}」。"
+            response = get_output("pc.rename.success", old_name=info, new_name=new_name)
         else:
             if info == "duplicate":
-                response = f"重命名失败：当前群已存在名为「{new_name}」的角色。"
+                response = get_output("pc.rename.duplicate", name=new_name)
             else:
-                response = "重命名失败：角色档案加载异常。"
+                response = get_output("pc.rename.load_fail")
 
         yield event.plain_result(response)
         await self.save_log(group_id=group_id, content=response)
@@ -1044,12 +1038,12 @@ class DicePlugin(Star):
         # 1. 先通过名字或序号解析出 chara_id
         chara_id = charmod.resolve_identifier(group_id, user_id, identifier)
         if not chara_id:
-            yield event.plain_result("未找到该角色。")
+            yield event.plain_result(get_output("pc.delete.not_found"))
             return
             
         # 2. 获取名字用于显示
         data = charmod.load_character(group_id, user_id, chara_id)
-        name = data['name'] if data else "未知"
+        name = data['name'] if data else get_output("common.unknown")
 
         # 3. 执行删除（内部含 bindings 清理）
         success, _ = charmod.delete_character_by_id(group_id, user_id, chara_id)
@@ -1100,7 +1094,7 @@ class DicePlugin(Star):
         
         chara_attrs = chara_data.get("attributes", {})
         if not chara_attrs:
-            yield event.plain_result(get_output("pc.show.attr_missing", attribute="任何属性"))
+            yield event.plain_result(get_output("pc.show.attr_missing", attribute=get_output("pc.show.attribute_any")))
             return
 
         if not args_str:
@@ -1194,9 +1188,9 @@ class DicePlugin(Star):
             logger.info(char)
             time_str = time.strftime("%m-%d %H:%M", time.localtime(char['mtime']))
             # 标记来源（如果是 Vault 则高亮）
-            source_label = "全局" if char.get("global") else f"{char['group_id']}"
+            source_label = get_output("pc.uni.source_global") if char.get("global") else f"{char['group_id']}"
             
-            char_lines.append(f"{i}. {char['name']} (最新来源:{source_label} | {time_str})")
+            char_lines.append(get_output("pc.uni.line", index=i, name=char["name"], source=source_label, time=time_str))
         
         msg = "\n".join(char_lines)
         yield event.plain_result(get_output("pc.uni.success", msg=msg))
@@ -1374,7 +1368,7 @@ class DicePlugin(Star):
             
         # 如果是代投，在名字上做个小标记
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = f"{ret} (由 <{event.get_sender_name()}> 代投)"
+            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         logger.info(ret)
         
@@ -1402,7 +1396,7 @@ class DicePlugin(Star):
         if ret == "":
             ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = f"{ret} (由 <{event.get_sender_name()}> 代投)"
+            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         result_message = dice_mod.roll_attribute_until_success(skill_name, skill_value, str(group_id), ret)
         payloads = {
@@ -1429,7 +1423,7 @@ class DicePlugin(Star):
             ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
             
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = f"{ret} (由 <{event.get_sender_name()}> 代投)"
+            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         result_message = dice_mod.roll_attribute_penalty(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
@@ -1458,7 +1452,7 @@ class DicePlugin(Star):
             ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
             
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = f"{ret} (由 <{event.get_sender_name()}> 代投)"
+            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         result_message = dice_mod.roll_attribute_bonus(roll_times, dice_count, skill_name, skill_value, str(group_id), ret)
 
@@ -1484,12 +1478,12 @@ class DicePlugin(Star):
         if ret == "":
             ret = event.get_sender_name() if actual_user_id == event.get_sender_id() else str(actual_user_id)
         if target_user_id and target_user_id != event.get_sender_id():
-            ret = f"{ret} (由 <{event.get_sender_name()}> 代投)"
+            ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         result_message = dice_mod.roll_attribute(roll_times, skill_name, skill_value, str(group_id), ret)
         await self.save_log(group_id=group_id, content="[Hidden Skill Check]" + result_message)
 
-        yield event.plain_result("进行了一次暗中检定，结果已通过私聊发送。")
+        yield event.plain_result(get_output("skill_check.hidden.sent"))
         await client.api.call_action(
             "send_private_msg",
             user_id=event.get_sender_id(),
@@ -1507,7 +1501,7 @@ class DicePlugin(Star):
         group_id = event.get_group_id()
         spec = parse_versus_check(expr)
         if spec is None:
-            yield event.plain_result("对抗检定格式错误：请使用 .rav技能名a点数/b点数，或 .rav技能名 @对抗者")
+            yield event.plain_result(get_output("versus.error.format"))
             return
 
         at_user_ids = self._get_at_user_ids(event)
@@ -1524,8 +1518,8 @@ class DicePlugin(Star):
 
         if spec.explicit_right:
             right_skill_name, right_value = self._resolve_skill_check(group_id, event.get_sender_id(), spec.skill_name, spec.right_value)
-            left_label = event.get_sender_name() or "发起方"
-            right_label = "对抗方"
+            left_label = event.get_sender_name() or get_output("versus.label.left")
+            right_label = get_output("versus.label.right")
         elif opponent_user_id:
             right_skill_name, right_value = self._resolve_skill_check(group_id, opponent_user_id, spec.skill_name, None)
             left_label = event.get_sender_name() or str(event.get_sender_id())
@@ -1534,18 +1528,18 @@ class DicePlugin(Star):
             except Exception:
                 right_label = str(opponent_user_id)
         else:
-            yield event.plain_result("对抗检定格式错误：请提供 /b点数，或 @一名对抗者。")
+            yield event.plain_result(get_output("versus.error.no_target"))
             return
 
         try:
             left_value = int(left_value)
             right_value = int(right_value)
         except (TypeError, ValueError):
-            yield event.plain_result("对抗检定格式错误：双方都需要可解析的技能值；a点数可省略，b点数或@对抗者不能省略。")
+            yield event.plain_result(get_output("versus.error.invalid_value"))
             return
 
-        left_name = f"<{left_label}> 的【{left_skill_name}】"
-        right_name = f"<{right_label}> 的【{right_skill_name}】"
+        left_name = get_output("versus.participant", name=left_label, skill_name=left_skill_name)
+        right_name = get_output("versus.participant", name=right_label, skill_name=right_skill_name)
         result_message = dice_mod.roll_opposed_check(left_name, left_value, right_name, right_value, str(group_id))
         await self.save_log(group_id=group_id, content=result_message)
         yield event.plain_result(result_message)
@@ -1618,7 +1612,7 @@ class DicePlugin(Star):
             if str(user_id) == operator_user_id:
                 yield event.plain_result(get_output("pc.show.no_active"))
             else:
-                yield event.plain_result("该玩家尚未在当前群组绑定人物卡哦。")
+                yield event.plain_result(get_output("pc.show.target_no_active"))
             return
 
         roll_result, san_value, result_msg, loss, new_san, expr = sanity.san_check(chara_data, loss_formula)
@@ -1713,15 +1707,15 @@ class DicePlugin(Star):
         group_id = event.get_group_id()
         user_name = event.get_sender_name()
         if not instruction:
-            yield event.plain_result("当前先攻列表为：\n" + self.initiative_manager.format_list(group_id))
+            yield event.plain_result(get_output("initiative.list", content=self.initiative_manager.format_list(group_id)))
         elif instruction == "clr":
             self.initiative_manager.clear(group_id)
-            yield event.plain_result("已清空先攻列表")
+            yield event.plain_result(get_output("initiative.clear"))
         elif instruction == "del":
             if not player_name:
                 player_name = user_name
             self.initiative_manager.remove_by_name(group_id, player_name)
-            yield event.plain_result(f"已删除角色{player_name}的先攻")
+            yield event.plain_result(get_output("initiative.remove_name", name=player_name))
 
     # @filter.command("ri")
     async def roll_initiative(self , event: AstrMessageEvent, expr: str = None):
@@ -1734,7 +1728,7 @@ class DicePlugin(Star):
         item = InitiativeItem(player_name, init_value, user_id)
         self.initiative_manager.remove_by_name(group_id, player_name)
         self.initiative_manager.add_item(group_id, item)
-        yield event.plain_result(f"已添加/更新{player_name}的先攻：{init_value}")
+        yield event.plain_result(get_output("initiative.add", name=player_name, value=init_value))
         async for result in self.initiative(event):
             yield result
         return
@@ -1747,11 +1741,16 @@ class DicePlugin(Star):
         current_item = self.initiative_manager.current_turn(group_id)
         next_item = self.initiative_manager.next_turn(group_id)
         if not next_item:
-            yield event.plain_result("先攻列表为空，无法推进回合")
+            yield event.plain_result(get_output("initiative.empty"))
         elif current_item is None:
-            yield event.plain_result(f"{next_item.name}的回合开始(先攻: {next_item.init_value})")
+            yield event.plain_result(get_output("initiative.next_turn", name=next_item.name, value=next_item.init_value))
         else:
-            yield event.plain_result(f"{current_item.name}的回合结束 ->\n {next_item.name}的回合(先攻: {next_item.init_value})")
+            yield event.plain_result(get_output(
+                "initiative.turn_advance",
+                current_name=current_item.name,
+                next_name=next_item.name,
+                value=next_item.init_value,
+            ))
         return
 
     
@@ -1787,10 +1786,15 @@ class DicePlugin(Star):
         yield event.plain_result(get_output("character_list.dnd", characters="\n\n".join(results)))
 
     @filter.command("ob")
-    async def toggle_ob_mode(self, event: AstrMessageEvent):
+    async def toggle_ob_mode(self, event: AstrMessageEvent, action: str = ""):
         if not self._command_enabled(event):
             return
         group = event.message_obj.group_id
+        if action.lower() in {"list", "ls"}:
+            lines = await logger_core.list_observers(group)
+            yield event.plain_result("\n".join(lines))
+            return
+
         user_id = str(event.get_sender_id())
         nickname = event.get_sender_name()
         try:
@@ -1814,6 +1818,8 @@ class DicePlugin(Star):
         parts = event.message_str.strip().split()
         name = parts[2] if len(parts) >= 3 else None
         ok, info = await logger_core.new_session(group, name)
+        ob_lines = await logger_core.list_observers(group)
+        info = "\n".join([info, *ob_lines])
         return event.plain_result(info)
 
 
@@ -1843,6 +1849,8 @@ class DicePlugin(Star):
         parts = event.message_str.strip().split()
         name = parts[2] if len(parts) >= 3 else None
         ok, info = await logger_core.resume_session(group, name)
+        ob_lines = await logger_core.list_observers(group)
+        info = "\n".join([info, *ob_lines])
         return event.plain_result(info)
 
 
@@ -1876,7 +1884,7 @@ class DicePlugin(Star):
         group = event.message_obj.group_id
         parts = event.message_str.strip().split()
         if len(parts) < 3:
-            return event.plain_result("指令错误：请使用 .log get <日志名>")
+            return event.plain_result(get_output("log.get_usage"))
 
         name = parts[2]
         grp = await logger_core.load_group(group)
@@ -1898,11 +1906,11 @@ class DicePlugin(Star):
         group = event.message_obj.group_id
         parts = event.message_str.strip().split()
         if len(parts) < 3:
-            return event.plain_result("指令错误：请使用 .log export <日志名> 或 .log export text <日志名>")
+            return event.plain_result(get_output("log.export_usage"))
 
         if parts[2].lower() in {"text", "txt"}:
             if len(parts) < 4:
-                return event.plain_result("指令错误：请使用 .log export text <日志名>")
+                return event.plain_result(get_output("log.export_text_usage"))
             info = await logger_core.export_session_text(group, parts[3])
             return event.plain_result(info)
 
@@ -1946,7 +1954,7 @@ class DicePlugin(Star):
             return event.plain_result(info)
 
         if action not in {"add", "del", "remove", "rm"}:
-            return event.plain_result("指令错误：请使用 .log ob add/del/list/clear [@用户|QQ号]")
+            return event.plain_result(get_output("log.ob.usage"))
 
         targets = []
         for comp in getattr(event.message_obj, "message", []):
@@ -1957,7 +1965,7 @@ class DicePlugin(Star):
             targets.append(parts[3])
 
         if not targets:
-            return event.plain_result("请指定 OB 用户，例如 .log ob add @某人")
+            return event.plain_result(get_output("log.ob.missing_target"))
 
         enabled = action == "add"
         results = []
@@ -1978,22 +1986,7 @@ class DicePlugin(Star):
     async def help ( self , event: AstrMessageEvent):
         if not self._command_enabled(event):
             return
-        help_text = (
-        "要让风铃带你们跑团吗？那要好好学习怎么跑团呀。"
-        "基础掷骰教程：.dicehelp roll\n"
-        "进阶掷骰表达式：.dicehelp expr\n"
-        "人物卡管理: .dicehelp pc\n"
-        "属性值管理：.dicehelp st\n"
-        "记录管理：.dicehelp log\n"
-        "其余杂项指令：.dicehelp coc\n"
-        
-        "DnD 相关: .dicehelp dnd\n"
-
-        "其他规则\n"
-        "`/rv 骰子数量 难度` - 进行吸血鬼规则掷骰判定\n"
-        )
-
-        yield event.plain_result(help_text)
+        yield event.plain_result(get_output("help.index"))
         
     @command_group("dicehelp")
     async def dicehelp(self, event : AstrMessageEvent) :
@@ -2089,7 +2082,7 @@ class DicePlugin(Star):
         aliases = self._get_user_aliases(user_id)
         aliases[alias_name] = target_name
         self._save_user_aliases(user_id, aliases)
-        yield event.plain_result(f"已记录别名：{alias_name} -> {target_name}")
+        yield event.plain_result(get_output("alias.added", alias=alias_name, target=target_name))
 
     @alias.command("del")
     async def alias_del_cmd(self, event: AstrMessageEvent, alias_name: str):
@@ -2098,11 +2091,11 @@ class DicePlugin(Star):
         user_id = str(event.get_sender_id())
         aliases = self._get_user_aliases(user_id)
         if alias_name not in aliases:
-            yield event.plain_result(f"没有找到别名：{alias_name}")
+            yield event.plain_result(get_output("alias.not_found", alias=alias_name))
             return
         aliases.pop(alias_name, None)
         self._save_user_aliases(user_id, aliases)
-        yield event.plain_result(f"已删除别名：{alias_name}")
+        yield event.plain_result(get_output("alias.deleted", alias=alias_name))
 
     @alias.command("list")
     async def alias_list_cmd(self, event: AstrMessageEvent):
@@ -2110,10 +2103,10 @@ class DicePlugin(Star):
             return
         aliases = self._get_user_aliases(str(event.get_sender_id()))
         if not aliases:
-            yield event.plain_result("还没有设置技能别名。")
+            yield event.plain_result(get_output("alias.empty"))
             return
         lines = [f"{alias_name} -> {target_name}" for alias_name, target_name in sorted(aliases.items())]
-        yield event.plain_result("技能别名：\n" + "\n".join(lines))
+        yield event.plain_result(get_output("alias.list", aliases="\n".join(lines)))
 
     @filter.command("bot")
     async def bot_cmd(self, event: AstrMessageEvent, action: str = None):
@@ -2135,21 +2128,22 @@ class DicePlugin(Star):
         if action == "on":
             settings["enabled"] = True
             self._save_group_settings(group_id, settings)
-            yield event.plain_result("骰子功能已开启。")
+            yield event.plain_result(get_output("bot.enabled"))
             return
 
         if action == "off":
             settings["enabled"] = False
             self._save_group_settings(group_id, settings)
-            yield event.plain_result("骰子功能已关闭。使用 .bot on 可以重新开启。")
+            yield event.plain_result(get_output("bot.disabled"))
             return
 
         if action == "status":
             enabled = self._is_bot_enabled(event.get_group_id())
-            yield event.plain_result("骰子功能当前：" + ("开启" if enabled else "关闭"))
+            status_key = "bot.status_on" if enabled else "bot.status_off"
+            yield event.plain_result(get_output("bot.status", status=get_output(status_key)))
             return
 
-        yield event.plain_result("用法：.bot / .bot on / .bot off / .bot status")
+        yield event.plain_result(get_output("bot.usage"))
 
     @filter.command("setcoc")
     async def setcoc_cmd(self, event: AstrMessageEvent, command: str = " "):
@@ -2304,7 +2298,7 @@ class DicePlugin(Star):
             async for result in self.generate_dnd_character(event, count):
                 yield result
         else:
-            yield event.plain_result("该指令暂不支持私聊。")
+            yield event.plain_result(get_output("private.unsupported"))
 
     async def _record_group_message(self, event: AstrMessageEvent, message: str):
         group_id = event.message_obj.group_id
@@ -2399,7 +2393,7 @@ class DicePlugin(Star):
                     return clean_section
         return None
 
-    def handle_spell_html(self, content: str, spellsource: str) -> SpellFeature:
+    def handle_spell_html(self, content: str, spellsource: str, new_version: bool) -> SpellFeature:
         spellname_match = re.search(r"(<h4>(.*?)</h4>)", content, flags=re.IGNORECASE | re.DOTALL)
         spellname_with_header = spellname_match.group(1)  # 修正：用 group(1) 才能替换掉完整的 <h4>...</h4>
         spellname = spellname_match.group(2)
@@ -2408,10 +2402,20 @@ class DicePlugin(Star):
         spellcontent_multiline = spellcontent.split("<BR>")
 
         # index 0 - spell belonging
-        spellbelonging_match = re.search(r"<em>(.*?)环 (.*?)（(.*)）", spellcontent_multiline[0], flags=re.IGNORECASE | re.DOTALL)
-        spelllevel = spellbelonging_match.group(1) if spellbelonging_match else "未知"
-        spellschool = spellbelonging_match.group(2) if spellbelonging_match else "未知"
-        spellclasses = spellbelonging_match.group(3) if spellbelonging_match else "未知"
+        spellbelonging_match = re.search(r"<em>(.*?) (.*?)（(.*)）", spellcontent_multiline[0], flags=re.IGNORECASE | re.DOTALL)
+        format_check = spellbelonging_match.group(2)
+        if format_check == "戏法":
+            spellschool = spellbelonging_match.group(1)
+            spelllevel = "零"
+        else:
+            spellschool = spellbelonging_match.group(2)
+            spelllevel_withcharacter = spellbelonging_match.group(1)
+            spelllevel_match = re.search(r"(.*?)环", spelllevel_withcharacter, flags=re.IGNORECASE | re.DOTALL)
+            spelllevel = spelllevel_match.group(1)
+
+        spellclasses = spellbelonging_match.group(3)
+        if not new_version:
+            spellclasses = spellclasses.replace("魔契师", "邪术师")
 
         # index 1 - casting time
         castingtime_match = re.search(r"<(b|STRONG)>施法时间：<(/b|/STRONG)>(.*)", spellcontent_multiline[1], flags=re.IGNORECASE | re.DOTALL)
@@ -2441,15 +2445,16 @@ class DicePlugin(Star):
 
     @staticmethod
     def spellfeature_to_html(res: SpellFeature) -> str:
-        reference = "数据来自 DND5E不全书 2026.2.12版"
+        reference = get_output("spell.reference")
+        cantrip_suffix = get_output("spell.cantrip_suffix") if res.spelllevel == get_output("spell.cantrip_level") else ""
         sample_html = f"""
         <H4>{res.spellname}</H4>
-        <em>{res.spelllevel}环 {res.spellschool}学派（{res.spellclasses}）</em>
+        <em>{get_output("spell.level_line", level=res.spelllevel, cantrip_suffix=cantrip_suffix, school=res.spellschool, classes=res.spellclasses)}</em>
         <p>
-        <strong>施法时间：</strong>{res.castingtime}<br>
-        <strong>施法距离：</strong>{res.spellrange}<br>
-        <strong>法术成分：</strong>{res.components}<br>
-        <strong>持续时间：</strong>{res.duration}
+        <strong>{get_output("spell.label.casting_time")}</strong>{res.castingtime}<br>
+        <strong>{get_output("spell.label.range")}</strong>{res.spellrange}<br>
+        <strong>{get_output("spell.label.components")}</strong>{res.components}<br>
+        <strong>{get_output("spell.label.duration")}</strong>{res.duration}
         </p>
         <p>{res.description}</p>
         <p><ref>{reference}</ref><span class="spell-source-bottom">【{res.source}】</span></p>
@@ -2457,7 +2462,7 @@ class DicePlugin(Star):
         return re.sub(r"</?u\b[^>]*>", lambda match: "<strong>" if match.group(0)[1] != "/" else "</strong>", sample_html, flags=re.IGNORECASE)
         
 
-    def search_spell_in_folder(self, spell_name: str) -> SpellFeature:
+    def search_spell_in_folder(self, spell_name: str, new_version: bool) -> SpellFeature:
         """从本地文件夹中搜索法术并返回特征对象"""
         if not os.path.exists(self.json_path):
             print(f"[DND插件错误] 找不到配置文件: {self.json_path}")
@@ -2473,13 +2478,15 @@ class DicePlugin(Star):
                 
             htm_files = list(file_path.glob('*.html')) + list(file_path.glob('*.htm'))
             for htm_file in htm_files:
+                if not new_version and ("玩家手册2024" in str(htm_file) or "费伦英雄" in str(htm_file)):
+                    continue
                 try:
                     with open(htm_file, 'r', encoding='utf-8') as f:
                         content = f.read()
                         
                     extracted_html = self.extract_spell_html(content, spell_name)
                     if extracted_html:
-                        return self.handle_spell_html(extracted_html, ssf_data[folder])
+                        return self.handle_spell_html(extracted_html, ssf_data[folder], new_version)
                 except Exception as e:
                     pass
                     
@@ -2498,6 +2505,56 @@ class DicePlugin(Star):
         td { padding: 5px 10px !important; border-bottom: 1px dashed #e0d8c8; }
         ref { color: #808080; }
         #card-container * { max-width: 100% !important; }
+        div.stat-block {
+            margin: 20px auto;
+            width: 537px;
+            background-color: #fdf1dc;
+            padding: 18px 20px;
+            border: 1px solid #c9ad6a;
+            border-top: 5px solid #7a200d;
+            border-bottom: 5px solid #7a200d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            font-size: 13.5px;
+            box-sizing: border-box;
+        }
+        div.stat-block h5, div.stat-block h6 { color: #7a200d; font-weight: bold; border-bottom: 2px solid #7a200d; padding-bottom: 3px; }
+        div.stat-block h5 { font-size: 150%; margin-top: 0px; margin-bottom: 4px; }
+        div.stat-block h6 { font-size: 115%; margin-top: 15px; margin-bottom: 8px; }
+        div.stat-block .sub-line { color: #6b6b6b; font-style: italic; margin-top: -2px; margin-bottom: 10px; }
+        div.stat-block table { width: 100%; color: #7a200d; border-collapse: collapse; margin-bottom: 12px; }
+        div.stat-block table td { padding: 3px 0; line-height: 1.4; }
+        div.stat-block table strong { color: #7a200d; }
+        table.stat-abilities {
+            text-align: center;
+            margin: 15px 0;
+            white-space: nowrap;
+            table-layout: fixed;
+            border-collapse: collapse !important;
+            border-spacing: 0 !important;
+            width: 100% !important;
+        }
+        table.stat-abilities th, table.stat-abilities td { border: none !important; padding: 5px 0 !important; line-height: 1.2; }
+        table.stat-abilities th { font-size: 11px; color: #8a7a66; font-weight: bold;}
+        table.stat-abilities th:nth-child(1), table.stat-abilities td:nth-child(1),
+        table.stat-abilities th:nth-child(2), table.stat-abilities td:nth-child(2),
+        table.stat-abilities th:nth-child(6), table.stat-abilities td:nth-child(6),
+        table.stat-abilities th:nth-child(7), table.stat-abilities td:nth-child(7),
+        table.stat-abilities th:nth-child(11), table.stat-abilities td:nth-child(11),
+        table.stat-abilities th:nth-child(12), table.stat-abilities td:nth-child(12) { width: 8%; }
+        table.stat-abilities th:nth-child(3), table.stat-abilities td:nth-child(3),
+        table.stat-abilities th:nth-child(4), table.stat-abilities td:nth-child(4),
+        table.stat-abilities th:nth-child(8), table.stat-abilities td:nth-child(8),
+        table.stat-abilities th:nth-child(9), table.stat-abilities td:nth-child(9),
+        table.stat-abilities th:nth-child(13), table.stat-abilities td:nth-child(13),
+        table.stat-abilities th:nth-child(14), table.stat-abilities td:nth-child(14) { width: 7%; }
+        table.stat-abilities th:nth-child(5), table.stat-abilities td:nth-child(5),
+        table.stat-abilities th:nth-child(10), table.stat-abilities td:nth-child(10) { width: 5%; }
+        td.c1 { background-color: #ebdcb9 !important; color: #5c180a !important; }
+        td.c2 { background-color: #d9caa5 !important; color: #5c180a !important; }
+        td.c3 { background-color: #e6d7b5 !important; color: #2e4436 !important; }
+        td.c4 { background-color: #d1c39f !important; color: #2e4436 !important; }
+        div.stat-block p { margin: 6px 0; font-size: 13px; color: #2b2b2b; }
+        div.stat-block p strong { color: #000; }
         """
 
         full_html = f"""
@@ -2526,26 +2583,29 @@ class DicePlugin(Star):
             
             await browser.close()
 
-    @filter.command("查询法术")
-    async def query_spell(self, event: AstrMessageEvent, spell_name: str = ""):
+    @filter.command("find")
+    async def query_spell(self, event: AstrMessageEvent, spell_name: str = "", version_tag: str = ""):
         if not self._command_enabled(event):
             return
         if not spell_name:
             # 纯文本直接用 plain_result 传字符串
-            yield event.plain_result("请提供要查询的法术名称，例如：查询法术 防护善恶")
+            yield event.plain_result(get_output("spell.usage"))
             return
 
         # 提示正在搜索（传入纯字符串）
-        yield event.plain_result(f"正在翻阅法术书查找“{spell_name}”...")
+        new_version = True
+        if version_tag == "旧版" or version_tag == "5e" or version_tag == "2014":
+            new_version = False
+        yield event.plain_result(get_output("spell.searching", spell_name=spell_name))
         
         try:
-            res = self.search_spell_in_folder(spell_name)
+            res = self.search_spell_in_folder(spell_name, new_version)
         except Exception as e:
-            yield event.plain_result(f"解析法术文本时出现问题: {str(e)}")
+            yield event.plain_result(get_output("spell.parse_error", error=str(e)))
             return
 
         if not res:
-            yield event.plain_result(f"法术书里没找到关于“{spell_name}”的记载哦。")
+            yield event.plain_result(get_output("spell.not_found", spell_name=spell_name))
             return
 
         html_content = self.spellfeature_to_html(res)
@@ -2556,7 +2616,7 @@ class DicePlugin(Star):
             await self.render_html_to_image(html_content, temp_image_path)
             yield event.chain_result([Image.fromFileSystem(temp_image_path)])
         except Exception as e:
-            yield event.plain_result(f"施法失败 (渲染报错): {str(e)}")
+            yield event.plain_result(get_output("spell.render_error", error=str(e)))
         finally:
             if os.path.exists(temp_image_path):
                 try:

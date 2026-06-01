@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from ..common.output import get_output
+
 
 @dataclass
 class InitiativeItem:
@@ -81,7 +83,7 @@ class InitiativeManager:
         group_id = str(group_id)
         self._ensure_group(group_id)
         if not self._items[group_id]:
-            return "先攻列表为空"
+            return get_output("initiative.empty")
 
         lines = []
         for i, item in enumerate(self._items[group_id]):

@@ -34,7 +34,7 @@
 > 增加 .sn coc/.sn cocL/.sn none/.sn off 等群名片模式，并整理角色卡群名片生成逻辑。
 > 增加 .cocN/.dndN 这类无空格角色生成写法，并限制一次生成数量为 1~10。
 > 增加 .log stat、.log export，以及 .log ob add/del/list/clear 的 OB 管理功能。
-> 增加 .ob 快捷指令，用户可以快速切换自己在当前日志中的 OB 状态。
+> 增加 .ob 快捷指令，用户可以快速切换自己在当前群的全局 OB 状态。
 > 日志导出增强：记录骰点、图片、OB 标记，JSON 导出可被 log-painter 识别，文本导出会标记 OB 发言。
 > log-painter 前端完成构建修复，加入共享过滤逻辑、隐藏 OB 开关、插件 JSON 加载器、预览构建器、角色列表/侧栏/编辑区组件拆分。
 > log-painter 增加 Word 导出整理、角色颜色 key 辅助、测试样例和手动验收清单，构建流程已恢复可通过。

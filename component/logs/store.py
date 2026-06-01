@@ -15,6 +15,7 @@ class JSONLoggerCore:
     def __init__(self, base_dir: str = f"{PLUGIN_DIR}/../data/group_logs/"):
         self.base_dir = base_dir
         self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.group_observers: Dict[str, Dict[str, str]] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
 
     async def initialize(self):
@@ -28,6 +29,9 @@ class JSONLoggerCore:
 
     def _get_session_path(self, group_id: str, session_name: str) -> str:
         return os.path.join(self._get_group_dir(group_id), f"{session_name}.json")
+
+    def _get_observers_path(self, group_id: str) -> str:
+        return os.path.join(self._get_group_dir(group_id), "observers.json")
 
     def _get_lock(self, group_id: str) -> asyncio.Lock:
         return self.locks.setdefault(group_id, asyncio.Lock())
@@ -86,6 +90,41 @@ class JSONLoggerCore:
 
         self.sessions[group_id] = grp
         return grp
+
+    async def load_group_observers(self, group_id: str) -> Dict[str, str]:
+        group_id = str(group_id)
+        if group_id in self.group_observers:
+            return self.group_observers[group_id]
+
+        path = self._get_observers_path(group_id)
+        observers: Dict[str, str] = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    observers = {str(k): str(v) for k, v in data.items()}
+            except Exception:
+                observers = {}
+
+        self.group_observers[group_id] = observers
+        return observers
+
+    async def persist_group_observers(self, group_id: str):
+        group_id = str(group_id)
+        lock = self._get_lock(group_id)
+        async with lock:
+            grp_dir = self._get_group_dir(group_id)
+            os.makedirs(grp_dir, exist_ok=True)
+            path = self._get_observers_path(group_id)
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.group_observers.get(group_id, {}), f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except Exception:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
 
     async def persist_group(self, group_id: str):
         lock = self._get_lock(group_id)
@@ -179,9 +218,10 @@ class JSONLoggerCore:
         # Remove CQ image tags from the stored text body.
         text_clean = re.sub(r'\[CQ:image,[^\]]*\]', '', text).strip()
 
-        observers = sec.setdefault("observers", {})
+        global_observers = await self.load_group_observers(group_id)
+        session_observers = sec.setdefault("observers", {})
         user_id = str(user_id)
-        is_observer = bool(observers.get(user_id)) and not isDice
+        is_observer = bool(global_observers.get(user_id) or session_observers.get(user_id)) and not isDice
 
         sec.setdefault("messages", []).append({
             "timestamp": timestamp,
@@ -211,16 +251,11 @@ class JSONLoggerCore:
         return True, get_output("log.new_session", session_name=name)
 
     async def list_observers(self, group_id: str, name: Optional[str] = None) -> List[str]:
-        grp = await self.load_group(group_id)
-        session_name, sec = self._select_session(grp, name)
-        if not sec:
-            return ["当前没有可用日志。"]
-
-        observers = sec.setdefault("observers", {})
+        observers = await self.load_group_observers(group_id)
         if not observers:
-            return [f"日志 {session_name} 当前没有 OB。"]
+            return [get_output("log.ob.empty")]
 
-        lines = [f"日志 {session_name} 的 OB 列表："]
+        lines = [get_output("log.ob.header")]
         for user_id, nickname in observers.items():
             label = f"{nickname}({user_id})" if nickname else str(user_id)
             lines.append(f"- {label}")
@@ -234,23 +269,18 @@ class JSONLoggerCore:
         name: Optional[str] = None,
         enabled: bool = True,
     ) -> Tuple[bool, str]:
-        grp = await self.load_group(group_id)
-        session_name, sec = self._select_session(grp, name)
-        if not sec:
-            return False, "当前没有可用日志。"
-
-        observers = sec.setdefault("observers", {})
+        observers = await self.load_group_observers(group_id)
         user_id = str(user_id)
         if enabled:
             observers[user_id] = nickname or user_id
-            await self.persist_group(group_id)
-            return True, f"已将 {observers[user_id]} 标记为日志 {session_name} 的 OB。"
+            await self.persist_group_observers(group_id)
+            return True, get_output("log.ob.added", nickname=observers[user_id])
 
         if user_id not in observers:
-            return False, f"{user_id} 不在日志 {session_name} 的 OB 列表中。"
+            return False, get_output("log.ob.not_found", user_id=user_id)
         label = observers.pop(user_id)
-        await self.persist_group(group_id)
-        return True, f"已将 {label} 从日志 {session_name} 的 OB 列表移除。"
+        await self.persist_group_observers(group_id)
+        return True, get_output("log.ob.removed", nickname=label)
 
     async def toggle_observer(
         self,
@@ -259,31 +289,21 @@ class JSONLoggerCore:
         nickname: str = "",
         name: Optional[str] = None,
     ) -> Tuple[bool, str]:
-        grp = await self.load_group(group_id)
-        session_name, sec = self._select_session(grp, name)
-        if not sec:
-            return False, "当前没有可用日志。"
-
-        observers = sec.setdefault("observers", {})
+        observers = await self.load_group_observers(group_id)
         user_id = str(user_id)
         if user_id in observers:
             label = observers.pop(user_id)
-            await self.persist_group(group_id)
-            return True, f"已退出日志 {session_name} 的 OB 模式：{label}。"
+            await self.persist_group_observers(group_id)
+            return True, get_output("log.ob.toggle_off", nickname=label)
 
         observers[user_id] = nickname or user_id
-        await self.persist_group(group_id)
-        return True, f"已进入日志 {session_name} 的 OB 模式：{observers[user_id]}。"
+        await self.persist_group_observers(group_id)
+        return True, get_output("log.ob.toggle_on", nickname=observers[user_id])
 
     async def clear_observers(self, group_id: str, name: Optional[str] = None) -> Tuple[bool, str]:
-        grp = await self.load_group(group_id)
-        session_name, sec = self._select_session(grp, name)
-        if not sec:
-            return False, "当前没有可用日志。"
-
-        sec["observers"] = {}
-        await self.persist_group(group_id)
-        return True, f"已清空日志 {session_name} 的 OB 列表。"
+        self.group_observers[str(group_id)] = {}
+        await self.persist_group_observers(group_id)
+        return True, get_output("log.ob.clear")
 
     async def resume_session(self, group_id: str, name: Optional[str] = None) -> Tuple[bool,str]:
         grp = await self.load_group(group_id)
@@ -349,7 +369,7 @@ class JSONLoggerCore:
             lines = []
             name = "746573746c6f67"
             st = "0"
-            status = "已结束"
+            status = get_output("log.status_finished")
             lines.append(get_output("log.session_line", session_name=name, start_time=st, status=status, message_count=-222))
             return lines
         
@@ -357,7 +377,7 @@ class JSONLoggerCore:
         lines = []
         for name, sec in grp.items():
             st = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(sec.get("start_time", 0)))
-            status = "已结束" if sec.get("finished") else ("进行中" if sec.get("end_time") is None else "已暂停")
+            status = get_output("log.status_finished") if sec.get("finished") else (get_output("log.status_active") if sec.get("end_time") is None else get_output("log.status_paused"))
             lines.append(get_output("log.session_line", session_name=name, start_time=st, status=status, message_count=len(sec.get("messages", []))))
         return lines or [get_output("log.no_sessions")]
 
@@ -445,9 +465,9 @@ class JSONLoggerCore:
             text = m.get("text", "")
             lines.append(f"[{time_str}] {nickname}: {text}")
             for image_url in m.get("images", []):
-                lines.append(f"[图片] {image_url}")
+                lines.append(get_output("log.text_export.image_line", image_url=image_url))
 
         with open(file_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-        return f"导出成功：{file_name}"
+        return get_output("log.text_export.success", file_name=file_name)

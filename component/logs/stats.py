@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..common.output import get_output
+
 
 SessionMap = Dict[str, Dict[str, Any]]
 SessionEntry = Tuple[str, Dict[str, Any]]
@@ -36,9 +38,14 @@ def format_session_stats(session_name: str, session: Dict[str, Any]) -> str:
     dice_count = sum(1 for m in messages if m.get("isDice"))
     observer_count = sum(1 for m in messages if m.get("isObserver"))
     image_count = sum(len(m.get("images", [])) for m in messages)
-    return (
-        f"{session_name}: 消息 {len(messages)} 条 | 参与者 {len(users)} 人 | "
-        f"骰点 {dice_count} 条 | OB消息 {observer_count} 条 | 图片 {image_count} 张"
+    return get_output(
+        "log.stat.line",
+        session_name=session_name,
+        message_count=len(messages),
+        user_count=len(users),
+        dice_count=dice_count,
+        observer_count=observer_count,
+        image_count=image_count,
     )
 
 

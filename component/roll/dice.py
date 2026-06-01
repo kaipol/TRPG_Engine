@@ -41,7 +41,7 @@ def _format_number(value):
 def _roll_dice_term(expr, bonus_dice=0, penalty_dice=0):
     match = re.fullmatch(r"(\d*)d(\d+)(k-?\d+)?(v(\d+)?)?", expr, re.IGNORECASE)
     if not match:
-        return None, f"⚠️ 格式错误 `{expr}`", False
+        return None, get_output("dice.expression.format_error", expr=expr), False
 
     dice_count = int(match.group(1)) if match.group(1) else 1
     dice_faces = int(match.group(2))
@@ -49,7 +49,7 @@ def _roll_dice_term(expr, bonus_dice=0, penalty_dice=0):
     vampire_difficulty = (int(match.group(5)) if match.group(5) and match.group(5).strip() != "v" else 6) if match.group(4) else None
 
     if not (1 <= dice_count <= 100 and 1 <= dice_faces <= 1000):
-        return None, "⚠️ 骰子个数 1-100，面数 1-1000，否则非法！", False
+        return None, get_output("dice.expression.range_error"), False
 
     if dice_count == 1 and dice_faces == 100 and (bonus_dice > 0 or penalty_dice > 0):
         unit = random.randint(0, 9)
@@ -93,7 +93,7 @@ def _roll_dice_term(expr, bonus_dice=0, penalty_dice=0):
     keep_lowest = keep_count < 0
     keep_amount = abs(keep_count)
     if keep_amount < 1 or keep_amount > dice_count:
-        return None, f"⚠️ 保留骰数量必须在 1-{dice_count} 之间！", False
+        return None, get_output("dice.expression.keep_error", dice_count=dice_count), False
 
     sorted_rolls = sorted(rolls, reverse=not keep_lowest)
     selected_rolls = sorted_rolls[:keep_amount]
@@ -139,7 +139,7 @@ def _tokenize_dice_expression(expression, bonus_dice=0, penalty_dice=0):
             i += len(number_text)
             continue
 
-        return None, f"⚠️ 格式错误 `{expression[i:]}`"
+        return None, get_output("dice.expression.format_error", expr=expression[i:])
 
     return tokens, None
 
@@ -163,9 +163,9 @@ class _DiceExpressionParser:
         if is_vampire_roll and len(self.tokens) == 1:
             return None, detail, True, None
         if is_vampire_roll:
-            return None, None, False, "⚠️ 吸血鬼骰不能参与四则运算。"
+            return None, None, False, get_output("dice.expression.vampire_arithmetic_error")
         if self.current() is not None:
-            return None, None, False, f"⚠️ 格式错误 `{self.current()[2]}`"
+            return None, None, False, get_output("dice.expression.format_error", expr=self.current()[2])
         return value, detail, False, None
 
     def parse_expression(self):
@@ -216,7 +216,7 @@ class _DiceExpressionParser:
             self.consume()
             return token[1], token[2], token[0] == "VAMPIRE"
 
-        raise ValueError(f"格式错误 `{token[2]}`")
+        raise ValueError(get_output("dice.expression.format_error", expr=token[2]))
 
 def parse_dice_expression(expression):
     """
@@ -255,9 +255,9 @@ def parse_dice_expression(expression):
         try:
             total, detail, is_vampire_roll, error = _DiceExpressionParser(tokens).parse()
         except ZeroDivisionError:
-            return None, "⚠️ 除数不能为 0！"
+            return None, get_output("dice.expression.zero_division")
         except ValueError as exc:
-            return None, f"⚠️ {exc}"
+            return None, get_output("dice.expression.value_error", error=str(exc))
 
         if error:
             return None, error
@@ -424,19 +424,20 @@ def roll_attribute_until_success(skill_name, skill_value, group_id, name, max_at
             first_results.append(f"{attempts}. {roll_result}/{skill_value} {result}")
 
         if get_success_rank(roll_result, skill_value, str(group_id)) >= 2:
-            lines = [
-                f"{name} 的【{skill_name}】连续检定直到成功：",
-                f"第 {attempts} 次成功。",
-                "前10次结果：",
-                "\n".join(first_results),
-            ]
-            return "\n".join(lines)
+            return get_output(
+                "skill_check.until_success.success",
+                name=name,
+                skill_name=skill_name,
+                attempts=attempts,
+                results="\n".join(first_results),
+            )
 
-    return (
-        f"{name} 的【{skill_name}】连续检定直到成功：\n"
-        f"已达到 {max_attempts} 次上限，仍未成功。\n"
-        "前10次结果：\n"
-        + "\n".join(first_results)
+    return get_output(
+        "skill_check.until_success.failure",
+        name=name,
+        skill_name=skill_name,
+        max_attempts=max_attempts,
+        results="\n".join(first_results),
     )
 
 def handle_roll_dice(expression: str, user_id: str = None, name : str = None, remark = None):
@@ -529,7 +530,7 @@ def roll_opposed_check(left_name: str, left_value: int, right_name: str, right_v
     right_result = get_roll_result(right_roll, right_value, group_id)
 
     if left_rank <= 1 and right_rank <= 1:
-        winner = "双方均失败，无胜者"
+        winner = get_output("versus.no_winner")
     elif left_rank > right_rank:
         winner = left_name
     elif right_rank > left_rank:
@@ -539,14 +540,19 @@ def roll_opposed_check(left_name: str, left_value: int, right_name: str, right_v
     elif right_value > left_value:
         winner = right_name
     else:
-        winner = "平局"
+        winner = get_output("versus.tie")
 
-    return (
-        "来，让我听听这一次风会偏向哪一边。\n"
-        "对抗检定结果：\n"
-        f"{left_name}：{left_roll}/{left_value} —— {left_result}\n"
-        f"{right_name}：{right_roll}/{right_value} —— {right_result}\n"
-        f"嗯……我听清楚了，这次是：{winner}"
+    return get_output(
+        "versus.result",
+        left_name=left_name,
+        left_roll=left_roll,
+        left_value=left_value,
+        left_result=left_result,
+        right_name=right_name,
+        right_roll=right_roll,
+        right_value=right_value,
+        right_result=right_result,
+        winner=winner,
     )
 
 def fireball(ring: int = 3):
@@ -602,10 +608,10 @@ def parse_choice_options(raw_options: str):
 def choose_option(raw_options: str) -> str:
     options = parse_choice_options(raw_options)
     if len(options) < 2:
-        return "选择项不足：请使用 .choose 选项A 选项B，或用 /、|、逗号分隔。"
+        return get_output("choice.not_enough")
 
     choice = random.choice(options)
-    return f"我选：{choice}"
+    return get_output("choice.result", choice=choice)
 
 
 def handle_pistol_fire(full_args: str, name: str, chara_data: dict = None) -> str:
@@ -614,27 +620,27 @@ def handle_pistol_fire(full_args: str, name: str, chara_data: dict = None) -> st
     """
     # 1. 解析模式与惩罚规律
     penalty_pattern = [0, 0, 0]
-    mode_label = "常规连射"
+    mode_label = get_output("skill_check.pistol_check.mode_regular")
     if 'p2' in full_args:
         penalty_pattern = [0, 1, 2]
-        mode_label = "后坐力递增"
+        mode_label = get_output("skill_check.pistol_check.mode_recoil")
     else :
         penalty_pattern = [1, 1, 1]
-        mode_label = "精度下降"
+        mode_label = get_output("skill_check.pistol_check.mode_accuracy")
 
     # 2. 确定技能值与名称
     skill_val_match = re.search(r'(?<!p)(\d{2,3})', full_args)
     if skill_val_match:
         skill_value = int(skill_val_match.group(1))
-        skill_name = "手枪(指定)"
+        skill_name = get_output("skill_check.pistol_check.skill_specified")
     elif chara_data:
         attrs = chara_data.get("attributes", {})
         # 依次查找：手枪、射击(手枪)、射击
         skill_value = attrs.get("手枪", attrs.get("射击(手枪)", attrs.get("射击", 20)))
-        skill_name = "手枪"
+        skill_name = get_output("skill_check.pistol_check.skill_handgun")
     else:
         skill_value = 20
-        skill_name = "手枪"
+        skill_name = get_output("skill_check.pistol_check.skill_handgun")
 
     # 3. 生成头部 (Head)
     head_str = get_output(
