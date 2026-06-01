@@ -1,6 +1,6 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import type { CharItem, PreviewFilters, RoleType } from '../logManager/types'
-import { parseLogText, pluginExportToLogText, renameLogSpeaker } from '../logManager/parse'
+import type { CharItem, LogItem, PreviewFilters, RoleType } from '../logManager/types'
+import { parseLogText, pluginExportToItems, pluginExportToLogText, renameLogSpeaker } from '../logManager/parse'
 import { deriveRoles } from '../logManager/roles/deriveRoles'
 import { rebuildColorMap, roleKeyOf } from '../logManager/roles/colorKey'
 import { buildPreviewItems } from '../logManager/preview/buildPreviewItems'
@@ -13,6 +13,8 @@ export function useLogPainter() {
   const text = ref(SAMPLE_TEXT)
   const sourceFile = ref('')
   const loadStatus = ref('')
+  const importedItems = ref<LogItem[] | null>(null)
+  const importedText = ref('')
   const roles = ref<CharItem[]>([])
   const filters = reactive<PreviewFilters>({
     hideImages: false,
@@ -29,7 +31,9 @@ export function useLogPainter() {
     exportColors: true
   })
 
-  const items = computed(() => parseLogText(text.value))
+  const items = computed(() =>
+    importedItems.value && text.value === importedText.value ? importedItems.value : parseLogText(text.value)
+  )
   const colorMap = computed(() => rebuildColorMap(roles.value))
   const previewItems = computed(() => buildPreviewItems(items.value, roles.value, filters))
 
@@ -117,12 +121,16 @@ export function useLogPainter() {
   }
 
   function clearText() {
+    importedItems.value = null
+    importedText.value = ''
     text.value = ''
   }
 
   function loadSample() {
     sourceFile.value = ''
     loadStatus.value = ''
+    importedItems.value = null
+    importedText.value = ''
     text.value = SAMPLE_TEXT
   }
 
@@ -146,10 +154,12 @@ export function useLogPainter() {
       }
 
       const data = await response.json()
-      const importedText = pluginExportToLogText(data)
-      text.value = importedText
+      importedItems.value = pluginExportToItems(data)
+      const renderedText = pluginExportToLogText(data)
+      text.value = renderedText
+      importedText.value = renderedText
       filters.exportTitle = safeName.replace(/\.json$/i, '')
-      loadStatus.value = importedText ? `已加载 ${safeName}` : `已加载空日志 ${safeName}`
+      loadStatus.value = renderedText ? `已加载 ${safeName}` : `已加载空日志 ${safeName}`
     } catch (error) {
       loadStatus.value = `加载失败：${error instanceof Error ? error.message : '未知错误'}`
     }

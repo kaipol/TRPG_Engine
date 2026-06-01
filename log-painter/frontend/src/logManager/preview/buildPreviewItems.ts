@@ -6,7 +6,7 @@ export function applyFilters(items: LogItem[], filters: PreviewFilters, roles: C
     const role = findRole(item, roles)
     const roleType = role?.role
     if (roleType === '隐藏') return false
-    if (filters.hideObservers && (item.isObserver || roleType === 'OB')) return false
+    if (filters.hideObservers && (item.isObserver || item.sourceIsObserver || roleType === 'OB')) return false
     if (filters.hideOffTopic && item.isComment) return false
     if (filters.roleKey && roleKeyOf(item) !== filters.roleKey) return false
     const query = filters.query.trim().toLowerCase()

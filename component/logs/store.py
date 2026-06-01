@@ -195,7 +195,8 @@ class JSONLoggerCore:
         return images
 
     async def add_message(self, group_id: str, user_id: str, nickname: str, timestamp: int,
-                      text: str, components: Optional[List[Any]] = None, isDice: bool = False) -> Tuple[bool,str]:
+                      text: str, components: Optional[List[Any]] = None, isDice: bool = False,
+                      source_user_id: Optional[str] = None, source_nickname: str = "") -> Tuple[bool,str]:
         grp = await self.load_group(group_id)
         active_names = [n for n, s in grp.items() if (s.get("end_time") is None and not s.get("finished", False))]
         if not active_names:
@@ -222,8 +223,12 @@ class JSONLoggerCore:
         session_observers = sec.setdefault("observers", {})
         user_id = str(user_id)
         is_observer = bool(global_observers.get(user_id) or session_observers.get(user_id)) and not isDice
+        source_is_observer = False
+        if source_user_id:
+            source_user_id = str(source_user_id)
+            source_is_observer = bool(global_observers.get(source_user_id) or session_observers.get(source_user_id))
 
-        sec.setdefault("messages", []).append({
+        item = {
             "timestamp": timestamp,
             "user_id": user_id,
             "nickname": nickname,
@@ -232,7 +237,13 @@ class JSONLoggerCore:
             "isDice": isDice,
             "isObserver": is_observer,
             "observer": is_observer
-        })
+        }
+        if isDice and source_user_id:
+            item["sourceUserId"] = source_user_id
+            item["sourceNickname"] = source_nickname or source_user_id
+            item["sourceIsObserver"] = source_is_observer
+
+        sec.setdefault("messages", []).append(item)
 
         await self.persist_group(group_id)
         return True, get_output("log.message_added")
@@ -429,6 +440,10 @@ class JSONLoggerCore:
                 "isObserver": bool(m.get("isObserver", False)),
                 "observer": bool(m.get("observer", False))
             }
+            if item["isDice"]:
+                item["sourceUserId"] = m.get("sourceUserId", "")
+                item["sourceNickname"] = m.get("sourceNickname", "")
+                item["sourceIsObserver"] = bool(m.get("sourceIsObserver", False))
             if item["isObserver"]:
                 item["role"] = "OB"
             export_data["items"].append(item)

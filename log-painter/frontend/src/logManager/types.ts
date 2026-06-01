@@ -9,6 +9,7 @@ export interface LogItem {
   isRaw?: boolean
   isDice?: boolean
   isObserver?: boolean
+  sourceIsObserver?: boolean
   isComment?: boolean
   is_comment?: boolean
   index?: number

@@ -12,6 +12,8 @@ interface PluginExportItem {
   isDice?: unknown
   isObserver?: unknown
   observer?: unknown
+  sourceIsObserver?: unknown
+  source_is_observer?: unknown
   role?: unknown
 }
 
@@ -211,11 +213,14 @@ function markdownImage(url: string) {
 }
 
 export function pluginExportToLogText(payload: PluginExportPayload) {
+  return serializeLogItems(pluginExportToItems(payload))
+}
+
+export function pluginExportToItems(payload: PluginExportPayload): LogItem[] {
   const items = Array.isArray(payload?.items) ? payload.items as PluginExportItem[] : []
   const validHeaderId = /^(\d{5,}|Bot|OB|Observer)$/u
-
   return items
-    .map((item, index) => {
+    .map((item, index): LogItem => {
       const rawName = String(item.nickname || '').trim()
       const rawId = String(item.IMUserId ?? item.user_id ?? 'unknown').trim()
       const isObserver = Boolean(item.isObserver || item.observer || item.role === 'OB')
@@ -223,10 +228,22 @@ export function pluginExportToLogText(payload: PluginExportPayload) {
       const id = validHeaderId.test(rawId) ? rawId : String(10000 + index)
       const message = String(item.message ?? item.text ?? '').trimEnd()
       const images = normalizeImages(item.images)
-      const body = [message, ...images.map(markdownImage)].filter(Boolean).join('\n')
-      return `${name}(${id}) ${normalizeExportTime(item.time ?? item.timestamp)}\n${body || ' '}`
+      const [date, time] = normalizeExportTime(item.time ?? item.timestamp).split(' ')
+      return {
+        id: `${index}`,
+        index,
+        nickname: name,
+        IMUserId: id,
+        date: date.replaceAll('/', '-'),
+        time,
+        message,
+        images,
+        isDice: Boolean(item.isDice),
+        isObserver,
+        sourceIsObserver: Boolean(item.sourceIsObserver || item.source_is_observer),
+        isComment: isOffTopic(message)
+      }
     })
-    .join('\n\n')
 }
 
 export function serializeLogItems(items: LogItem[]) {
@@ -236,7 +253,8 @@ export function serializeLogItems(items: LogItem[]) {
       const id = item.IMUserId || 'unknown'
       const date = item.date?.replaceAll('-', '/') || '0000/00/00'
       const time = item.time || '00:00:00'
-      return `${item.nickname}(${id}) ${date} ${time}\n${item.message}`
+      const body = [item.message, ...(item.images || []).map(markdownImage)].filter(Boolean).join('\n')
+      return `${item.nickname}(${id}) ${date} ${time}\n${body || ' '}`
     })
     .join('\n\n')
 }

@@ -100,9 +100,11 @@ class DicePlugin(Star):
 
         super().__init__(context)
 
-    async def save_log(self, group_id, content) :
+    async def save_log(self, group_id, content, event: AstrMessageEvent = None) :
         if not group_id:
             return
+        source_user_id = event.get_sender_id() if event else None
+        source_nickname = event.get_sender_name() if event else ""
 
         ok, info = await logger_core.add_message(
             group_id=group_id,
@@ -110,7 +112,9 @@ class DicePlugin(Star):
             nickname="风铃Velinithra",
             timestamp=int(time.time()),
             text=content,
-            isDice = True
+            isDice=True,
+            source_user_id=source_user_id,
+            source_nickname=source_nickname
         )
 
     def _event_context_id(self, event: AstrMessageEvent) -> str:
@@ -258,7 +262,7 @@ class DicePlugin(Star):
             ]
         }
         
-        await self.save_log(group_id = event.get_group_id(), content = result_text)
+        await self.save_log(group_id = event.get_group_id(), content = result_text, event=event)
         
         await client.api.call_action("send_group_msg", **payloads)
 
@@ -296,7 +300,7 @@ class DicePlugin(Star):
             ]
         }
 
-        await self.save_log(group_id = event.get_group_id(), content = text)
+        await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         
         await client.api.call_action("send_group_msg", **payloads)
             
@@ -324,7 +328,7 @@ class DicePlugin(Star):
             ]
         }
         
-        await self.save_log(group_id = event.get_group_id(), content = "[Private Roll Result]" + private_text)
+        await self.save_log(group_id = event.get_group_id(), content = "[Private Roll Result]" + private_text, event=event)
         
         await client.api.call_action("send_private_msg", **payloads)
 
@@ -395,7 +399,7 @@ class DicePlugin(Star):
                 if derived_tips:
                         response += "\n" + get_output("pc.update.derived_suffix", tips=", ".join(derived_tips))
                 
-                await self.save_log(group_id=event.get_group_id(), content=response)
+                await self.save_log(group_id=event.get_group_id(), content=response, event=event)
                 yield event.plain_result(response)
                 return # --- 多重更新结束 ---
 
@@ -490,7 +494,7 @@ class DicePlugin(Star):
         if derived_tips:
             response += "\n" + get_output("pc.update.derived_suffix", tips=", ".join(derived_tips))
 
-        await self.save_log(group_id=event.get_group_id(), content=response)
+        await self.save_log(group_id=event.get_group_id(), content=response, event=event)
         yield event.plain_result(response)
 
     @command_group("st")
@@ -729,7 +733,7 @@ class DicePlugin(Star):
         # --- 保存并响应 ---
         if deleted_groups_primary:
             charmod.save_character(group_id, user_id, chara_id, chara_data)
-            await self.save_log(group_id=event.get_group_id(), content=response)
+            await self.save_log(group_id=event.get_group_id(), content=response, event=event)
             
         yield event.plain_result(response)
 
@@ -785,7 +789,7 @@ class DicePlugin(Star):
         # 统一: pc. -> st. (参数 'count' 保持不变，因为它不是属性列表)
         response = get_output("st.clr.success", name=ret)
         
-        await self.save_log(group_id=event.get_group_id(), content=response)
+        await self.save_log(group_id=event.get_group_id(), content=response, event=event)
         yield event.plain_result(response)
         
     @st.command("export")
@@ -872,7 +876,7 @@ class DicePlugin(Star):
         }
         
         # 4. 日志与发送
-        await self.save_log(group_id=group_id, content=result_text)
+        await self.save_log(group_id=group_id, content=result_text, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
     @command_group("pc") # type: ignore
@@ -904,7 +908,7 @@ class DicePlugin(Star):
         
         response = get_output("pc.create.success", name=name, id=chara_id)
         yield event.plain_result(response)
-        await self.save_log(group_id=group_id, content=response)
+        await self.save_log(group_id=group_id, content=response, event=event)
 
     @pc.command("new")
     async def pc_new_character(self, event, name: str):
@@ -1026,7 +1030,7 @@ class DicePlugin(Star):
                 response = get_output("pc.rename.load_fail")
 
         yield event.plain_result(response)
-        await self.save_log(group_id=group_id, content=response)
+        await self.save_log(group_id=group_id, content=response, event=event)
 
     # ----------------- pc delete (删除并解绑) -----------------
     async def _pc_delete_character_impl(self, event, identifier: str):
@@ -1383,7 +1387,7 @@ class DicePlugin(Star):
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
-        await self.save_log(group_id = event.get_group_id(), content = result_message)
+        await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
     async def roll_attribute_until_success(self, event: AstrMessageEvent, skill_name: str = "", skill_value: str = None, target_user_id: str = None):
@@ -1407,7 +1411,7 @@ class DicePlugin(Star):
                 {"type": "text", "data": {"text": "\n" + result_message}}
             ]
         }
-        await self.save_log(group_id=group_id, content=result_message)
+        await self.save_log(group_id=group_id, content=result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
     # 惩罚骰技能判定
@@ -1436,7 +1440,7 @@ class DicePlugin(Star):
             ]
         }
 
-        await self.save_log(group_id = event.get_group_id(), content = result_message)
+        await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
     # 奖励骰技能判定
@@ -1465,7 +1469,7 @@ class DicePlugin(Star):
             ]
         }
 
-        await self.save_log(group_id = event.get_group_id(), content = result_message)
+        await self.save_log(group_id = event.get_group_id(), content = result_message, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
     async def roll_attribute_hidden(self, event: AstrMessageEvent, skill_name: str = "", skill_value: str = None, roll_times = 1, target_user_id: str = None):
@@ -1481,7 +1485,7 @@ class DicePlugin(Star):
             ret = get_output("skill_check.proxy_name", name=ret, operator=event.get_sender_name())
 
         result_message = dice_mod.roll_attribute(roll_times, skill_name, skill_value, str(group_id), ret)
-        await self.save_log(group_id=group_id, content="[Hidden Skill Check]" + result_message)
+        await self.save_log(group_id=group_id, content="[Hidden Skill Check]" + result_message, event=event)
 
         yield event.plain_result(get_output("skill_check.hidden.sent"))
         await client.api.call_action(
@@ -1541,7 +1545,7 @@ class DicePlugin(Star):
         left_name = get_output("versus.participant", name=left_label, skill_name=left_skill_name)
         right_name = get_output("versus.participant", name=right_label, skill_name=right_skill_name)
         result_message = dice_mod.roll_opposed_check(left_name, left_value, right_name, right_value, str(group_id))
-        await self.save_log(group_id=group_id, content=result_message)
+        await self.save_log(group_id=group_id, content=result_message, event=event)
         yield event.plain_result(result_message)
 
         
@@ -1593,7 +1597,7 @@ class DicePlugin(Star):
             ]
         }
 
-        await self.save_log(group_id = event.get_group_id(), content = result_str)
+        await self.save_log(group_id = event.get_group_id(), content = result_str, event=event)
         await client.api.call_action("send_group_msg", **payloads)
 
 
@@ -1679,7 +1683,7 @@ class DicePlugin(Star):
             ]
         }
         
-        await self.save_log(group_id = event.get_group_id(), content = text)
+        await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         
         await client.api.call_action("send_group_msg", **payloads)
 
@@ -1688,7 +1692,7 @@ class DicePlugin(Star):
         """临时疯狂"""
         result = sanity.get_temporary_insanity(sanity.phobias, sanity.manias)
         text = get_output("san.temporary_insanity", result=result, name=event.get_sender_name())
-        await self.save_log(group_id = event.get_group_id(), content = text)
+        await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         yield event.plain_result(text)
 
 
@@ -1696,7 +1700,7 @@ class DicePlugin(Star):
         """长期疯狂"""
         result = sanity.get_long_term_insanity(sanity.phobias, sanity.manias)
         text = get_output("san.long_term_insanity", result=result, name=event.get_sender_name())
-        await self.save_log(group_id = event.get_group_id(), content = text)
+        await self.save_log(group_id = event.get_group_id(), content = text, event=event)
         yield event.plain_result(text)
 
 
