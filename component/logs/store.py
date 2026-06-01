@@ -195,7 +195,8 @@ class JSONLoggerCore:
         return images
 
     async def add_message(self, group_id: str, user_id: str, nickname: str, timestamp: int,
-                      text: str, components: Optional[List[Any]] = None, isDice: bool = False) -> Tuple[bool,str]:
+                      text: str, components: Optional[List[Any]] = None, isDice: bool = False,
+                      message_id: Optional[str] = None) -> Tuple[bool,str]:
         grp = await self.load_group(group_id)
         active_names = [n for n, s in grp.items() if (s.get("end_time") is None and not s.get("finished", False))]
         if not active_names:
@@ -223,7 +224,7 @@ class JSONLoggerCore:
         user_id = str(user_id)
         is_observer = bool(global_observers.get(user_id) or session_observers.get(user_id)) and not isDice
 
-        sec.setdefault("messages", []).append({
+        item = {
             "timestamp": timestamp,
             "user_id": user_id,
             "nickname": nickname,
@@ -232,7 +233,11 @@ class JSONLoggerCore:
             "isDice": isDice,
             "isObserver": is_observer,
             "observer": is_observer
-        })
+        }
+        if message_id:
+            item["message_id"] = str(message_id)
+
+        sec.setdefault("messages", []).append(item)
 
         await self.persist_group(group_id)
         return True, get_output("log.message_added")
@@ -406,6 +411,41 @@ class JSONLoggerCore:
         del grp[name]
         await self.persist_group(group_id)
         return True, get_output("log.session_deleted", session_name=name)
+
+    async def delete_dice_messages(
+        self,
+        group_id: str,
+        count: int = 1,
+        name: Optional[str] = None,
+        all_flag: bool = False,
+    ) -> Tuple[bool, str]:
+        grp = await self.load_group(group_id)
+        session_name, sec = self._select_session(grp, name)
+        if not sec:
+            if name:
+                return False, get_output("log.session_not_found", session_name=name)
+            return False, get_output("log.no_sessions")
+
+        messages = sec.setdefault("messages", [])
+        if all_flag:
+            before = len(messages)
+            sec["messages"] = [m for m in messages if not m.get("isDice")]
+            deleted = before - len(sec["messages"])
+        else:
+            count = max(1, int(count or 1))
+            deleted = 0
+            for index in range(len(messages) - 1, -1, -1):
+                if messages[index].get("isDice"):
+                    del messages[index]
+                    deleted += 1
+                    if deleted >= count:
+                        break
+
+        if deleted <= 0:
+            return False, get_output("log.dice_delete.none", session_name=session_name)
+
+        await self.persist_group(group_id)
+        return True, get_output("log.dice_delete.success", count=deleted, session_name=session_name)
 
     async def export_session(self, group_id: str, sec: dict, name: str) -> str:
 

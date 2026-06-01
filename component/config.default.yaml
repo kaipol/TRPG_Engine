@@ -403,6 +403,9 @@ output:
     get_usage: "日志指令结果"
     export_usage: "日志指令结果"
     export_text_usage: "日志指令结果"
+    dice_delete:
+      success: "骰子记录删除结果 {count} {session_name}"
+      none: "骰子记录删除结果 {session_name}"
     status_finished: "已结束"
     status_active: "进行中"
     status_paused: "已暂停"
