@@ -287,27 +287,25 @@ output:
   # ---------- 掷骰 ----------
   dice:
     normal:
-      success: |
-        掷骰结果
-      success_remark : |
-        掷骰结果
-      error: "掷骰结果 {error}"
+      success: "掷骰结果 {result}"
+      success_remark : "掷骰结果(备注{remark}) {result}"
+      error: "掷骰错误 {error}"
     vampire:
       success: "掷骰结果 {name} {result}"
-      error: "掷骰结果 {error}"
+      error: "掷骰错误 {error}"
     hidden:
       success: "暗骰结果 {result}"
-      error: "掷骰结果 {error}"
+      error: "暗骰错误 {error}"
       group: "掷骰结果"
     detail: "掷骰结果 {detail}"
     expression_error: "掷骰结果 {error}"
     expression:
-      format_error: "掷骰结果 {expr}"
-      range_error: "掷骰结果"
-      keep_error: "掷骰结果 {dice_count}"
-      vampire_arithmetic_error: "掷骰结果"
-      zero_division: "掷骰结果"
-      value_error: "掷骰结果 {error}"
+      format_error: "表达式格式错误：{expr}"
+      range_error: "骰子范围无效（数量 1-100，面数 1-1000）"
+      keep_error: "保留骰数量超出范围（骰子数量：{dice_count}）"
+      vampire_arithmetic_error: "吸血鬼骰不可参与四则运算"
+      zero_division: "除数不能为 0"
+      value_error: "表达式解析失败：{error}"
 
   choice:
     not_enough: "随机选择结果"

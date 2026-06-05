@@ -155,6 +155,29 @@
 
 如需完整指令说明，请运行插件内置的帮助命令 `.dicehelp` 或查看源码中的命令实现部分。
 
+### 掷骰输出（单行）
+
+- `.r 1d10`：`掷骰结果 [7] = 7`（数值仅示例）
+- `3#1d6`：`掷骰结果 [2] = 2 ; [6] = 6 ; [4] = 4`
+- 带备注：`掷骰结果(备注xxx) [..] = ..`
+- 暗骰私聊：`暗骰结果 [..] = ..`
+
+### 最小自检（可运行）
+
+在仓库根目录执行：
+
+```bash
+python - <<'PY'
+from component.roll.dice import handle_roll_dice, roll_hidden
+
+print(handle_roll_dice("1d10", name="tester"))
+print(handle_roll_dice("3#1d6", name="tester"))
+print(handle_roll_dice("1d10", name="tester", remark="备注xxx"))
+print(roll_hidden("3#1d6"))
+print(handle_roll_dice("1d0", name="tester"))  # 错误输入
+PY
+```
+
 ---
 
 ## 仓库
