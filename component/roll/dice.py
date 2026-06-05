@@ -38,6 +38,10 @@ def _format_number(value):
         return str(int(value))
     return str(round(value, 2)) if isinstance(value, float) else str(value)
 
+def _to_single_line(text: str) -> str:
+    """将多行掷骰明细压缩为单行，换行使用 ` ; ` 分隔。"""
+    return re.sub(r"\s*[\r\n]+\s*", " ; ", str(text)).strip()
+
 def _roll_dice_term(expr, bonus_dice=0, penalty_dice=0):
     match = re.fullmatch(r"(\d*)d(\d+)(k-?\d+)?(v(\d+)?)?", expr, re.IGNORECASE)
     if not match:
@@ -448,11 +452,11 @@ def handle_roll_dice(expression: str, user_id: str = None, name : str = None, re
     total, result_message = parse_dice_expression(expression)
     if total is None:
         return get_output("dice.normal.error", error=result_message)
+    result_message = _to_single_line(result_message)
+    if not remark:
+        return get_output("dice.normal.success", result=result_message, total=total, name=name)
     else:
-        if not remark :
-            return get_output("dice.normal.success", result=result_message, total=total, name = name)
-        else :
-            return get_output("dice.normal.success_remark", result=result_message, total=total, name = name, remark = remark)
+        return get_output("dice.normal.success_remark", result=result_message, total=total, name=name, remark=remark)
 
 def roll_dice_vampire(dice_count: int, difficulty: int):
     """
@@ -471,7 +475,7 @@ def roll_hidden(message: str = None):
     if total is None:
         return get_output("dice.hidden.error", error=result_message)
     else:
-        return get_output("dice.hidden.success", result=result_message)
+        return get_output("dice.hidden.success", result=_to_single_line(result_message))
 
 def get_roll_result(roll_result: int, skill_value: int, group: str):
     """
