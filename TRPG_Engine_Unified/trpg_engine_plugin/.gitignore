@@ -35,15 +35,3 @@ plan/
 tests/
 log-painter/frontend/test-fixtures/
 temp_*.png
-
-# --- 6. 统一 Web 应用运行时 ---
-.omx/
-**/.venv/
-**/venv/
-**/env/
-**/.env
-**/*.py[cod]
-TRPG_Engine_Unified/uploads/
-TRPG_Engine_Unified/Z.R.I.C.log*
-TRPG_Engine_Unified/.multiplayer-server.*.log
-TRPG_Engine_Unified/.unified-server.*.log

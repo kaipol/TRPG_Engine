@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 环境
+.env
+persona_mode.json
+.venv/
+venv/
+env/
+
+# 数据库
+rpg_game.db
+rpg_game.db-wal
+rpg_game.db-shm
+
+# 日志
+Z.R.I.C.log
+Z.R.I.C.log.*
+.multiplayer-server.*.log
+
+# 存档（用户数据）；示例剧本除外
+campaigns/*
+!campaigns/盘步山规则怪谈/
+!campaigns/苏黎世恋曲/
+!campaigns/空白剧本/
+!campaigns/光与夜/
+!campaigns/利马特 - 禁忌之河/
+
+# 做好了
+done/
+
+# 战报
+battle_report/
+
+# 多人房间上传资源
+uploads/
+
+# 备份 / 草稿文件
+*副本*
+*（test）*
+
+# 工作日志
+工作日志/
+
+# ZRIC 根目录下可能生成的前端草稿；不影响 trpg_engine_plugin/log-painter/frontend 源码
+/frontend/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

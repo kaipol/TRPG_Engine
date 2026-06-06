@@ -1,0 +1,1139 @@
+"""
+Z.R.I.C multiplayer fusion module.
+
+This module turns the existing single-table console into a room-based web
+surface while reusing the TRPG_Engine dice parser and ZRIC AI/RAG primitives.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import secrets
+import sqlite3
+import sys
+import time
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import fastapi
+from fastapi import APIRouter, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+try:
+    from logger import get_logger
+except Exception:  # pragma: no cover - import fallback for direct tooling
+    import logging
+
+    def get_logger(name: str):
+        return logging.getLogger(name)
+
+
+_log = get_logger("multiplayer")
+multiplayer_router = APIRouter(tags=["多人联机"])
+
+APP_ROOT = Path(__file__).resolve().parent
+_TRPG_ROOT_CANDIDATES = [
+    APP_ROOT,
+    APP_ROOT / "trpg_engine_plugin",
+    APP_ROOT.parent,
+]
+TRPG_ROOT = next(
+    (path for path in _TRPG_ROOT_CANDIDATES if (path / "component" / "roll" / "dice.py").exists()),
+    APP_ROOT.parent,
+)
+if str(TRPG_ROOT) not in sys.path:
+    sys.path.insert(0, str(TRPG_ROOT))
+
+try:
+    from component.roll.dice import get_roll_result, parse_dice_expression
+except Exception as exc:  # pragma: no cover - surfaced by /health and tests
+    _log.warning("TRPG dice module unavailable: %s", exc)
+    get_roll_result = None
+    parse_dice_expression = None
+
+
+_db_file = ""
+_deepseek_client = None
+_append_to_memory = None
+_chunk_text = None
+_get_embeddings = None
+_refresh_vector_cache = None
+_assets_dir = Path(__file__).resolve().parent / "uploads" / "multiplayer"
+
+_ws_clients_by_room: dict[int, set[WebSocket]] = {}
+_ws_meta: dict[WebSocket, dict[str, Any]] = {}
+
+
+def configure_multiplayer(
+    db_file: str,
+    deepseek_client=None,
+    fn_append_to_memory=None,
+    fn_chunk_text=None,
+    fn_get_embeddings=None,
+    fn_refresh_vector_cache=None,
+):
+    """Inject runtime dependencies from main.py."""
+    global _db_file, _deepseek_client, _append_to_memory
+    global _chunk_text, _get_embeddings, _refresh_vector_cache
+    _db_file = db_file
+    _deepseek_client = deepseek_client
+    _append_to_memory = fn_append_to_memory
+    _chunk_text = fn_chunk_text
+    _get_embeddings = fn_get_embeddings
+    _refresh_vector_cache = fn_refresh_vector_cache
+    _assets_dir.mkdir(parents=True, exist_ok=True)
+
+
+def get_db_connection():
+    if not _db_file:
+        raise RuntimeError("multiplayer module is not configured")
+    conn = sqlite3.connect(_db_file, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+@contextmanager
+def safe_db():
+    conn = get_db_connection()
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_multiplayer_tables():
+    """Create room/chat/VTT integration tables. Idempotent."""
+    with safe_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_rooms (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                code               TEXT NOT NULL UNIQUE,
+                name               TEXT NOT NULL,
+                gm_name            TEXT NOT NULL DEFAULT '',
+                campaign_path      TEXT NOT NULL DEFAULT '',
+                current_scene_id   INTEGER,
+                current_room_id    INTEGER,
+                map_background_url TEXT NOT NULL DEFAULT '',
+                settings           TEXT NOT NULL DEFAULT '{}',
+                created_at         TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at         TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_members (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id      INTEGER NOT NULL,
+                player_id    TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                role         TEXT NOT NULL DEFAULT 'player',
+                color        TEXT NOT NULL DEFAULT '#7dd3fc',
+                connected    INTEGER NOT NULL DEFAULT 0,
+                last_seen    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(room_id, player_id),
+                FOREIGN KEY(room_id) REFERENCES multiplayer_rooms(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id     INTEGER NOT NULL,
+                sender_id   TEXT NOT NULL DEFAULT '',
+                sender_name TEXT NOT NULL DEFAULT '',
+                kind        TEXT NOT NULL DEFAULT 'chat',
+                content     TEXT NOT NULL DEFAULT '',
+                payload     TEXT NOT NULL DEFAULT '{}',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY(room_id) REFERENCES multiplayer_rooms(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_tokens (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id             INTEGER NOT NULL,
+                token_id            TEXT NOT NULL,
+                name                TEXT NOT NULL DEFAULT 'Token',
+                kind                TEXT NOT NULL DEFAULT 'pc',
+                owner_id            TEXT NOT NULL DEFAULT '',
+                avatar_url          TEXT NOT NULL DEFAULT '',
+                color               TEXT NOT NULL DEFAULT '#f59e0b',
+                x                   REAL NOT NULL DEFAULT 120,
+                y                   REAL NOT NULL DEFAULT 120,
+                size                REAL NOT NULL DEFAULT 48,
+                linked_room_id      INTEGER,
+                linked_entity_id    INTEGER,
+                linked_character_id INTEGER,
+                notes               TEXT NOT NULL DEFAULT '',
+                updated_at          TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(room_id, token_id),
+                FOREIGN KEY(room_id) REFERENCES multiplayer_rooms(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_room_documents (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id    INTEGER NOT NULL,
+                rag_doc_id INTEGER,
+                title      TEXT NOT NULL DEFAULT '',
+                source     TEXT NOT NULL DEFAULT '',
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY(room_id) REFERENCES multiplayer_rooms(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_messages_room ON multiplayer_messages(room_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_tokens_room ON multiplayer_tokens(room_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_docs_room ON multiplayer_room_documents(room_id)")
+        for sql in (
+            "ALTER TABLE multiplayer_rooms ADD COLUMN current_scene_id INTEGER",
+            "ALTER TABLE multiplayer_rooms ADD COLUMN current_room_id INTEGER",
+            "ALTER TABLE multiplayer_rooms ADD COLUMN map_background_url TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
+
+
+class RoomCreateRequest(BaseModel):
+    name: str = Field(default="新的跑团房间", max_length=80)
+    gm_name: str = Field(default="GM", max_length=40)
+    campaign_path: str = Field(default="", max_length=240)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class RoomPatchRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    current_scene_id: int | None = None
+    current_room_id: int | None = None
+    settings: dict[str, Any] | None = None
+
+
+class JoinRoomRequest(BaseModel):
+    player_id: str = Field(default="", max_length=80)
+    display_name: str = Field(default="玩家", max_length=40)
+    role: str = Field(default="player", max_length=20)
+    color: str = Field(default="", max_length=20)
+
+
+class MessageCreateRequest(BaseModel):
+    sender_id: str = Field(default="", max_length=80)
+    sender_name: str = Field(default="玩家", max_length=40)
+    kind: str = Field(default="chat", max_length=20)
+    content: str = Field(default="", max_length=4000)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DiceRollRequest(BaseModel):
+    expression: str = Field(default="1d100", max_length=120)
+    actor_id: str = Field(default="", max_length=80)
+    actor_name: str = Field(default="玩家", max_length=40)
+    reason: str = Field(default="", max_length=200)
+    skill_name: str = Field(default="", max_length=80)
+    skill_value: int | None = Field(default=None, ge=0, le=999)
+    target_number: int | None = Field(default=None, ge=-9999, le=9999)
+    ask_ai: bool = False
+    context: str = Field(default="", max_length=1200)
+
+
+class TokenUpsertRequest(BaseModel):
+    token_id: str = Field(default="", max_length=80)
+    name: str = Field(default="Token", max_length=80)
+    kind: str = Field(default="pc", max_length=20)
+    owner_id: str = Field(default="", max_length=80)
+    avatar_url: str = Field(default="", max_length=500)
+    color: str = Field(default="#f59e0b", max_length=20)
+    x: float = 120
+    y: float = 120
+    size: float = Field(default=48, ge=20, le=160)
+    linked_room_id: int | None = None
+    linked_entity_id: int | None = None
+    linked_character_id: int | None = None
+    notes: str = Field(default="", max_length=1000)
+
+
+class TokenMoveRequest(BaseModel):
+    token_id: str = Field(max_length=80)
+    x: float
+    y: float
+    linked_room_id: int | None = None
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _load_json(text: str, fallback):
+    try:
+        return json.loads(text) if text else fallback
+    except Exception:
+        return fallback
+
+
+def _dump_json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _room_code() -> str:
+    return secrets.token_hex(3).upper()
+
+
+def _room_by_code(conn, room_code: str):
+    row = conn.execute(
+        "SELECT * FROM multiplayer_rooms WHERE UPPER(code)=UPPER(?)",
+        (room_code.strip(),),
+    ).fetchone()
+    if not row:
+        raise fastapi.HTTPException(status_code=404, detail="房间不存在")
+    return row
+
+
+def _serialize_room(row) -> dict[str, Any]:
+    data = dict(row)
+    data["settings"] = _load_json(data.get("settings", "{}"), {})
+    return data
+
+
+def _serialize_message(row) -> dict[str, Any]:
+    data = dict(row)
+    data["payload"] = _load_json(data.get("payload", "{}"), {})
+    return data
+
+
+def _serialize_token(row) -> dict[str, Any]:
+    return dict(row)
+
+
+def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
+    room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
+    if not room:
+        raise fastapi.HTTPException(status_code=404, detail="房间不存在")
+    members = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM multiplayer_members WHERE room_id=? ORDER BY role, display_name",
+            (room_id,),
+        ).fetchall()
+    ]
+    messages = [
+        _serialize_message(r)
+        for r in conn.execute(
+            """
+            SELECT * FROM multiplayer_messages
+            WHERE room_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (room_id, message_limit),
+        ).fetchall()
+    ]
+    messages.reverse()
+    tokens = [
+        _serialize_token(r)
+        for r in conn.execute(
+            "SELECT * FROM multiplayer_tokens WHERE room_id=? ORDER BY kind, name",
+            (room_id,),
+        ).fetchall()
+    ]
+    docs = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM multiplayer_room_documents WHERE room_id=? ORDER BY id DESC",
+            (room_id,),
+        ).fetchall()
+    ]
+    return {
+        "type": "snapshot",
+        "room": _serialize_room(room),
+        "members": members,
+        "messages": messages,
+        "tokens": tokens,
+        "documents": docs,
+    }
+
+
+def _save_message(
+    conn,
+    room_id: int,
+    sender_id: str,
+    sender_name: str,
+    kind: str,
+    content: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cur = conn.execute(
+        """
+        INSERT INTO multiplayer_messages
+        (room_id, sender_id, sender_name, kind, content, payload)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            room_id,
+            (sender_id or "")[:80],
+            (sender_name or "")[:40],
+            (kind or "chat")[:20],
+            (content or "")[:4000],
+            _dump_json(payload or {}),
+        ),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM multiplayer_messages WHERE id=?", (cur.lastrowid,)).fetchone()
+    return _serialize_message(row)
+
+
+def _remember_room_event(conn, room_code: str, text: str):
+    if not _append_to_memory:
+        return
+    try:
+        _append_to_memory(conn, f"[多人房间 {room_code}] {text}")
+    except Exception as exc:
+        _log.debug("room memory append skipped: %s", exc)
+
+
+async def _broadcast(room_id: int, event: dict[str, Any]):
+    dead: set[WebSocket] = set()
+    for ws in list(_ws_clients_by_room.get(room_id, set())):
+        try:
+            await ws.send_json(event)
+        except Exception:
+            dead.add(ws)
+    for ws in dead:
+        _ws_clients_by_room.get(room_id, set()).discard(ws)
+        _ws_meta.pop(ws, None)
+
+
+def _ensure_member(conn, room_id: int, req: JoinRoomRequest) -> dict[str, Any]:
+    player_id = (req.player_id or secrets.token_hex(8))[:80]
+    color = req.color or _pick_color(player_id)
+    conn.execute(
+        """
+        INSERT INTO multiplayer_members
+        (room_id, player_id, display_name, role, color, connected, last_seen)
+        VALUES (?,?,?,?,?,1,?)
+        ON CONFLICT(room_id, player_id) DO UPDATE SET
+            display_name=excluded.display_name,
+            role=excluded.role,
+            color=excluded.color,
+            connected=1,
+            last_seen=excluded.last_seen
+        """,
+        (room_id, player_id, req.display_name[:40], req.role[:20], color[:20], _now()),
+    )
+    conn.commit()
+    return dict(
+        conn.execute(
+            "SELECT * FROM multiplayer_members WHERE room_id=? AND player_id=?",
+            (room_id, player_id),
+        ).fetchone()
+    )
+
+
+def _pick_color(seed: str) -> str:
+    palette = ["#7dd3fc", "#f59e0b", "#a7f3d0", "#fda4af", "#c4b5fd", "#fde68a", "#93c5fd"]
+    return palette[sum(ord(ch) for ch in seed or "player") % len(palette)]
+
+
+def _normalize_dice_expression(raw: str) -> str:
+    text = (raw or "").strip()
+    text = re.sub(r"^[./!！。]\s*", "", text)
+    if text.lower().startswith("r "):
+        text = text[1:].strip()
+    elif text.lower().startswith("roll "):
+        text = text[4:].strip()
+    elif text.lower().startswith("r") and re.match(r"^r\d", text, re.I):
+        text = text[1:].strip()
+    return text or "1d100"
+
+
+def _single_line(text: str) -> str:
+    return re.sub(r"\s*[\r\n]+\s*", " ; ", str(text or "")).strip()
+
+
+def _roll_structured(req: DiceRollRequest, room_code: str) -> dict[str, Any]:
+    if not parse_dice_expression:
+        raise fastapi.HTTPException(status_code=500, detail="TRPG 骰子模块不可用")
+    expression = _normalize_dice_expression(req.expression)
+    total, detail = parse_dice_expression(expression)
+    if total is None:
+        raise fastapi.HTTPException(status_code=400, detail=f"骰子表达式错误：{detail}")
+
+    numeric_total = int(total) if isinstance(total, (int, float)) and float(total).is_integer() else total
+    outcome = ""
+    rank = None
+    if req.skill_value is not None and isinstance(numeric_total, int) and get_roll_result:
+        outcome = get_roll_result(int(numeric_total), int(req.skill_value), room_code)
+        rank = _coc_rank_label(outcome)
+    elif req.target_number is not None and isinstance(numeric_total, (int, float)):
+        outcome = "成功" if numeric_total >= req.target_number else "失败"
+        rank = "success" if numeric_total >= req.target_number else "failure"
+
+    reason = req.reason.strip()
+    actor = req.actor_name.strip() or "玩家"
+    skill = req.skill_name.strip()
+    summary_bits = [f"{actor} 掷骰 {expression}", f"结果 {numeric_total}"]
+    if skill:
+        summary_bits.append(f"检定 {skill}")
+    if req.skill_value is not None:
+        summary_bits.append(f"目标 {req.skill_value}")
+    if req.target_number is not None:
+        summary_bits.append(f"DC {req.target_number}")
+    if outcome:
+        summary_bits.append(outcome)
+    if reason:
+        summary_bits.append(f"原因：{reason}")
+
+    return {
+        "expression": expression,
+        "total": numeric_total,
+        "detail": _single_line(detail),
+        "actor_id": req.actor_id,
+        "actor_name": actor,
+        "reason": reason,
+        "skill_name": skill,
+        "skill_value": req.skill_value,
+        "target_number": req.target_number,
+        "outcome": outcome,
+        "rank": rank,
+        "summary": " | ".join(str(x) for x in summary_bits if x),
+        "created_at": _now(),
+    }
+
+
+def _coc_rank_label(text: str) -> str:
+    if "大成功" in text:
+        return "critical_success"
+    if "极难" in text:
+        return "extreme_success"
+    if "困难" in text:
+        return "hard_success"
+    if "成功" in text and "大成功" not in text:
+        return "success"
+    if "大失败" in text:
+        return "fumble"
+    return "failure"
+
+
+def _deterministic_dice_feedback(room_name: str, roll: dict[str, Any]) -> str:
+    outcome = roll.get("outcome") or "等待主持人裁定"
+    reason = f"（{roll['reason']}）" if roll.get("reason") else ""
+    if roll.get("skill_name"):
+        return (
+            f"{roll['actor_name']}进行{roll['skill_name']}检定{reason}，"
+            f"骰点为 {roll['total']}，判定：{outcome}。"
+        )
+    return f"{roll['actor_name']}在「{room_name}」掷出 {roll['expression']} = {roll['total']}。{outcome}"
+
+
+def _ai_dice_feedback(room_name: str, roll: dict[str, Any], context: str) -> str:
+    if not _deepseek_client or not os.environ.get("DEEPSEEK_API_KEY"):
+        return _deterministic_dice_feedback(room_name, roll)
+    prompt = (
+        "你是多人联机 TRPG 的 AI-KP。请根据骰点生成 1-2 句短叙事反馈，"
+        "承认骰点和成败，不要改写规则结果，不要继续替玩家行动。"
+    )
+    user = {
+        "room": room_name,
+        "roll": roll,
+        "context": (context or "")[:1200],
+    }
+    try:
+        resp = _deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+            ],
+            temperature=0.55,
+            max_tokens=220,
+        )
+        return (resp.choices[0].message.content or "").strip() or _deterministic_dice_feedback(room_name, roll)
+    except Exception as exc:
+        _log.warning("AI dice feedback failed: %s", exc)
+        return _deterministic_dice_feedback(room_name, roll)
+
+
+async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
+    roll = _roll_structured(req, room["code"])
+    dice_msg = _save_message(
+        conn,
+        room["id"],
+        roll["actor_id"],
+        roll["actor_name"],
+        "dice",
+        roll["summary"],
+        roll,
+    )
+    feedback = _ai_dice_feedback(room["name"], roll, req.context) if req.ask_ai else _deterministic_dice_feedback(room["name"], roll)
+    ai_msg = _save_message(
+        conn,
+        room["id"],
+        "ai-kp",
+        "AI-KP",
+        "ai",
+        feedback,
+        {"source": "dice", "roll": roll},
+    )
+    _remember_room_event(conn, room["code"], f"{roll['summary']}；AI反馈：{feedback}")
+    await _broadcast(room["id"], {"type": "message.created", "message": dice_msg})
+    await _broadcast(room["id"], {"type": "message.created", "message": ai_msg})
+    return {"status": "success", "roll": roll, "message": dice_msg, "ai_message": ai_msg}
+
+
+def _safe_asset_path(asset_path: str) -> Path:
+    root = _assets_dir.resolve()
+    target = (root / asset_path).resolve()
+    if not str(target).startswith(str(root)):
+        raise fastapi.HTTPException(status_code=403, detail="禁止访问")
+    return target
+
+
+async def _extract_upload_text(file: UploadFile) -> tuple[str, str]:
+    filename = file.filename or "scenario.txt"
+    raw = await file.read()
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        try:
+            import pypdf
+        except ImportError as exc:
+            raise fastapi.HTTPException(status_code=500, detail="PDF 解析需要安装 pypdf") from exc
+        try:
+            import io
+
+            reader = pypdf.PdfReader(io.BytesIO(raw))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception as exc:
+            raise fastapi.HTTPException(status_code=400, detail=f"PDF 解析失败：{exc}") from exc
+    elif suffix in {".txt", ".md", ".markdown", ""}:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("gbk")
+            except Exception as exc:
+                raise fastapi.HTTPException(status_code=400, detail="文件编码无法识别") from exc
+    else:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持 TXT、Markdown、PDF 剧本")
+    text = text.strip()
+    if not text:
+        raise fastapi.HTTPException(status_code=400, detail="文件内容为空")
+    return filename, text
+
+
+@multiplayer_router.get("/api/multiplayer/health")
+def multiplayer_health():
+    return {
+        "status": "success",
+        "dice_available": bool(parse_dice_expression),
+        "db_configured": bool(_db_file),
+    }
+
+
+@multiplayer_router.get("/api/multiplayer/rooms")
+def list_rooms():
+    with safe_db() as conn:
+        rooms = [
+            _serialize_room(r)
+            for r in conn.execute("SELECT * FROM multiplayer_rooms ORDER BY updated_at DESC, id DESC").fetchall()
+        ]
+    return {"status": "success", "rooms": rooms}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms")
+def create_room(req: RoomCreateRequest):
+    with safe_db() as conn:
+        code = _room_code()
+        while conn.execute("SELECT id FROM multiplayer_rooms WHERE code=?", (code,)).fetchone():
+            code = _room_code()
+        cur = conn.execute(
+            """
+            INSERT INTO multiplayer_rooms (code, name, gm_name, campaign_path, settings)
+            VALUES (?,?,?,?,?)
+            """,
+            (code, req.name[:80], req.gm_name[:40], req.campaign_path[:240], _dump_json(req.settings)),
+        )
+        room_id = cur.lastrowid
+        conn.commit()
+        return {"status": "success", **_snapshot(conn, room_id)}
+
+
+@multiplayer_router.get("/api/multiplayer/rooms/{room_code}")
+def get_room(room_code: str):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        return {"status": "success", **_snapshot(conn, room["id"])}
+
+
+@multiplayer_router.patch("/api/multiplayer/rooms/{room_code}")
+async def patch_room(room_code: str, req: RoomPatchRequest):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        settings = _load_json(room["settings"], {})
+        if req.settings:
+            settings.update(req.settings)
+        conn.execute(
+            """
+            UPDATE multiplayer_rooms
+            SET name=COALESCE(?, name),
+                current_scene_id=COALESCE(?, current_scene_id),
+                current_room_id=COALESCE(?, current_room_id),
+                settings=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (req.name, req.current_scene_id, req.current_room_id, _dump_json(settings), _now(), room["id"]),
+        )
+        conn.commit()
+        snap = _snapshot(conn, room["id"])
+    await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
+    return {"status": "success", **snap}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/join")
+async def join_room(room_code: str, req: JoinRoomRequest):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        member = _ensure_member(conn, room["id"], req)
+        snap = _snapshot(conn, room["id"])
+    await _broadcast(room["id"], {"type": "member.updated", "member": member})
+    return {"status": "success", "member": member, **snap}
+
+
+@multiplayer_router.get("/api/multiplayer/rooms/{room_code}/messages")
+def get_messages(room_code: str, limit: int = Query(default=120, ge=1, le=500)):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        rows = conn.execute(
+            "SELECT * FROM multiplayer_messages WHERE room_id=? ORDER BY id DESC LIMIT ?",
+            (room["id"], limit),
+        ).fetchall()
+        messages = [_serialize_message(r) for r in rows]
+        messages.reverse()
+    return {"status": "success", "messages": messages}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/messages")
+async def post_message(room_code: str, req: MessageCreateRequest):
+    content = (req.content or "").strip()
+    if not content:
+        raise fastapi.HTTPException(status_code=400, detail="消息不能为空")
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        if re.match(r"^[./!！。]\s*r(?:oll)?\b|^[./!！。]\s*r\d", content, re.I):
+            dice_req = DiceRollRequest(
+                expression=content,
+                actor_id=req.sender_id,
+                actor_name=req.sender_name,
+                reason=req.payload.get("reason", ""),
+                skill_name=req.payload.get("skill_name", ""),
+                skill_value=req.payload.get("skill_value"),
+                target_number=req.payload.get("target_number"),
+                ask_ai=bool(req.payload.get("ask_ai", False)),
+                context=req.payload.get("context", ""),
+            )
+            return await _roll_and_record(conn, room, dice_req)
+        msg = _save_message(conn, room["id"], req.sender_id, req.sender_name, req.kind, content, req.payload)
+        _remember_room_event(conn, room["code"], f"{req.sender_name}: {content[:300]}")
+    await _broadcast(room["id"], {"type": "message.created", "message": msg})
+    return {"status": "success", "message": msg}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/dice")
+async def roll_dice(room_code: str, req: DiceRollRequest):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        return await _roll_and_record(conn, room, req)
+
+
+@multiplayer_router.get("/api/multiplayer/rooms/{room_code}/tokens")
+def get_tokens(room_code: str):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        rows = conn.execute(
+            "SELECT * FROM multiplayer_tokens WHERE room_id=? ORDER BY kind, name",
+            (room["id"],),
+        ).fetchall()
+    return {"status": "success", "tokens": [_serialize_token(r) for r in rows]}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/tokens")
+async def upsert_token(room_code: str, req: TokenUpsertRequest):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        token_id = req.token_id or secrets.token_hex(6)
+        conn.execute(
+            """
+            INSERT INTO multiplayer_tokens
+            (room_id, token_id, name, kind, owner_id, avatar_url, color, x, y, size,
+             linked_room_id, linked_entity_id, linked_character_id, notes, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(room_id, token_id) DO UPDATE SET
+                name=excluded.name,
+                kind=excluded.kind,
+                owner_id=excluded.owner_id,
+                avatar_url=excluded.avatar_url,
+                color=excluded.color,
+                x=excluded.x,
+                y=excluded.y,
+                size=excluded.size,
+                linked_room_id=excluded.linked_room_id,
+                linked_entity_id=excluded.linked_entity_id,
+                linked_character_id=excluded.linked_character_id,
+                notes=excluded.notes,
+                updated_at=excluded.updated_at
+            """,
+            (
+                room["id"],
+                token_id,
+                req.name[:80],
+                req.kind[:20],
+                req.owner_id[:80],
+                req.avatar_url[:500],
+                req.color[:20],
+                req.x,
+                req.y,
+                req.size,
+                req.linked_room_id,
+                req.linked_entity_id,
+                req.linked_character_id,
+                req.notes[:1000],
+                _now(),
+            ),
+        )
+        conn.commit()
+        token = _serialize_token(
+            conn.execute(
+                "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+                (room["id"], token_id),
+            ).fetchone()
+        )
+    await _broadcast(room["id"], {"type": "token.updated", "token": token})
+    return {"status": "success", "token": token}
+
+
+@multiplayer_router.put("/api/multiplayer/rooms/{room_code}/tokens/{token_id}/move")
+async def move_token(room_code: str, token_id: str, req: TokenMoveRequest):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        row = conn.execute(
+            "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+            (room["id"], token_id),
+        ).fetchone()
+        if not row:
+            raise fastapi.HTTPException(status_code=404, detail="Token 不存在")
+        conn.execute(
+            """
+            UPDATE multiplayer_tokens
+            SET x=?, y=?, linked_room_id=COALESCE(?, linked_room_id), updated_at=?
+            WHERE room_id=? AND token_id=?
+            """,
+            (req.x, req.y, req.linked_room_id, _now(), room["id"], token_id),
+        )
+        if req.linked_room_id:
+            conn.execute("UPDATE multiplayer_rooms SET current_room_id=?, updated_at=? WHERE id=?", (req.linked_room_id, _now(), room["id"]))
+            try:
+                conn.execute("UPDATE map_rooms SET state='explored' WHERE id=?", (req.linked_room_id,))
+            except Exception:
+                pass
+        conn.commit()
+        token = _serialize_token(
+            conn.execute(
+                "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+                (room["id"], token_id),
+            ).fetchone()
+        )
+        _remember_room_event(conn, room["code"], f"{token['name']} 移动到坐标 ({round(req.x)}, {round(req.y)})")
+    await _broadcast(room["id"], {"type": "token.updated", "token": token})
+    return {"status": "success", "token": token}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/scenario/upload")
+async def upload_scenario(
+    room_code: str,
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    source: str = Form(""),
+    chunk_size: int = Form(600),
+    chunk_overlap: int = Form(80),
+    hidden: int = Form(0),
+):
+    filename, text = await _extract_upload_text(file)
+    if not _chunk_text:
+        raise fastapi.HTTPException(status_code=500, detail="RAG 模块未注入")
+    chunks = _chunk_text(text, max_size=max(200, min(chunk_size, 2000)), overlap=max(0, min(chunk_overlap, 300)))
+    if not chunks:
+        raise fastapi.HTTPException(status_code=400, detail="文本切片失败")
+    embeddings = _get_embeddings(chunks) if _get_embeddings else []
+
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        doc_title = (title.strip() or filename)[:100]
+        doc_source = f"room:{room['code']}:{(source.strip() or filename)[:180]}"
+        cur = conn.execute(
+            "INSERT INTO rag_documents (title, source, chunk_size, hidden) VALUES (?,?,?,?)",
+            (f"[{room['code']}] {doc_title}"[:100], doc_source[:200], len(chunks), 1 if hidden else 0),
+        )
+        doc_id = cur.lastrowid
+        for idx, chunk in enumerate(chunks):
+            emb = embeddings[idx] if idx < len(embeddings) else []
+            conn.execute(
+                "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) VALUES (?,?,?,?)",
+                (doc_id, idx, chunk, _dump_json(emb)),
+            )
+        conn.execute(
+            """
+            INSERT INTO multiplayer_room_documents
+            (room_id, rag_doc_id, title, source, chunk_count)
+            VALUES (?,?,?,?,?)
+            """,
+            (room["id"], doc_id, doc_title, doc_source, len(chunks)),
+        )
+        msg = _save_message(
+            conn,
+            room["id"],
+            "system",
+            "System",
+            "system",
+            f"剧本已导入：{doc_title}（{len(chunks)} chunks）",
+            {"rag_doc_id": doc_id, "filename": filename, "char_count": len(text), "chunk_count": len(chunks)},
+        )
+        _remember_room_event(conn, room["code"], f"导入剧本文档 {doc_title}，共 {len(chunks)} 个片段")
+    if _refresh_vector_cache:
+        try:
+            _refresh_vector_cache()
+        except Exception as exc:
+            _log.warning("refresh vector cache failed: %s", exc)
+    await _broadcast(room["id"], {"type": "message.created", "message": msg})
+    return {
+        "status": "success",
+        "doc_id": doc_id,
+        "filename": filename,
+        "char_count": len(text),
+        "chunk_count": len(chunks),
+        "embedded": sum(1 for item in embeddings if item),
+        "message": msg,
+    }
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/map/background")
+async def upload_map_background(room_code: str, file: UploadFile = File(...)):
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持常见图片格式")
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        room_dir = _assets_dir / "rooms" / room["code"]
+        room_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = f"map_{int(time.time())}_{secrets.token_hex(3)}{suffix}"
+        target = room_dir / safe_name
+        raw = await file.read()
+        if len(raw) > 12 * 1024 * 1024:
+            raise fastapi.HTTPException(status_code=400, detail="地图图片不能超过 12MB")
+        target.write_bytes(raw)
+        rel = f"rooms/{room['code']}/{safe_name}"
+        url = f"/api/multiplayer/assets/{rel}"
+        conn.execute(
+            "UPDATE multiplayer_rooms SET map_background_url=?, updated_at=? WHERE id=?",
+            (url, _now(), room["id"]),
+        )
+        conn.commit()
+        snap = _snapshot(conn, room["id"])
+    await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
+    return {"status": "success", "url": url, **snap}
+
+
+@multiplayer_router.get("/api/multiplayer/assets/{asset_path:path}")
+def get_multiplayer_asset(asset_path: str):
+    path = _safe_asset_path(asset_path)
+    if not path.is_file():
+        raise fastapi.HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(path)
+
+
+@multiplayer_router.websocket("/ws/rooms/{room_code}")
+async def room_websocket(
+    websocket: WebSocket,
+    room_code: str,
+    player_id: str = Query(default=""),
+    name: str = Query(default="玩家"),
+    role: str = Query(default="player"),
+):
+    await websocket.accept()
+    try:
+        with safe_db() as conn:
+            room = _room_by_code(conn, room_code)
+            member = _ensure_member(
+                conn,
+                room["id"],
+                JoinRoomRequest(player_id=player_id, display_name=name, role=role),
+            )
+            room_id = room["id"]
+            snapshot = _snapshot(conn, room_id)
+        _ws_clients_by_room.setdefault(room_id, set()).add(websocket)
+        _ws_meta[websocket] = {"room_id": room_id, "player_id": member["player_id"], "name": member["display_name"]}
+        await websocket.send_json(snapshot)
+        await _broadcast(room_id, {"type": "member.updated", "member": member})
+
+        while True:
+            incoming = await websocket.receive_json()
+            msg_type = incoming.get("type")
+            with safe_db() as conn:
+                room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
+                if not room:
+                    await websocket.send_json({"type": "error", "message": "房间已不存在"})
+                    break
+                meta = _ws_meta.get(websocket, {})
+                if msg_type == "chat.send":
+                    content = str(incoming.get("content", "")).strip()
+                    if not content:
+                        continue
+                    req = MessageCreateRequest(
+                        sender_id=meta.get("player_id", ""),
+                        sender_name=meta.get("name", name),
+                        kind="chat",
+                        content=content,
+                        payload=incoming.get("payload") or {},
+                    )
+                    if re.match(r"^[./!！。]\s*r", content, re.I):
+                        dice_req = DiceRollRequest(
+                            expression=content,
+                            actor_id=req.sender_id,
+                            actor_name=req.sender_name,
+                            ask_ai=bool(req.payload.get("ask_ai", False)),
+                        )
+                        await _roll_and_record(conn, room, dice_req)
+                    else:
+                        saved = _save_message(conn, room_id, req.sender_id, req.sender_name, "chat", content, req.payload)
+                        _remember_room_event(conn, room["code"], f"{req.sender_name}: {content[:300]}")
+                        await _broadcast(room_id, {"type": "message.created", "message": saved})
+                elif msg_type == "dice.roll":
+                    payload = incoming.get("payload") or {}
+                    dice_req = DiceRollRequest(
+                        expression=payload.get("expression", "1d100"),
+                        actor_id=meta.get("player_id", ""),
+                        actor_name=meta.get("name", name),
+                        reason=payload.get("reason", ""),
+                        skill_name=payload.get("skill_name", ""),
+                        skill_value=payload.get("skill_value"),
+                        target_number=payload.get("target_number"),
+                        ask_ai=bool(payload.get("ask_ai", False)),
+                        context=payload.get("context", ""),
+                    )
+                    await _roll_and_record(conn, room, dice_req)
+                elif msg_type == "token.move":
+                    payload = incoming.get("payload") or {}
+                    token_id = str(payload.get("token_id", ""))
+                    if not token_id:
+                        continue
+                    req = TokenMoveRequest(
+                        token_id=token_id,
+                        x=float(payload.get("x", 0)),
+                        y=float(payload.get("y", 0)),
+                        linked_room_id=payload.get("linked_room_id"),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+                        (room_id, token_id),
+                    ).fetchone()
+                    if row:
+                        conn.execute(
+                            "UPDATE multiplayer_tokens SET x=?, y=?, linked_room_id=COALESCE(?, linked_room_id), updated_at=? WHERE room_id=? AND token_id=?",
+                            (req.x, req.y, req.linked_room_id, _now(), room_id, token_id),
+                        )
+                        conn.commit()
+                        token = _serialize_token(
+                            conn.execute(
+                                "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+                                (room_id, token_id),
+                            ).fetchone()
+                        )
+                        await _broadcast(room_id, {"type": "token.updated", "token": token})
+                elif msg_type == "token.upsert":
+                    payload = incoming.get("payload") or {}
+                    req = TokenUpsertRequest(**payload)
+                    token_id = req.token_id or secrets.token_hex(6)
+                    conn.execute(
+                        """
+                        INSERT INTO multiplayer_tokens
+                        (room_id, token_id, name, kind, owner_id, avatar_url, color, x, y, size,
+                         linked_room_id, linked_entity_id, linked_character_id, notes, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(room_id, token_id) DO UPDATE SET
+                            name=excluded.name, kind=excluded.kind, owner_id=excluded.owner_id,
+                            avatar_url=excluded.avatar_url, color=excluded.color,
+                            x=excluded.x, y=excluded.y, size=excluded.size,
+                            linked_room_id=excluded.linked_room_id,
+                            linked_entity_id=excluded.linked_entity_id,
+                            linked_character_id=excluded.linked_character_id,
+                            notes=excluded.notes,
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            room_id,
+                            token_id,
+                            req.name,
+                            req.kind,
+                            req.owner_id,
+                            req.avatar_url,
+                            req.color,
+                            req.x,
+                            req.y,
+                            req.size,
+                            req.linked_room_id,
+                            req.linked_entity_id,
+                            req.linked_character_id,
+                            req.notes,
+                            _now(),
+                        ),
+                    )
+                    conn.commit()
+                    token = _serialize_token(
+                        conn.execute(
+                            "SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?",
+                            (room_id, token_id),
+                        ).fetchone()
+                    )
+                    await _broadcast(room_id, {"type": "token.updated", "token": token})
+                elif msg_type == "ping":
+                    await websocket.send_json({"type": "pong", "at": _now()})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+        _log.debug("room websocket closed with error: %s", exc)
+    finally:
+        meta = _ws_meta.pop(websocket, None)
+        if meta:
+            room_id = meta["room_id"]
+            _ws_clients_by_room.get(room_id, set()).discard(websocket)
+            with safe_db() as conn:
+                conn.execute(
+                    "UPDATE multiplayer_members SET connected=0,last_seen=? WHERE room_id=? AND player_id=?",
+                    (_now(), room_id, meta["player_id"]),
+                )
+                conn.commit()
+            await _broadcast(room_id, {"type": "member.left", "player_id": meta["player_id"]})
