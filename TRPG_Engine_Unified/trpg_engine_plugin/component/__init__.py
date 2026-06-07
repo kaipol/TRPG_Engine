@@ -1,1 +1,0 @@
-"""TRPGdice plugin components."""

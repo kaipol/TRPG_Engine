@@ -5,7 +5,7 @@ Z.R.I.C 引擎 — 主系统模块 (main.py)
 
 
 import fastapi
-from fastapi import Request, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +17,9 @@ import json_repair
 import os
 import io
 import glob
+import re
+import shutil
+import zipfile
 from datetime import datetime
 import hmac
 import ipaddress
@@ -258,7 +261,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, summary TEXT, content TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, summary TEXT, content TEXT, scene_image TEXT DEFAULT '')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS options (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER, text TEXT, next_node_id INTEGER)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, role TEXT, hp INTEGER, san INTEGER, inventory TEXT DEFAULT '', status TEXT DEFAULT 'active')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT)''')
@@ -370,6 +373,9 @@ def init_db():
     except sqlite3.OperationalError: pass
     # 平滑升级：nodes 加 expanded_content 字段（AI扩写叙事持久化）
     try: cursor.execute("ALTER TABLE nodes ADD COLUMN expanded_content TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    # 平滑升级：nodes 加 scene_image 字段（导入剧本或手动资源关联的场景图）
+    try: cursor.execute("ALTER TABLE nodes ADD COLUMN scene_image TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
 
     # 【手机聊天记录】：NPC 私聊消息持久化
@@ -517,10 +523,22 @@ def list_campaigns():
     """列出所有可加载的剧本（兼容旧版单文件 + 新版文件夹结构）"""
     results = []
 
+    def is_legacy_campaign_file(path: str) -> bool:
+        """Only expose root-level JSON files that look like old campaign saves."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        return isinstance(data.get("nodes"), list)
+
     # 旧版：BASE_DIR 下的 *.json（向后兼容）
     for f in glob.glob(os.path.join(BASE_DIR, "*.json")):
         fname = os.path.basename(f)
         if fname.startswith("persona_mode"): continue
+        if not is_legacy_campaign_file(f): continue
         results.append({"name": fname, "type": "legacy", "path": fname})
 
     # 新版：campaigns/ 下的子文件夹（含 campaign.json）
@@ -546,6 +564,376 @@ def list_campaigns():
     # 向后兼容：同时返回旧版字符串数组格式（供未升级的前端使用）
     files_legacy = [r["path"] for r in results]
     return {"status": "success", "files": results, "files_legacy": files_legacy}
+
+def _sanitize_campaign_name(name: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "_", (name or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:60] or f"导入剧本_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def _sanitize_asset_name(name: str, default_ext: str = "") -> str:
+    stem, ext = os.path.splitext(name or "")
+    stem = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "_", stem).strip(" ._")
+    ext = (ext or default_ext or "").lower()
+    if ext and not ext.startswith("."):
+        ext = "." + ext
+    return (stem[:48] or "asset") + ext[:12]
+
+
+def _unique_path(folder: str, filename: str) -> str:
+    base, ext = os.path.splitext(filename)
+    candidate = os.path.join(folder, filename)
+    i = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, f"{base}_{i}{ext}")
+        i += 1
+    return candidate
+
+
+def _campaign_asset_url(campaign_name: str, asset_name: str) -> str:
+    return (
+        f"/api/campaign-assets/{urllib.parse.quote(campaign_name)}/"
+        f"{urllib.parse.quote(asset_name)}"
+    )
+
+
+def _resolve_campaign_asset(campaign_name: str, asset_name: str) -> str:
+    root = os.path.realpath(os.path.join(CAMPAIGNS_DIR, campaign_name, "assets"))
+    target = os.path.realpath(os.path.join(root, asset_name))
+    if not target.startswith(root + os.sep):
+        raise fastapi.HTTPException(status_code=403, detail="禁止访问")
+    if not os.path.isfile(target):
+        raise fastapi.HTTPException(status_code=404, detail="资源不存在")
+    return target
+
+
+def _decode_text_bytes(raw: bytes) -> str:
+    for enc in ("utf-8", "utf-8-sig", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise fastapi.HTTPException(status_code=400, detail="文件编码无法识别，请转为 UTF-8 后重试")
+
+
+def _extract_docx_text(raw: bytes) -> str:
+    try:
+        from docx import Document
+    except ImportError:
+        # Minimal fallback: DOCX is a zip of XML files. This loses table structure
+        # but keeps the import path usable if python-docx is not installed yet.
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+            xml = re.sub(r"</w:p\s*>", "\n", xml)
+            xml = re.sub(r"<[^>]+>", "", xml)
+            return xml
+        except Exception as exc:
+            raise fastapi.HTTPException(status_code=500, detail="DOCX 解析需要安装 python-docx") from exc
+
+    try:
+        doc = Document(io.BytesIO(raw))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=400, detail=f"DOCX 解析失败：{exc}") from exc
+
+
+def _extract_docx_images(raw: bytes, assets_dir: str) -> list[str]:
+    saved = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            for info in zf.infolist():
+                if not info.filename.startswith("word/media/"):
+                    continue
+                data = zf.read(info.filename)
+                if not data:
+                    continue
+                safe = _sanitize_asset_name(os.path.basename(info.filename))
+                target = _unique_path(assets_dir, safe)
+                with open(target, "wb") as f:
+                    f.write(data)
+                saved.append(os.path.basename(target))
+    except Exception:
+        pass
+    return saved
+
+
+def _extract_pdf(raw: bytes, assets_dir: str) -> tuple[str, list[str], list[str]]:
+    warnings = []
+    saved = []
+    try:
+        import pypdf
+    except ImportError as exc:
+        raise fastapi.HTTPException(status_code=500, detail="PDF 解析需要安装 pypdf") from exc
+
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(raw))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        for page_idx, page in enumerate(reader.pages, start=1):
+            for img_idx, image in enumerate(getattr(page, "images", []) or [], start=1):
+                data = getattr(image, "data", None)
+                if not data:
+                    continue
+                raw_name = getattr(image, "name", "") or f"pdf_p{page_idx}_{img_idx}.png"
+                safe = _sanitize_asset_name(raw_name, ".png")
+                target = _unique_path(assets_dir, safe)
+                with open(target, "wb") as f:
+                    f.write(data)
+                saved.append(os.path.basename(target))
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=400, detail=f"PDF 解析失败：{exc}") from exc
+
+    if not text.strip():
+        warnings.append("PDF 未提取到文本；扫描版 PDF 暂不支持 OCR，已生成空白保底剧本。")
+    return text, saved, warnings
+
+
+def _fallback_campaign(title: str, text: str, first_image_url: str = "") -> dict:
+    opening = text.strip()[:1800] or "原始文档未能提取出可用正文。请在导入后手动补充开场场景。"
+    return {
+        "worldview": f"【{title}】\n\n由原始剧本文档导入生成。AI 转换不可用时创建了保底剧本，请在客户端继续整理节点、地图与触发器。",
+        "session_memory": "【跑团记忆日志已初始化】\n",
+        "characters": [
+            {"name": "玩家", "role": "PC", "hp": 100, "san": 80, "inventory": "", "status": "active"}
+        ],
+        "nodes": [
+            {
+                "id": 1,
+                "name": "开场",
+                "summary": "由导入文档生成的起始场景",
+                "content": opening,
+                "expanded_content": "",
+                "scene_image": first_image_url,
+            }
+        ],
+        "options": [],
+        "lorebook": [],
+        "triggers": [],
+        "world_entities": [],
+        "timelines": [],
+        "rag_library": [],
+        "memory_l1": [],
+        "pending_effects": [],
+        "npc_chat_logs": [],
+    }
+
+
+def _normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: list[str]) -> tuple[dict, dict]:
+    campaign = _fallback_campaign(title, text, image_urls[0] if image_urls else "")
+    if not isinstance(raw, dict):
+        return campaign, {"map_rooms": [], "map_edges": []}
+
+    campaign["worldview"] = str(raw.get("worldview") or campaign["worldview"])
+    campaign["session_memory"] = str(raw.get("session_memory") or campaign["session_memory"])
+
+    nodes = raw.get("nodes") if isinstance(raw.get("nodes"), list) else []
+    normalized_nodes = []
+    old_to_new = {}
+    for idx, node in enumerate(nodes[:80], start=1):
+        if not isinstance(node, dict):
+            continue
+        old_id = node.get("id", idx)
+        old_to_new[str(old_id)] = len(normalized_nodes) + 1
+        normalized_nodes.append({
+            "id": len(normalized_nodes) + 1,
+            "name": str(node.get("name") or f"场景 {idx}")[:80],
+            "summary": str(node.get("summary") or "")[:300],
+            "content": str(node.get("content") or "")[:6000],
+            "expanded_content": str(node.get("expanded_content") or ""),
+            "scene_image": str(node.get("scene_image") or ""),
+        })
+    if normalized_nodes:
+        campaign["nodes"] = normalized_nodes
+    if image_urls and not any(n.get("scene_image") for n in campaign["nodes"]):
+        campaign["nodes"][0]["scene_image"] = image_urls[0]
+
+    valid_node_ids = {n["id"] for n in campaign["nodes"]}
+    options = []
+    for opt in (raw.get("options") if isinstance(raw.get("options"), list) else [])[:160]:
+        if not isinstance(opt, dict):
+            continue
+        node_id = old_to_new.get(str(opt.get("node_id")), opt.get("node_id"))
+        next_id = old_to_new.get(str(opt.get("next_node_id")), opt.get("next_node_id"))
+        try:
+            node_id = int(node_id)
+            next_id = int(next_id)
+        except (TypeError, ValueError):
+            continue
+        if node_id in valid_node_ids and next_id in valid_node_ids:
+            options.append({"node_id": node_id, "text": str(opt.get("text") or "继续")[:200], "next_node_id": next_id})
+    campaign["options"] = options
+
+    def list_of_dicts(key: str, limit: int) -> list[dict]:
+        values = raw.get(key) if isinstance(raw.get(key), list) else []
+        return [v for v in values[:limit] if isinstance(v, dict)]
+
+    campaign["characters"] = list_of_dicts("characters", 40) or campaign["characters"]
+    campaign["lorebook"] = list_of_dicts("lorebook", 120)
+    campaign["triggers"] = list_of_dicts("triggers", 60)
+    campaign["world_entities"] = list_of_dicts("world_entities", 80)
+    campaign["timelines"] = list_of_dicts("timelines", 20)
+
+    map_rooms = list_of_dicts("map_rooms", 120)
+    map_edges = list_of_dicts("map_edges", 240)
+    if not map_rooms and isinstance(raw.get("map"), dict):
+        map_rooms = [v for v in raw["map"].get("map_rooms", []) if isinstance(v, dict)]
+        map_edges = [v for v in raw["map"].get("map_edges", []) if isinstance(v, dict)]
+    map_data = {"map_rooms": map_rooms, "map_edges": map_edges}
+    return campaign, map_data
+
+
+def _ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[dict, dict, list[str]]:
+    warnings = []
+    if not ai_provider.is_configured():
+        warnings.append("OpenAI 兼容端点尚未配置，已生成保底剧本。")
+        return _fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
+
+    sample = text[:45000]
+    system_prompt = (
+        "你是 TRPG 剧本转换器。请把原始剧本文档转换为 Z.R.I.C 客户端可读的 JSON。"
+        "只返回 JSON 对象，不要 Markdown。所有内容用中文。"
+    )
+    user_prompt = f"""
+剧本名称：{title}
+可用图片 URL：{json.dumps(image_urls, ensure_ascii=False)}
+
+请输出字段：
+- worldview: string
+- session_memory: string
+- characters: array，元素包含 name, role, hp, san, inventory, status
+- nodes: array，元素包含 id, name, summary, content, scene_image；id 从 1 开始
+- options: array，元素包含 node_id, text, next_node_id
+- lorebook: array，元素包含 keywords, content
+- triggers: array，可为空
+- world_entities: array，元素包含 entity_type, name, location, status, state_desc
+- map_rooms: array，元素包含 id, map_id, label, x, y, w, h, description, state, color, node_id, floor
+- map_edges: array，元素包含 id, map_id, from_id, to_id, label, locked, key_item, edge_type
+
+要求：
+1. 生成一个能直接游玩的起始节点和若干关键场景，优先保持原文结构。
+2. 地图房间应绑定相关 node_id；没有把握时少生成，不要编造复杂规则。
+3. 图片 URL 只在适合的节点 scene_image 中使用，不要改写 URL。
+4. 输出必须是单个 JSON 对象。
+
+原始剧本文档：
+{sample}
+"""
+    try:
+        from .agent import _call_ai
+        raw = _call_ai(system_prompt, user_prompt, temperature=0.35, max_tokens=6000, json_mode=True)
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json_repair.loads(raw.strip())
+        campaign, map_data = _normalize_imported_campaign(parsed, title, text, image_urls)
+        return campaign, map_data, warnings
+    except Exception as exc:
+        warnings.append(f"AI 转换失败，已生成保底剧本：{type(exc).__name__}: {exc}")
+        return _fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
+
+
+@app.get("/api/campaigns/import/formats")
+def campaign_import_formats():
+    return {
+        "status": "success",
+        "formats": [
+            {"ext": ".pdf", "label": "PDF", "notes": "支持文字型 PDF；扫描版暂不做 OCR"},
+            {"ext": ".docx", "label": "Word DOCX", "notes": "支持正文、表格文本与内嵌图片"},
+            {"ext": ".txt", "label": "TXT", "notes": "UTF-8 优先，GBK fallback"},
+            {"ext": ".md", "label": "Markdown", "notes": "按纯文本导入"},
+        ],
+        "asset_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+    }
+
+
+@app.post("/api/campaigns/import")
+async def import_campaign_from_document(
+    name: str = Form(""),
+    main_file: UploadFile = File(...),
+    assets: list[UploadFile] | None = File(None),
+):
+    filename = main_file.filename or "scenario.txt"
+    suffix = os.path.splitext(filename)[1].lower()
+    if suffix == ".doc":
+        raise fastapi.HTTPException(status_code=400, detail="暂不支持旧式 .doc，请在 Word 中另存为 .docx 后导入")
+    if suffix not in {".pdf", ".docx", ".txt", ".md", ".markdown"}:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持 PDF、DOCX、TXT、Markdown 剧本文件")
+
+    raw = await main_file.read()
+    if not raw:
+        raise fastapi.HTTPException(status_code=400, detail="文件内容为空")
+
+    campaign_name = _sanitize_campaign_name(name or os.path.splitext(filename)[0])
+    folder_path = os.path.join(CAMPAIGNS_DIR, campaign_name)
+    if os.path.exists(folder_path):
+        campaign_name = f"{campaign_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        folder_path = os.path.join(CAMPAIGNS_DIR, campaign_name)
+    knowledge_dir = os.path.join(folder_path, "knowledge")
+    assets_dir = os.path.join(folder_path, "assets")
+    os.makedirs(knowledge_dir, exist_ok=True)
+    os.makedirs(assets_dir, exist_ok=True)
+
+    warnings = []
+    extracted_assets: list[str] = []
+    try:
+        if suffix == ".pdf":
+            text, extracted_assets, pdf_warnings = _extract_pdf(raw, assets_dir)
+            warnings.extend(pdf_warnings)
+        elif suffix == ".docx":
+            text = _extract_docx_text(raw)
+            extracted_assets = _extract_docx_images(raw, assets_dir)
+        else:
+            text = _decode_text_bytes(raw)
+    except Exception:
+        shutil.rmtree(folder_path, ignore_errors=True)
+        raise
+
+    text = (text or "").strip()
+    if not text:
+        warnings.append("主文件未提取到正文，已生成空白保底剧本。")
+
+    for asset in assets or []:
+        asset_name = asset.filename or ""
+        ext = os.path.splitext(asset_name)[1].lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            warnings.append(f"已跳过不支持的图片资源：{asset_name or '未命名文件'}")
+            continue
+        data = await asset.read()
+        if not data:
+            continue
+        safe = _sanitize_asset_name(asset_name)
+        target = _unique_path(assets_dir, safe)
+        with open(target, "wb") as f:
+            f.write(data)
+        extracted_assets.append(os.path.basename(target))
+
+    asset_urls = [_campaign_asset_url(campaign_name, a) for a in extracted_assets]
+    campaign_data, map_data, ai_warnings = _ai_convert_campaign(campaign_name, text, asset_urls)
+    warnings.extend(ai_warnings)
+
+    with open(os.path.join(knowledge_dir, "原始剧本文档.txt"), "w", encoding="utf-8") as f:
+        f.write(text or "原始文档未提取到文本。")
+    with open(os.path.join(folder_path, "campaign.json"), "w", encoding="utf-8") as f:
+        json.dump(campaign_data, f, ensure_ascii=False, indent=4)
+    with open(os.path.join(folder_path, "map.json"), "w", encoding="utf-8") as f:
+        json.dump(map_data, f, ensure_ascii=False, indent=4)
+
+    return {
+        "status": "success",
+        "campaign_path": f"campaigns/{campaign_name}",
+        "name": campaign_name,
+        "nodes_count": len(campaign_data.get("nodes", [])),
+        "map_rooms_count": len(map_data.get("map_rooms", [])),
+        "assets_count": len(extracted_assets),
+        "warnings": warnings,
+    }
 
 @app.post("/api/game/load")
 def load_campaign(req: LoadCampaignRequest):
@@ -624,10 +1012,11 @@ def load_campaign(req: LoadCampaignRequest):
             )
         for node in config.get("nodes", []):
             cursor.execute(
-                "INSERT INTO nodes (id, name, summary, content, expanded_content) VALUES (?,?,?,?,?)",
+                "INSERT INTO nodes (id, name, summary, content, expanded_content, scene_image) VALUES (?,?,?,?,?,?)",
                 (node.get("id"), node.get("name"),
                  node.get("summary"), node.get("content"),
-                 node.get("expanded_content", ""))
+                 node.get("expanded_content", ""),
+                 node.get("scene_image", ""))
             )
         for opt in config.get("options", []):
             cursor.execute(
@@ -884,11 +1273,23 @@ def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
             folder_name = f"save_{timestamp}"
         folder_path = os.path.join(CAMPAIGNS_DIR, folder_name)
         os.makedirs(folder_path, exist_ok=True)
+        export_nodes = [dict(n) for n in nodes]
+        for node in export_nodes:
+            scene_image = (node.get("scene_image") or "").strip()
+            prefix = "/api/campaign-assets/"
+            if not scene_image.startswith(prefix):
+                continue
+            rel = scene_image[len(prefix):]
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
+                continue
+            asset_name = _sanitize_asset_name(os.path.basename(urllib.parse.unquote(parts[1])))
+            node["scene_image"] = _campaign_asset_url(folder_name, asset_name)
 
         campaign_data = {
             "worldview": wv_row["value"] if wv_row else "",
             "session_memory": mem_row["value"] if mem_row else "",
-            "characters": characters, "nodes": nodes, "options": options,
+            "characters": characters, "nodes": export_nodes, "options": options,
             "lorebook": lorebook, "triggers": triggers,
             "timelines": timelines, "world_entities": world_entities,
             "rag_library": rag_export,
@@ -900,6 +1301,30 @@ def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
             json.dump(campaign_data, f, ensure_ascii=False, indent=4)
         with open(os.path.join(folder_path, "map.json"), "w", encoding="utf-8") as f:
             json.dump(map_data, f, ensure_ascii=False, indent=4)
+
+        copied_assets = set()
+        assets_dir = os.path.join(folder_path, "assets")
+        for node in nodes:
+            scene_image = (node.get("scene_image") or "").strip()
+            prefix = "/api/campaign-assets/"
+            if not scene_image.startswith(prefix):
+                continue
+            rel = scene_image[len(prefix):]
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
+                continue
+            src_campaign = urllib.parse.unquote(parts[0])
+            src_asset = urllib.parse.unquote(parts[1])
+            try:
+                src_path = _resolve_campaign_asset(src_campaign, src_asset)
+            except fastapi.HTTPException:
+                continue
+            os.makedirs(assets_dir, exist_ok=True)
+            dst_name = _sanitize_asset_name(os.path.basename(src_asset))
+            dst_path = os.path.join(assets_dir, dst_name)
+            if os.path.realpath(src_path) != os.path.realpath(dst_path):
+                shutil.copy2(src_path, dst_path)
+            copied_assets.add(dst_name)
 
         if rag_export:
             kb_dir = os.path.join(folder_path, "knowledge")
@@ -2434,6 +2859,17 @@ async def push_player_state(req: PlayerStateRequest):
     # WebSocket 广播（异步，不阻塞响应）
     await _broadcast_player_state()
     return {"status": "success"}
+
+@app.get("/api/campaign-assets/{campaign_name}/{asset_name:path}")
+def serve_campaign_asset(campaign_name: str, asset_name: str):
+    """安全访问导入剧本的图片资源。"""
+    if not campaign_name or "/" in campaign_name or "\\" in campaign_name:
+        raise fastapi.HTTPException(status_code=400, detail="非法剧本名")
+    ext = os.path.splitext(asset_name)[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        raise fastapi.HTTPException(status_code=404, detail="资源不存在")
+    path = _resolve_campaign_asset(campaign_name, asset_name)
+    return FileResponse(path)
 
 # ---------------------------------------------------------
 # 【重点新增】：托管静态 HTML 文件，实现即插即用

@@ -1,42 +1,53 @@
-# --- 1. 自动生成的动态数据 (绝对核心) ---
-# 忽略运行时导出与临时数据
-**/exports/
-
-# --- 2. 数据库文件 (全局清理) ---
-# 无论在根目录还是 data 目录下的 .db 都要排除
-**/*.db
-
-# --- 3. 配置文件与隐私 (防泄漏) ---
+# Local configuration and credentials
+.env
+**/.env
+openai_providers.json
+persona_mode.json
 **/config.yaml
 !**/config.default.yaml
 
-# --- 4. 前端开发黑洞 (必须添加) ---
-# 看到你目录下有 node_modules，这个绝对不能传！
-**/node_modules/
-# 排除 Vite/Webpack 的构建产物
-**/dist/
-# 排除 TypeScript 构建缓存
-*.tsbuildinfo
-
-# --- 5. 冗余与备份 ---
-old_version/
-**/__pycache__/
-*.log
-battle_report/
-plan/
-tests/
-temp_*.png
-
-# --- 6. 统一 Web 应用运行时 ---
-.omx/
-.runtime/
-uploads/
+# Python runtime and caches
+.venv/
+venv/
+env/
 **/.venv/
 **/venv/
 **/env/
-**/.env
-openai_providers.json
-**/*.py[cod]
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Application runtime data
+.runtime/
+uploads/
+exports/
+**/exports/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
 Z.R.I.C.log*
 .multiplayer-server.*.log
 .unified-server.*.log
+battle_report/
+temp_*.png
+
+# Frontend/tooling output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+*.tsbuildinfo
+
+# Local agent/workflow artifacts
+.omx/
+plan/
+old_version/

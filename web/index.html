@@ -278,6 +278,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             {{ f.type==='folder' ? '📁 ' : '📄 ' }}{{ f.name }}{{ f.has_map ? ' 🗺️' : '' }}{{ f.kb_count ? ` 📚${f.kb_count}` : '' }}
                         </option>
                     </select>
+                    <button @click="openCampaignImportModal" class="btn btn-info btn-icon" title="添加剧本">
+                        <i class="ph ph-plus" style="font-size:16px"></i>
+                    </button>
                     <button @click="fetchCampaigns" class="btn btn-ghost btn-icon" title="刷新">
                         <i class="ph ph-arrows-clockwise" style="font-size:16px"></i>
                     </button>
@@ -286,20 +289,45 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
             <!-- AI 模型选择 -->
             <div style="margin-bottom:24px">
-                <label class="tag" style="display:block;margin-bottom:8px">
-                    <i class="ph ph-robot" style="font-size:13px"></i> AI 推演模型
-                </label>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+                    <label class="tag" style="display:flex;align-items:center;gap:5px">
+                        <i class="ph ph-robot" style="font-size:13px"></i> AI 推演模型
+                    </label>
+                    <button @click="showApiKeyPanel=true" class="btn btn-ghost btn-icon" title="配置 OpenAI 兼容供应商" style="width:28px;height:28px;padding:0">
+                        <i class="ph ph-sliders-horizontal" style="font-size:14px"></i>
+                    </button>
+                </div>
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:8px">
+                    <select v-model="activeProviderId" @change="switchApiProvider($event.target.value)" class="inp inp-mono"
+                            style="font-size:12px;padding:7px 9px;min-width:0" title="切换供应商">
+                        <option v-if="!apiProviders.length" value="" disabled>尚未配置供应商</option>
+                        <option v-for="p in apiProviders" :key="p.id" :value="p.id">
+                            {{ p.name || p.id }}{{ p.configured ? '' : '（未配置）' }}
+                        </option>
+                    </select>
+                    <button @click="fetchAiModels" :disabled="isFetchingAiModels" class="btn btn-ghost btn-sm" title="从当前供应商获取模型">
+                        <i :class="isFetchingAiModels?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingAiModels?'animation:spin 1s linear infinite':''"></i>
+                        获取模型
+                    </button>
+                </div>
                 <div style="display:flex;gap:8px;margin-bottom:8px">
                     <input v-model.trim="aiModelSearch" @keyup.enter="fetchAiModels" class="inp inp-mono"
                            placeholder="搜索端点模型 ID…" style="flex:1;font-size:12px;padding:7px 9px">
-                    <button @click="fetchAiModels" class="btn btn-ghost btn-icon" title="获取模型列表">
+                    <button @click="fetchAiModels" :disabled="isFetchingAiModels" class="btn btn-ghost btn-icon" title="搜索模型">
                         <i class="ph ph-magnifying-glass" style="font-size:15px"></i>
                     </button>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <select v-if="aiModels.length" :value="activeAiModel" @change="switchAiModel($event.target.value)" class="inp inp-mono"
+                        style="width:100%;font-size:12px;margin-bottom:8px">
+                    <option value="" disabled>选择 AI 推演 Chat Model</option>
+                    <option v-for="m in aiModels" :key="'select-'+m.key" :value="m.key" :disabled="!m.available">
+                        {{ m.label || m.key }}{{ m.provider ? ' @ ' + m.provider : '' }}{{ m.available ? '' : '（未配置）' }}
+                    </option>
+                </select>
+                <div v-if="aiModels.length" style="display:grid;grid-template-columns:1fr;gap:7px;max-height:156px;overflow-y:auto;padding-right:2px">
                     <button v-for="m in aiModels" :key="m.key"
                             @click="switchAiModel(m.key)" :disabled="!m.available"
-                            class="btn btn-sm" style="padding:9px 12px;font-size:13px;transition:all .15s;justify-content:flex-start;min-width:0"
+                            class="btn btn-sm" style="padding:9px 10px;font-size:12px;transition:all .15s;justify-content:flex-start;min-width:0"
                             :style="activeAiModel===m.key
                                 ? {background:`rgba(${modelAccentRgb(m.key)},.12)`,
                                    borderColor:`rgba(${modelAccentRgb(m.key)},.4)`,
@@ -309,12 +337,23 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                         <i :class="modelIcon(m.key)"
                            style="font-size:14px;flex-shrink:0"
                            :style="{opacity: m.available ? 1 : 0.3}"></i>
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:5px">{{ m.label }}</span>
+                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:5px">{{ m.label || m.key }}</span>
+                        <span v-if="m.provider" style="font-size:10px;margin-left:auto;padding-left:6px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:92px">{{ m.provider }}</span>
                         <span v-if="!m.available" style="font-size:10px;margin-left:4px;opacity:.5;flex-shrink:0">(未配置)</span>
-                        <span v-if="activeAiModel===m.key" style="font-size:10px;margin-left:auto;padding-left:4px;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px;flex-shrink:0">当前</span>
+                        <span v-if="activeAiModel===m.key" style="font-size:10px;margin-left:6px;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px;flex-shrink:0">当前</span>
                     </button>
                 </div>
-                <div style="font-size:11px;color:#4b5563;margin-top:6px;padding-left:2px">
+                <div v-else style="border:1px solid rgba(255,255,255,.06);background:#090b10;border-radius:8px;padding:10px 11px;font-size:12px;color:#6b7280;line-height:1.5">
+                    <div style="display:flex;align-items:center;gap:7px;color:#9ca3af;margin-bottom:4px">
+                        <i class="ph ph-plugs-connected" style="font-size:15px"></i>
+                        <span>{{ apiKeyStatus.openai ? '当前供应商还没有可选模型' : '需要先配置 OpenAI 兼容供应商' }}</span>
+                    </div>
+                    <div>{{ apiKeyStatus.openai ? '点击“获取模型”从端点读取模型，或在配置面板直接填写 Chat Model。' : '打开配置面板添加 API Key、Base URL，并保存 Chat Model。' }}</div>
+                </div>
+                <div v-if="aiModelError" style="font-size:11px;color:#e05c5c;margin-top:6px;padding-left:2px">
+                    {{ aiModelError }}
+                </div>
+                <div v-else style="font-size:11px;color:#4b5563;margin-top:6px;padding-left:2px">
                     {{ activeAiModel ? `当前使用：${activeAiModel}${activeProviderName ? ' @ ' + activeProviderName : ''}` : '配置 OpenAI 兼容端点后可获取并选择模型' }}
                 </div>
             </div>
@@ -342,6 +381,86 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                     <i class="ph ph-arrow-right" style="font-size:13px;opacity:.4"></i>
                 </button>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     添加剧本导入向导
+══════════════════════════════════════════════════════════════ -->
+<div v-if="showCampaignImportModal"
+     style="position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.68);backdrop-filter:blur(4px)"
+     @click.self="!campaignImportBusy && (showCampaignImportModal=false)">
+    <div class="panel" style="width:min(720px,94vw);border-radius:12px;box-shadow:0 32px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;max-height:90vh">
+        <div style="padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:32px;height:32px;background:rgba(91,156,245,.1);border:1px solid rgba(91,156,245,.25);border-radius:8px;display:flex;align-items:center;justify-content:center">
+                    <i class="ph ph-file-plus" style="font-size:16px;color:#5b9cf5"></i>
+                </div>
+                <div>
+                    <div style="font-size:15px;font-weight:600;color:#c9cdd6">添加剧本</div>
+                    <div style="font-size:11px;color:#4b5563;margin-top:1px">将 PDF / DOCX / TXT / MD 转换为可选择游玩的 Z.R.I.C 剧本</div>
+                </div>
+            </div>
+            <button @click="showCampaignImportModal=false" :disabled="campaignImportBusy" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
+                <i class="ph ph-x" style="font-size:15px"></i>
+            </button>
+        </div>
+
+        <div style="padding:20px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+            <div>
+                <label class="tag" style="display:block;margin-bottom:7px">剧本名称</label>
+                <input v-model.trim="campaignImportName" class="inp" placeholder="留空则使用文件名">
+            </div>
+
+            <div>
+                <label class="tag" style="display:block;margin-bottom:7px">主剧本文档 <span style="color:#e05c5c">*</span></label>
+                <div @click="$refs.campaignImportMainInput.click()"
+                     style="border:2px dashed rgba(91,156,245,.25);border-radius:8px;padding:22px 16px;text-align:center;cursor:pointer;background:#0b0e17">
+                    <input ref="campaignImportMainInput" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.doc" style="display:none" @change="campaignImportPickMain">
+                    <i class="ph ph-cloud-arrow-up" style="font-size:34px;color:#4b5563;display:block;margin-bottom:10px"></i>
+                    <div v-if="!campaignImportMainFile" style="font-size:13px;color:#6b7280;line-height:1.8">
+                        点击选择主剧本文档<br>
+                        <span style="font-size:11px;color:#4b5563">{{ campaignImportFormatsText }}</span>
+                    </div>
+                    <div v-else style="display:flex;align-items:center;justify-content:center;gap:10px">
+                        <i class="ph ph-file-text" style="font-size:24px;color:#5b9cf5"></i>
+                        <div style="text-align:left">
+                            <div style="font-size:13px;font-weight:600;color:#c9cdd6">{{ campaignImportMainFile.name }}</div>
+                            <div style="font-size:11px;color:#4b5563;font-family:'JetBrains Mono'">{{ (campaignImportMainFile.size/1024).toFixed(1) }} KB</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <label class="tag" style="display:block;margin-bottom:7px">图片资源（可选）</label>
+                <input type="file" multiple accept="image/*" class="inp" style="font-size:12px" @change="campaignImportPickAssets">
+                <div style="font-size:11px;color:#4b5563;margin-top:6px">
+                    已选择 {{ campaignImportAssets.length }} 个图片；DOCX / PDF 内嵌图片也会尽量提取。
+                </div>
+            </div>
+
+            <div v-if="campaignImportResult" style="padding:12px 14px;border-radius:6px;font-size:13px;line-height:1.7"
+                 :style="campaignImportResult.ok?{background:'rgba(79,201,138,.06)',border:'1px solid rgba(79,201,138,.22)',color:'#9ee6bf'}:{background:'rgba(224,92,92,.06)',border:'1px solid rgba(224,92,92,.22)',color:'#e05c5c'}">
+                <div style="font-weight:600;margin-bottom:3px">
+                    <i :class="campaignImportResult.ok?'ph ph-check-circle':'ph ph-warning-circle'" style="margin-right:5px"></i>
+                    {{ campaignImportResult.title }}
+                </div>
+                <div>{{ campaignImportResult.message }}</div>
+                <div v-if="campaignImportResult.warnings&&campaignImportResult.warnings.length" style="margin-top:8px;color:#e8b44b">
+                    <div v-for="w in campaignImportResult.warnings" :key="w">· {{ w }}</div>
+                </div>
+            </div>
+        </div>
+
+        <div style="padding:16px 24px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px;flex-shrink:0">
+            <button @click="importCampaign" :disabled="!campaignImportMainFile||campaignImportBusy" class="btn btn-info" style="flex:1">
+                <i v-if="campaignImportBusy" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+                <i v-else class="ph ph-magic-wand"></i>
+                {{ campaignImportBusy ? '正在转换…' : '转换为可玩剧本' }}
+            </button>
+            <button @click="showCampaignImportModal=false" :disabled="campaignImportBusy" class="btn btn-ghost">关闭</button>
         </div>
     </div>
 </div>
@@ -440,8 +559,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             </button>
                         </label>
                         <div style="display:flex;gap:6px">
-                            <input v-model.trim="apiKeyInputs[field.key]" class="inp inp-mono" :placeholder="field.placeholder" style="font-size:12px;min-width:0">
-                            <select v-if="(modelOptions[field.capability]||[]).length" @change="selectConfigModel(field.key, $event.target.value)" class="inp inp-mono" style="width:42px;padding:0 4px" title="选择模型">
+                            <input v-model.trim="apiKeyInputs[field.key]" class="inp inp-mono" :placeholder="field.placeholder" style="font-size:12px;min-width:0;flex:1">
+                            <select v-if="(modelOptions[field.capability]||[]).length" @change="selectConfigModel(field.key, $event.target.value)" class="inp inp-mono" style="font-size:12px;padding:0 8px;min-width:130px;max-width:45%;flex:0 1 180px" title="选择模型">
                                 <option value="">--</option>
                                 <option v-for="m in modelOptions[field.capability]" :key="field.capability+'-'+m.key" :value="m.key">{{ m.label || m.key }}</option>
                             </select>
@@ -477,7 +596,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <!-- ══════════════════════════════════════════════════════════════
      主控台
 ══════════════════════════════════════════════════════════════ -->
-<div v-else-if="appState==='game'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
+<div v-if="appState==='game'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
     <audio ref="audioRef" loop :src="currentTrackUrl"></audio>
 
     <!-- ── 顶部应用栏 ── -->
@@ -3233,6 +3352,17 @@ createApp({
         const isLoading = ref(false);
         const dbConnected = ref(false);
         const campaignFiles = ref([]);
+        const showCampaignImportModal = ref(false);
+        const campaignImportName = ref('');
+        const campaignImportMainFile = ref(null);
+        const campaignImportAssets = ref([]);
+        const campaignImportBusy = ref(false);
+        const campaignImportResult = ref(null);
+        const campaignImportFormats = ref([]);
+        const campaignImportFormatsText = computed(() => {
+            const exts = (campaignImportFormats.value || []).map(f => f.ext).filter(Boolean);
+            return (exts.length ? exts.join(' / ') : '.pdf / .docx / .txt / .md') + '，旧式 .doc 请另存为 .docx';
+        });
 
         // ── API 供应商配置 ──
         const showApiKeyPanel = ref(false);
@@ -3339,12 +3469,12 @@ createApp({
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
-                    if (!apiKeyStatus.value.openai) showApiKeyPanel.value = true;
                 }
             } catch(e) {}
         };
 
         const switchApiProvider = async (providerId) => {
+            if (!providerId) return;
             const localProfile = apiProviders.value.find(p => p.id === providerId);
             if (localProfile) fillProviderInputs(localProfile);
             try {
@@ -3529,6 +3659,8 @@ createApp({
         const aiModels = ref([]);
         const aiModelSearch = ref('');
         const activeAiModel = ref('');
+        const isFetchingAiModels = ref(false);
+        const aiModelError = ref('');
         const storyNodes = ref([]);
         const characters = ref([]);
         const currentNode = ref(null);
@@ -4485,8 +4617,64 @@ createApp({
 
         // ── Campaigns ──
         const fetchCampaigns = async () => { try { const r=await fetch(`${API_BASE_URL}/api/campaigns`); const d=await r.json(); let raw=d.files||d.files_legacy||[]; if(raw.length>0&&typeof raw[0]==='string'){raw=raw.map(f=>({name:f,type:'legacy',path:f}));} campaignFiles.value=raw; const def=campaignFiles.value.find(f=>f.name==='campaign_settings.json'||f.name==='campaign_settings'); if(def)selectedCampaign.value=def.path; else if(campaignFiles.value.length>0)selectedCampaign.value=campaignFiles.value[0].path; } catch(e){} };
+        const fetchCampaignImportFormats = async () => {
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/import/formats`);
+                const d = await r.json();
+                if (d.status === 'success') campaignImportFormats.value = d.formats || [];
+            } catch(e) {}
+        };
+        const openCampaignImportModal = () => {
+            campaignImportName.value = '';
+            campaignImportMainFile.value = null;
+            campaignImportAssets.value = [];
+            campaignImportResult.value = null;
+            showCampaignImportModal.value = true;
+            fetchCampaignImportFormats();
+        };
+        const campaignImportPickMain = (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            campaignImportMainFile.value = f;
+            if (!campaignImportName.value.trim()) campaignImportName.value = f.name.replace(/\.[^/.]+$/, '');
+        };
+        const campaignImportPickAssets = (e) => {
+            campaignImportAssets.value = Array.from(e.target.files || []);
+        };
+        const importCampaign = async () => {
+            if (!campaignImportMainFile.value || campaignImportBusy.value) return;
+            campaignImportBusy.value = true;
+            campaignImportResult.value = null;
+            try {
+                const fd = new FormData();
+                fd.append('name', campaignImportName.value.trim());
+                fd.append('main_file', campaignImportMainFile.value);
+                for (const asset of campaignImportAssets.value) fd.append('assets', asset);
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/import`, { method: 'POST', body: fd });
+                const d = await r.json();
+                if (d.status === 'success') {
+                    campaignImportResult.value = {
+                        ok: true,
+                        title: '转换完成',
+                        message: `已生成「${d.name}」：${d.nodes_count} 个场景，${d.map_rooms_count} 个地图房间，${d.assets_count} 个图片资源。`,
+                        warnings: d.warnings || []
+                    };
+                    await fetchCampaigns();
+                    if (d.campaign_path) selectedCampaign.value = d.campaign_path;
+                } else {
+                    campaignImportResult.value = { ok: false, title: '转换失败', message: d.message || '导入接口返回错误', warnings: [] };
+                }
+            } catch(e) {
+                campaignImportResult.value = { ok: false, title: '转换失败', message: '网络错误或服务器不可用', warnings: [] };
+            } finally {
+                campaignImportBusy.value = false;
+            }
+        };
         // ── AI 模型管理 ──
         const fetchAiModels = async () => {
+            if (isFetchingAiModels.value) return;
+            isFetchingAiModels.value = true;
+            aiModelError.value = '';
             try {
                 const q = aiModelSearch.value ? `?search=${encodeURIComponent(aiModelSearch.value)}` : '';
                 const r = await fetch(`${API_BASE_URL}/api/ai/models${q}`);
@@ -4494,6 +4682,7 @@ createApp({
                 if (d.status === 'success') {
                     aiModels.value = d.models || [];
                     activeAiModel.value = d.active || '';
+                    if (d.error) aiModelError.value = `获取模型失败：${d.error}`;
                     if (d.provider) {
                         activeAiProvider.value = {
                             id: d.provider.id,
@@ -4502,10 +4691,17 @@ createApp({
                         };
                         activeProviderId.value = activeProviderId.value || d.provider.id || '';
                     }
+                } else {
+                    aiModelError.value = d.message || '获取模型失败';
                 }
-            } catch(e) {}
+            } catch(e) {
+                aiModelError.value = '获取模型失败，请检查后端是否运行';
+            } finally {
+                isFetchingAiModels.value = false;
+            }
         };
         const switchAiModel = async (modelKey) => {
+            if (!modelKey) return;
             if (modelKey === activeAiModel.value) return;
             try {
                 const r = await fetch(`${API_BASE_URL}/api/ai/models/switch`, {
@@ -4542,10 +4738,15 @@ createApp({
 
         // ── Game State ──
         const syncEditData = () => { if(currentNode.value) editData.value={...currentNode.value}; };
+        const applyNodeSceneImage = (node) => {
+            generatedImageUrl.value = node?.scene_image || '';
+            imgPromptUsed.value = node?.scene_image ? '导入剧本资源' : '';
+            imgLoadError.value = false;
+        };
         const fetchGameState = async () => {
             try { const r=await fetch(`${API_BASE_URL}/api/game/state`); const d=await r.json();
                 if(d.status==='success'){storyNodes.value=d.nodes;characters.value=d.characters;dbConnected.value=true;
-                    if(currentNode.value){currentNode.value=d.nodes.find(n=>n.id===currentNode.value.id)||d.nodes[0];syncEditData();}
+                    if(currentNode.value){currentNode.value=d.nodes.find(n=>n.id===currentNode.value.id)||d.nodes[0];applyNodeSceneImage(currentNode.value);syncEditData();}
                     else if(d.nodes.length>0){jumpToNode(d.nodes[0].id);} }
             } catch(e){dbConnected.value=false;}
             try { const sl=await fetch(`${API_BASE_URL}/api/game/stat-labels`); const sld=await sl.json(); if(sld.hp_label)hpLabel.value=sld.hp_label; if(sld.san_label)sanLabel.value=sld.san_label; } catch(e){}
@@ -4645,7 +4846,7 @@ createApp({
                 } catch(_) {}
             }
 
-            currentNode.value=next; generatedImageUrl.value=''; syncEditData();
+            currentNode.value=next; applyNodeSceneImage(next); syncEditData();
             optionLikelihoods.value = {}; // 跳转后清空概率（只对当前推演结果有效）
             if(!isNew||isEditMode.value)return;
 
@@ -4904,7 +5105,7 @@ createApp({
                     checkpointCount.value = d.remaining ?? Math.max(0, checkpointCount.value - 1);
                     await Promise.all([fetchGameState(), fetchMapData()]);
                     const node = storyNodes.value.find(n => n.id === d.restored_node_id);
-                    if (node) { currentNode.value = node; generatedImageUrl.value = ''; syncEditData(); }
+                    if (node) { currentNode.value = node; applyNodeSceneImage(node); syncEditData(); }
                 }
             } catch(_) {}
             finally { isRollingBack.value = false; }
@@ -5680,8 +5881,12 @@ createApp({
 
         return {
             appState, isLoading, dbConnected, campaignFiles, selectedCampaign,
+            showCampaignImportModal, campaignImportName, campaignImportMainFile,
+            campaignImportAssets, campaignImportBusy, campaignImportResult,
+            campaignImportFormatsText, openCampaignImportModal, campaignImportPickMain,
+            campaignImportPickAssets, importCampaign,
             // AI 模型
-            aiModels, aiModelSearch, activeAiModel, activeProviderName, fetchAiModels, switchAiModel, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
+            aiModels, aiModelSearch, activeAiModel, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
             showApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, configModelSearch, modelOptions, modelConfigFields, isFetchingConfigModels,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel,

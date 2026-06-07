@@ -1,0 +1,254 @@
+output:
+  common:
+    invalid_number: "非法数值"
+    unnamed: "未命名"
+    unknown: "未知"
+    none: "无"
+    yes: "是"
+    no: "否"
+
+  # ---------- 技能判定 ----------
+  skill_check:
+    normal:
+      head : |
+        技能检定结果 {name} {skill_name} {skill_value}
+      detail : |
+        技能检定骰点结果 {roll_result} {skill_value} {result}
+    penalty:
+      head : |
+        惩罚骰技能检定结果 {name} {skill_name} {skill_value} {penalty_dice}
+      detail : |
+        惩罚骰技能检定骰点结果 {roll_result} {skill_value} {result}
+    bonus:
+      head : |
+        奖励骰技能检定结果 {name} {skill_name} {skill_value} {bonus_dice}
+      detail : |
+        奖励骰技能检定骰点结果 {roll_result} {skill_value} {result}
+
+    pistol_check:
+      head: |
+        <{name}> 使用【{skill_name}】进行手枪连发检定，模式：{mode}。
+      detail: |
+        第 {i} 发（{p}P）：{roll}{p_info}/{skill_value}：{result}
+      mode_regular: "常规连射"
+      mode_recoil: "后坐力递增"
+      mode_accuracy: "精度下降"
+      skill_specified: "手枪(指定)"
+      skill_handgun: "手枪"
+
+    error:
+      normal: "技能检定参数错误 {skill_name}"
+      penalty: "惩罚骰技能检定参数错误"
+      bonus: "奖励骰技能检定参数错误"
+    difficulty:
+      hard: "困难"
+      extreme: "极难"
+    grow_up:
+      success: "成长检定成功结果 {skill_name} {en_value} {new_value}"
+      failure: "成长检定失败结果 {skill_name}"
+      boost_result: "成长检定掷骰结果 {roll_result} {skill_value} {result}"
+    until_success:
+      success: |
+        {name} 的【{skill_name}】连续检定直到成功：
+        第 {attempts} 次成功。
+        前10次结果：
+        {results}
+      failure: |
+        {name} 的【{skill_name}】连续检定直到成功：
+        已达到 {max_attempts} 次上限，仍未成功。
+        前10次结果：
+        {results}
+    proxy_name: "{name}（由 <{operator}> 代投）"
+    hidden:
+      sent: "已进行暗中检定，结果已通过私聊发送。"
+
+  versus:
+    no_winner: "双方均失败，无胜者"
+    tie: "平局"
+    result: |
+      对抗检定结果：
+      {left_name}：{left_roll}/{left_value}：{left_result}
+      {right_name}：{right_roll}/{right_value}：{right_result}
+      胜者：{winner}
+    label:
+      left: "发起方"
+      right: "对抗方"
+    participant: "对抗检定结果 {name} {skill_name}"
+    error:
+      format: "对抗检定结果"
+      no_target: "对抗检定结果"
+      invalid_value: "对抗检定结果"
+
+  spell:
+    usage: |
+      指令帮助：.find <法术名> <版本标识>
+      2014版可使用：旧版、5e、2014。
+    searching: "正在查询法术：{spell_name}"
+    parse_error: "法术资料解析失败：{error}"
+    not_found: "未找到法术：{spell_name}"
+    render_error: "法术资料渲染失败：{error}"
+    reference: "法术资料引用"
+    cantrip_level: "零"
+    cantrip_suffix: "（戏法）"
+    level_line: "法术查询结果 {level} {cantrip_suffix} {school} {classes}"
+    label:
+      casting_time: "施法时间"
+      range: "射程"
+      components: "成分"
+      duration: "持续时间"
+    sealdice_dnd_source: "资料源：SeaDice sealdice-builtins DND 查询资料；D&D 系列资料整理者主要为 DicePP 项目组成员。"
+    sealdice_coc_source: "资料源：SeaDice sealdice-builtins CoC 魔法大典；整理者：魔骨、NULL、Dr.Amber。"
+    coc_result: "【COC法术】{name}\n{content}\n{source}"
+    cantrip_label: "戏法"
+    ring_level: "{level}环"
+    no_description: "暂无描述。"
+    dnd_title: "【DND法术】{title}"
+    dnd_level_school: "{level} {school}"
+    dnd_casting_range: "施法时间：{casting_time}；射程：{range}"
+    dnd_components: "法术成分：{components}；专注：{concentration}；仪式：{ritual}"
+    dnd_duration: "持续时间：{duration}"
+    dnd_material: "材料：{material}"
+    dnd_effect: "效果：{desc}"
+    dnd_higher_level: "升环效果：{higher_level}"
+    dnd_api_source: "资料源：D&D 5e API。"
+    dnd_local_components: "法术成分：{components}；持续时间：{duration}"
+    dnd_local_summary: "概要：{summary}"
+    dnd_local_source: "资料源：本地 SeaDice DND 法术资料。"
+    dnd_network_skipped: "在线资料查询已跳过：{reason}"
+    dnd_not_found: "未找到 DND 法术：{name}"
+    dnd_http_error: "DND 在线资料请求失败：HTTP {code}"
+    dnd_error: "DND 法术查询失败：{error}"
+
+  coc_rule:
+    rule_1: "严格规则"
+    rule_2: "COC7版规则"
+    rule_3: "阶段性规则"
+    rule_4: "宽松规则"
+    help: |
+      setcoc帮助：
+      /setcoc 1 -> {rule_1}
+      /setcoc 2 -> {rule_2}
+      /setcoc 3 -> {rule_3}
+      /setcoc 4 -> {rule_4}
+      /setcoc 0 -> 默认规则：{default_rule}
+      当前规则：{current_rule}
+
+
+
+
+  # ---------- 运势 ----------
+  rp:
+    today: "今日人品：{rp}"
+
+  # ---------- 火球术 ----------
+  fireball:
+    result: |
+      # 火球术伤害
+      {ring} 环火球术伤害：{breakdown} = {total}
+    low: "火球术最低为 3 环。"
+
+  # ---------- COC判定 ----------
+  coc_roll:
+    set_rule: "已切换 COC 大成功/大失败规则：{rule}"
+    results:
+      great_success: "大成功"
+      extreme_success: "极难成功"
+      hard_success: "困难成功"
+      success: "成功"
+      great_failure: "大失败"
+      failure: "失败"
+      error: "COC 检定规则错误：{error}"
+      reset: "规则异常，已重置为：{rule}"
+
+  # ---------- 掷骰 ----------
+  dice:
+    normal:
+      success: "掷骰结果 {result}"
+      success_remark : "掷骰结果(备注{remark}) {result}"
+      error: "掷骰错误 {error}"
+    vampire:
+      success: "掷骰结果 {name} {result}"
+      error: "掷骰错误 {error}"
+    hidden:
+      success: "暗骰结果 {result}"
+      error: "暗骰错误 {error}"
+      group: "掷骰结果"
+    detail: "掷骰结果 {detail}"
+    expression_error: "掷骰结果 {error}"
+    expression:
+      format_error: "表达式格式错误：{expr}"
+      range_error: "骰子范围无效（数量 1-100，面数 1-1000）"
+      keep_error: "保留骰数量超出范围（骰子数量：{dice_count}）"
+      vampire_arithmetic_error: "吸血鬼骰不可参与四则运算"
+      zero_division: "除数不能为 0"
+      value_error: "表达式解析失败：{error}"
+
+  choice:
+    not_enough: "请至少提供两个可选项。"
+    result: "随机选择：{choice}"
+
+  # ---------- SAN 理智 ----------
+  san:
+    result:
+      success: "成功"
+      failure: "失败"
+    specific_phobia: "特定恐惧症（{roll}）：{phobia}"
+    specific_mania: "特定躁狂症（{roll}）：{mania}"
+    temporary:
+      "1": "失忆：调查员发现自己只记得最后身处的安全地点，持续 1D10 轮。"
+      "2": "假性残疾：调查员出现心因性失明、失聪或肢体失能，持续 1D10 轮。"
+      "3": "暴力倾向：调查员用暴力宣泄恐惧，持续 1D10 轮。"
+      "4": "偏执：调查员陷入严重偏执，持续 1D10 轮。"
+      "5": "重要之人：调查员误认周围某人为重要之人并依附对方，持续 1D10 轮。"
+      "6": "昏厥：调查员当场昏倒，持续 1D10 轮。"
+      "7": "逃避行为：调查员必须尽快逃离当前威胁，持续 1D10 轮。"
+      "8": "歇斯底里：调查员大笑、哭喊或尖叫，持续 1D10 轮。"
+      "9": "恐惧症：调查员获得一次特定恐惧症发作，持续 1D10 轮。"
+      "10": "躁狂症：调查员获得一次特定躁狂症发作，持续 1D10 轮。"
+    long_term:
+      "1": "失忆：调查员醒来后发现自己身在陌生地点，忘记了近期事件。"
+      "2": "被窃：调查员恢复意识时发现重要物品遗失。"
+      "3": "伤害自己：调查员发现自己对自身造成了伤害。"
+      "4": "暴力：调查员在疯狂期间对他人或环境造成破坏。"
+      "5": "极端信念：调查员发展出新的极端信念或执念。"
+      "6": "重要之人：调查员将某人视为新的重要之人。"
+      "7": "被收容：调查员在精神病院、警局或类似地点醒来。"
+      "8": "逃避：调查员恢复意识时发现自己已逃到远处。"
+      "9": "恐惧症：调查员获得一种新的特定恐惧症。"
+      "10": "躁狂症：调查员获得一种新的特定躁狂症。"
+    check_result:
+      loss : |
+        SAN 检定失败，损失 {loss} 点理智。
+      no_loss : |
+        SAN 检定成功，没有理智损失。
+      great_loss : |
+        SAN 大失败，损失 {loss} 点理智。
+      zero : |
+        理智已降至 0。
+
+    temporary_insanity: |
+      {name} 临时疯狂症状：
+      {result}
+    long_term_insanity: |
+      {name} 总结症状：
+      {result}
+
+  # ---------- 先攻 ----------
+  initiative:
+    add: "先攻指令结果 {name} {value}"
+    remove_name: "先攻指令结果 {name}"
+    clear: "已清空。"
+    empty: "当前没有记录。"
+    list: "先攻指令结果 {content}"
+    next_turn: "先攻指令结果 {name} {value}"
+    turn_advance: "先攻指令结果 {current_name} {next_name} {value}"
+
+  # ---------- 角色生成模板 ----------
+  character_list:
+    coc: |
+      角色生成结果
+    dnd: |
+      角色生成结果
+
+  # ---------- 名字生成 ----------
+  generated_names: "随机姓名生成结果 {num} {names}"
