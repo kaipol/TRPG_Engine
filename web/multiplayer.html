@@ -171,15 +171,129 @@
       font-size: 12px;
       overflow-wrap: anywhere;
     }
-    .map-wrap {
-      position: relative;
+    .stage {
+      min-width: 0;
       min-height: 0;
+      overflow: auto;
+      background: #0c1016;
+      padding: 18px;
+    }
+    .scene-board {
+      min-height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 14px;
+    }
+    .scene-hero {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #141922;
       overflow: hidden;
-      background:
-        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
-        #0c1016;
-      background-size: 40px 40px;
+    }
+    .scene-hero img {
+      width: 100%;
+      max-height: 320px;
+      object-fit: cover;
+      display: block;
+      background: #090d13;
+    }
+    .scene-body {
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .scene-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .scene-title h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+    .scene-text {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #d7dee8;
+      line-height: 1.8;
+      font-size: 15px;
+    }
+    .scene-ai {
+      border: 1px solid rgba(125, 211, 252, .22);
+      background: rgba(14, 116, 144, .1);
+      border-radius: 8px;
+      padding: 12px;
+      color: #bfdbfe;
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
+    .option-list {
+      display: grid;
+      gap: 8px;
+    }
+    .option-chip {
+      border: 1px solid var(--line);
+      background: #10141b;
+      border-radius: 8px;
+      padding: 9px 10px;
+      color: #b9c3d0;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .character-card {
+      border: 1px solid var(--line);
+      background: #141922;
+      border-radius: 8px;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    button.character-card {
+      width: 100%;
+      text-align: left;
+      min-height: 0;
+      padding: 10px;
+    }
+    .pick-card.picked {
+      border-color: var(--accent);
+      background: rgba(20, 184, 166, .1);
+    }
+    .character-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+    .role-pill {
+      border: 1px solid rgba(125, 211, 252, .22);
+      color: #7dd3fc;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 11px;
+    }
+    .stat-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .status-pill {
+      border-radius: 6px;
+      padding: 3px 6px;
+      font-size: 11px;
+      background: rgba(134, 239, 172, .08);
+      color: var(--good);
+      border: 1px solid rgba(134, 239, 172, .2);
     }
     .map-toolbar {
       position: absolute;
@@ -259,6 +373,8 @@
     }
     .message.dice { border-color: #f59e0b; }
     .message.ai { border-color: #7dd3fc; }
+    .message.action { border-color: #6ee7b7; }
+    .message.state { border-color: #86efac; }
     .message.system { border-color: #8b5cf6; }
     .msg-head {
       display: flex;
@@ -308,7 +424,7 @@
     }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 6px;
     }
     .tabs button {
@@ -340,7 +456,8 @@
       .topbar { grid-template-columns: 1fr; padding: 10px 12px; }
       .shell { display: block; }
       .panel { min-height: 420px; border-right: none; border-bottom: 1px solid var(--line); }
-      .map-wrap { min-height: 520px; }
+      .stage { min-height: 520px; }
+      .state-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -350,7 +467,7 @@
       <div class="brand"><div class="brand-mark">Z</div><span>Z.R.I.C 多人跑团桌</span></div>
       <div class="roomline">
         <template v-if="room">房间 {{ room.code }} · {{ room.name }}</template>
-        <template v-else>创建或加入房间后开始联机跑团</template>
+        <template v-else>输入房间码后开始联机跑团</template>
       </div>
       <div class="status"><span class="dot" :class="{on: wsConnected}"></span>{{ wsConnected ? '实时同步中' : '未连接' }}</div>
     </header>
@@ -358,93 +475,106 @@
     <main class="shell">
       <aside class="panel">
         <section class="section stack">
-          <div class="title">身份</div>
+          <div class="title">入场</div>
           <div>
             <label>昵称</label>
             <input v-model.trim="profile.name" placeholder="玩家名">
           </div>
-          <div class="row">
-            <div>
-              <label>角色</label>
-              <select v-model="profile.role">
-                <option value="gm">GM</option>
-                <option value="player">玩家</option>
-                <option value="observer">旁观</option>
-              </select>
-            </div>
-            <div>
-              <label>颜色</label>
-              <input v-model.trim="profile.color" placeholder="#7dd3fc">
-            </div>
+          <div class="composer-row">
+            <input v-model.trim="joinCode" @keyup.enter="joinRoomByCode(joinCode)" placeholder="房间码" style="text-transform:uppercase">
+            <button class="primary" @click="joinRoomByCode(joinCode)" :disabled="!joinCode.trim()">进入</button>
           </div>
-        </section>
-
-        <section class="section stack">
-          <div class="title">房间</div>
-          <div class="row">
-            <input v-model.trim="newRoomName" placeholder="房间名">
-            <button class="primary" @click="createRoom">创建</button>
-          </div>
-          <div class="row">
-            <input v-model.trim="joinCode" placeholder="房间码">
-            <button @click="joinRoomByCode(joinCode)">加入</button>
-          </div>
-          <div class="rooms stack">
-            <button @click="refreshRooms">刷新列表</button>
-            <div v-for="item in rooms" :key="item.id" class="room-card" :class="{active: room && room.id === item.id}">
-              <strong>{{ item.name }}</strong>
-              <div class="small">代码 {{ item.code }} · GM {{ item.gm_name || '未设置' }}</div>
-              <button @click="joinRoomByCode(item.code)">进入</button>
-            </div>
+          <div v-if="room" class="room-card active">
+            <strong>{{ room.name }}</strong>
+            <div class="small">房间 {{ room.code }} · {{ wsConnected ? '已同步' : '连接中' }}</div>
           </div>
         </section>
 
         <section class="section stack" v-if="room">
-          <div class="title">成员</div>
+          <div class="title">选择扮演角色</div>
+          <div v-if="playableCharacters.length" class="rooms stack">
+            <button v-for="char in playableCharacters" :key="char.id"
+                    @click="toggleCharacter(char.id)"
+                    class="character-card pick-card"
+                    :class="{picked: selectedCharacterIds.includes(char.id)}">
+              <div class="character-head">
+                <strong>{{ char.name }}</strong>
+                <span class="role-pill">{{ char.role || '角色' }}</span>
+              </div>
+              <div class="stat-row">
+                <span>HP {{ char.hp }}</span>
+                <span>SAN {{ char.san }}</span>
+              </div>
+              <div class="small">{{ char.inventory || '等待玩家接入' }}</div>
+            </button>
+          </div>
+          <div v-else class="small">AI-KP 正在从剧本准备可扮演角色。</div>
+          <button class="primary" @click="claimCharacters" :disabled="!selectedCharacterIds.length || characterClaimBusy">
+            {{ characterClaimBusy ? '记录中...' : selectedCharacterIds.length ? '确认扮演 ' + selectedCharacterNames.join(' / ') : '选择角色后确认' }}
+          </button>
+          <div v-if="characterClaimMsg" class="small">{{ characterClaimMsg }}</div>
+        </section>
+
+        <section class="section stack" v-if="room">
+          <div class="title">同桌成员</div>
           <div class="members">
             <div class="member" v-for="m in members" :key="m.player_id">
               <span class="swatch" :style="{color:m.color}"></span>
-              <span>{{ m.display_name }}<div class="small">{{ m.role }}</div></span>
+              <span>{{ m.display_name }}<div class="small">{{ m.role === 'gm' ? '主持' : '玩家' }}</div></span>
               <span class="small">{{ m.connected ? '在线' : '离线' }}</span>
             </div>
           </div>
         </section>
       </aside>
 
-      <section class="map-wrap">
-        <div class="map-toolbar">
-          <button @click="addOwnToken" :disabled="!room">新增 Token</button>
-          <label style="margin:0">
-            <input type="file" accept="image/*" style="display:none" @change="uploadMap">
-            <button :disabled="!room">上传地图</button>
-          </label>
+      <section class="stage">
+        <div class="scene-board" v-if="room">
+          <article class="scene-hero">
+            <img v-if="sceneImage" :src="sceneImage" alt="">
+            <div class="scene-body">
+              <div class="scene-title">
+                <h1>{{ currentScene?.name || '等待 AI-KP 开场' }}</h1>
+                <span class="small" v-if="currentRoom">{{ currentRoom.label }}</span>
+              </div>
+              <div class="scene-text">{{ sceneText || '主持端载入剧本并推进场景后，这里会显示与单人房间一致的当前场景。' }}</div>
+              <div v-if="gameState.scene_ai_text" class="scene-ai">{{ gameState.scene_ai_text }}</div>
+            </div>
+          </article>
+
+          <section class="state-grid">
+            <div class="character-card" v-for="char in visibleCharacters" :key="char.id">
+              <div class="character-head">
+                <strong>{{ char.name }}</strong>
+                <span class="role-pill">{{ char.role || '角色' }}</span>
+              </div>
+              <div class="stat-row">
+                <span>HP {{ char.hp }}</span>
+                <span>SAN {{ char.san }}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+                <span class="status-pill">{{ statusLabel(char.status) }}</span>
+                <span class="small" style="text-align:right">{{ char.inventory || '无附加状态' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="currentScene?.options?.length" class="option-list">
+            <div class="title">可见行动方向</div>
+            <div v-for="opt in currentScene.options" :key="opt.id" class="option-chip">{{ opt.text }}</div>
+          </section>
         </div>
-        <div class="map-stage" ref="mapStage" @pointermove="dragMove" @pointerup="dragEnd" @pointerleave="dragEnd">
-          <img v-if="room && room.map_background_url" class="map-bg" :src="room.map_background_url" alt="">
-          <div
-            v-for="token in tokens"
-            :key="token.token_id"
-            class="token"
-            :style="tokenStyle(token)"
-            @pointerdown.stop="dragStart(token, $event)"
-          >
-            <img v-if="token.avatar_url" :src="token.avatar_url" alt="">
-            <span v-else>{{ token.name.slice(0,1).toUpperCase() }}</span>
-            <div class="token-name">{{ token.name }}</div>
-          </div>
+        <div v-else style="height:100%;display:grid;place-items:center;color:var(--muted);text-align:center;line-height:1.7;padding:24px">
+          输入房间码后即可看到剧本背景、开场白和可扮演角色。
         </div>
       </section>
 
       <aside class="panel right">
-        <section class="section">
-          <div class="tabs">
-            <button :class="{active: tab==='chat'}" @click="tab='chat'">公屏</button>
-            <button :class="{active: tab==='dice'}" @click="tab='dice'">骰子</button>
-            <button :class="{active: tab==='scenario'}" @click="tab='scenario'">剧本</button>
-          </div>
+        <section class="section stack">
+          <div class="title">AI-KP 记录</div>
+          <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '先选择角色，再提交行动。' }}</div>
         </section>
 
-        <section class="messages" v-show="tab==='chat'" ref="messagesEl">
+        <section class="messages" ref="messagesEl">
           <div v-for="msg in messages" :key="msg.id" class="message" :class="msg.kind">
             <div class="msg-head">
               <span>{{ msg.sender_name || msg.kind }}</span>
@@ -454,61 +584,14 @@
           </div>
         </section>
 
-        <section class="section stack" v-show="tab==='dice'">
-          <div class="title">联机投骰</div>
-          <div>
-            <label>表达式</label>
-            <input v-model.trim="dice.expression" placeholder="1d20+5 / 3d6 / 1d100">
-          </div>
-          <div class="row">
-            <div>
-              <label>技能名</label>
-              <input v-model.trim="dice.skill_name" placeholder="侦查">
-            </div>
-            <div>
-              <label>技能值/目标值</label>
-              <input v-model.number="dice.skill_value" type="number" placeholder="60">
-            </div>
-          </div>
-          <div>
-            <label>原因</label>
-            <input v-model.trim="dice.reason" placeholder="调查书架">
-          </div>
-          <label><input type="checkbox" v-model="dice.ask_ai" style="width:auto;margin-right:6px"> AI-KP 生成叙事反馈</label>
-          <button class="primary" @click="rollDice" :disabled="!room">投骰并同步</button>
-          <p class="hint">聊天框也支持直接输入 `/r 1d20+5` 或 `.r 1d100`。</p>
-        </section>
-
-        <section class="section stack" v-show="tab==='scenario'">
-          <div class="title">AI 剧本导入</div>
-          <div>
-            <label>标题</label>
-            <input v-model.trim="scenario.title" placeholder="规则书 / 世界观 / 模组名">
-          </div>
-          <div class="fileline">
-            <div>
-              <label>TXT / Markdown / PDF</label>
-              <input type="file" accept=".txt,.md,.markdown,.pdf" @change="scenario.file = $event.target.files[0]">
-            </div>
-            <button class="primary" @click="uploadScenario" :disabled="!room || !scenario.file || scenario.busy">
-              {{ scenario.busy ? '导入中' : '导入' }}
-            </button>
-          </div>
-          <div class="hint">导入后会写入 ZRIC RAG 知识库，后续 AI 推演可检索相关规则与剧情片段。</div>
-          <div class="title">Token</div>
-          <div class="tokens">
-            <div v-for="token in tokens" :key="token.token_id" class="token-row">
-              <span class="swatch" :style="{color:token.color}"></span>
-              <span>{{ token.name }}<div class="small">{{ Math.round(token.x) }}, {{ Math.round(token.y) }}</div></span>
-              <button class="icon" @click="focusToken(token)">⌖</button>
-            </div>
-          </div>
-        </section>
-
         <form class="composer" @submit.prevent="sendChat">
           <div class="composer-row">
-            <input v-model="chatText" :disabled="!room" placeholder="发送消息，或 /r 1d20+5">
-            <button class="primary" :disabled="!room || !chatText.trim()">发送</button>
+            <input v-model="chatText" :disabled="!room" placeholder="描述你的行动，或 /r 1d20+5">
+            <button type="button" @click="submitAction" :disabled="!room || !chatText.trim() || !selectedCharacterIds.length" class="primary">交给 AI</button>
+          </div>
+          <div class="composer-row">
+            <span class="hint">公开聊天会进入记录；以 /r 开头会自动投骰。</span>
+            <button class="primary" :disabled="!room || !chatText.trim()">公屏</button>
           </div>
         </form>
       </aside>
@@ -529,12 +612,13 @@
           messages: [],
           tokens: [],
           documents: [],
+          gameState: {},
           ws: null,
           wsConnected: false,
           profile: {
             id: saved.id || crypto.randomUUID(),
             name: saved.name || "玩家",
-            role: saved.role || "player",
+            role: "player",
             color: saved.color || "#7dd3fc",
           },
           roomTokens: savedTokens.roomTokens || {},
@@ -542,7 +626,10 @@
           newRoomName: "新的跑团房间",
           joinCode: "",
           chatText: "",
-          tab: "chat",
+          actionType: "mixed",
+          selectedCharacterIds: saved.characterIds || [],
+          characterClaimBusy: false,
+          characterClaimMsg: "",
           dice: {
             expression: "1d100",
             skill_name: "",
@@ -562,12 +649,51 @@
         profile: {
           deep: true,
           handler(value) {
+            value.role = "player";
+            value.characterIds = this.selectedCharacterIds;
             localStorage.setItem("zric-mp-profile", JSON.stringify(value));
           }
         }
       },
-      mounted() {
-        this.refreshRooms();
+      computed: {
+        currentScene() {
+          return this.gameState?.current_scene || null;
+        },
+        currentRoom() {
+          return this.gameState?.current_room || null;
+        },
+        sceneText() {
+          const scene = this.currentScene || {};
+          return scene.expanded_content || this.gameState?.scene_ai_text || scene.content || "";
+        },
+        sceneImage() {
+          const scene = this.currentScene || {};
+          return this.gameState?.scene_image || scene.scene_image || "";
+        },
+        visibleCharacters() {
+          return this.gameState?.characters || [];
+        },
+        playableCharacters() {
+          return this.gameState?.playable_characters || this.visibleCharacters;
+        },
+        selectedCharacters() {
+          return this.playableCharacters.filter(char => this.selectedCharacterIds.includes(char.id));
+        },
+        selectedCharacterNames() {
+          return this.selectedCharacters.map(char => char.name);
+        },
+        actorName() {
+          return this.selectedCharacterNames.join("/") || this.profile.name;
+        }
+      },
+      async mounted() {
+        const params = new URLSearchParams(location.search);
+        const urlRoomCode = (params.get("room") || params.get("code") || "").trim().toUpperCase();
+        if (urlRoomCode) this.joinCode = urlRoomCode;
+        await this.refreshRooms();
+        if (urlRoomCode) this.joinRoomByCode(urlRoomCode).catch(err => {
+          alert(err.message || "加入房间失败");
+        });
       },
       methods: {
         async api(path, options = {}) {
@@ -630,6 +756,7 @@
         },
         applySnapshot(data) {
           this.room = data.room || this.room;
+          this.gameState = data.game_state || this.gameState || {};
           this.members = data.members || this.members;
           this.messages = data.messages || this.messages;
           this.tokens = data.tokens || this.tokens;
@@ -643,7 +770,7 @@
           const params = new URLSearchParams({
             player_id: this.profile.id,
             name: this.profile.name,
-            role: this.roomTokens[this.room.code] ? "gm" : this.profile.role,
+            role: this.profile.role,
           });
           if (this.memberTokens[this.room.code]) params.set("member_token", this.memberTokens[this.room.code]);
           const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/rooms/${this.room.code}?${params}`;
@@ -654,11 +781,17 @@
           this.ws.onmessage = (event) => this.handleEvent(JSON.parse(event.data));
         },
         handleEvent(evt) {
+          if (evt.member_token && evt.room?.code) {
+            this.memberTokens[evt.room.code] = evt.member_token;
+            this.saveRoomTokens();
+          }
           if (evt.type === "snapshot") {
             this.applySnapshot(evt);
           } else if (evt.type === "message.created") {
             if (!this.messages.some(m => m.id === evt.message.id)) this.messages.push(evt.message);
             this.scrollMessages();
+          } else if (evt.type === "game.state") {
+            this.gameState = evt.game_state || this.gameState || {};
           } else if (evt.type === "member.updated") {
             const index = this.members.findIndex(m => m.player_id === evt.member.player_id);
             if (index >= 0) this.members.splice(index, 1, evt.member);
@@ -674,6 +807,37 @@
             this.applySnapshot(evt.snapshot);
           }
         },
+        statusLabel(status) {
+          return ({ active: "在场", hidden: "未登场", benched: "暂离", dead: "死亡" })[status || "active"] || status || "在场";
+        },
+        toggleCharacter(id) {
+          if (this.selectedCharacterIds.includes(id)) {
+            this.selectedCharacterIds = this.selectedCharacterIds.filter(x => x !== id);
+          } else {
+            this.selectedCharacterIds = [...this.selectedCharacterIds, id];
+          }
+          localStorage.setItem("zric-mp-profile", JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
+        },
+        async claimCharacters() {
+          if (!this.room || !this.selectedCharacterIds.length) return;
+          this.characterClaimBusy = true;
+          this.characterClaimMsg = "";
+          try {
+            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/characters/claim`, {
+              method: "POST",
+              body: JSON.stringify({
+                player_id: this.profile.id,
+                character_ids: this.selectedCharacterIds,
+              }),
+            });
+            this.applySnapshot(data);
+            this.characterClaimMsg = "角色已确认，AI-KP 会按你的行动推进剧情。";
+          } catch (err) {
+            this.characterClaimMsg = err.message || "角色确认失败";
+          } finally {
+            this.characterClaimBusy = false;
+          }
+        },
         sendChat() {
           const content = this.chatText.trim();
           if (!content || !this.room) return;
@@ -684,7 +848,7 @@
               method: "POST",
               body: JSON.stringify({
                 sender_id: this.profile.id,
-                sender_name: this.profile.name,
+                sender_name: this.actorName,
                 content,
               }),
             }).then(data => {
@@ -693,13 +857,41 @@
           }
           this.chatText = "";
         },
+        async submitAction() {
+          const action = this.chatText.trim();
+          if (!action || !this.room) return;
+          const payload = {
+            action,
+            action_type: this.actionType || "mixed",
+            context: this.sceneText || "",
+            actor_name: this.actorName,
+          };
+          if (this.wsConnected) this.ws.send(JSON.stringify({ type: "player.action", payload }));
+          else {
+            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/action`, {
+              method: "POST",
+              body: JSON.stringify({
+                actor_id: this.profile.id,
+                actor_name: this.actorName,
+                ...payload,
+              }),
+            });
+            if (data.message && !this.messages.some(m => m.id === data.message.id)) this.messages.push(data.message);
+            if (data.ai_message && !this.messages.some(m => m.id === data.ai_message.id)) this.messages.push(data.ai_message);
+            if (data.state_message && !this.messages.some(m => m.id === data.state_message.id)) this.messages.push(data.state_message);
+            if (data.game_state) this.gameState = data.game_state;
+            this.scrollMessages();
+          }
+          this.chatText = "";
+        },
         async rollDice() {
           if (!this.room) return;
           const payload = {
             ...this.dice,
             actor_id: this.profile.id,
-            actor_name: this.profile.name,
+            actor_name: this.actorName,
             skill_value: this.dice.skill_value === "" ? null : this.dice.skill_value,
+            context: this.sceneText || "",
           };
           if (this.wsConnected) this.ws.send(JSON.stringify({ type: "dice.roll", payload }));
           else await this.api(`/api/multiplayer/rooms/${this.room.code}/dice`, { method: "POST", body: JSON.stringify(payload) });

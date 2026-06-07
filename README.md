@@ -35,12 +35,10 @@ Copy-Item .env.example .env
 - `OPENAI_COMPAT_CHAT_MODEL`
 - `OPENAI_COMPAT_EMBEDDING_MODEL`
 - `OPENAI_COMPAT_IMAGE_MODEL`
-- `OPENAI_COMPAT_STT_MODEL`
-- `OPENAI_COMPAT_TTS_MODEL`
 
 前端支持保存多个 OpenAI 兼容供应商 profile，并写入本地 `openai_providers.json`。该文件包含本地 API Key，已在 `.gitignore` 中忽略。
 
-模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding、Image、STT 和 TTS 每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
+模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding 和 Image 每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
 
 如果兼容端点的 `/models` 请求失败，后端会保留当前已配置的模型作为兜底选项，避免前端列表为空。这种情况下下拉框可能只显示当前 active model，并会在接口响应的 `error` 字段中返回远端错误原因。
 
@@ -73,7 +71,7 @@ E:\TRPG_Engine
 - AI 推演：OpenAI 兼容 chat 模型、模型列表获取、搜索、选择与多供应商切换。
 - 剧本导入：支持 PDF、DOCX、TXT、Markdown 导入，并尽量提取图片资源生成可玩剧本。
 - RAG 知识库：文档切片、embedding、关键词加向量混合检索。
-- 图像 / STT / TTS：统一使用 OpenAI 兼容供应商配置。
+- 图像生成：统一使用 OpenAI 兼容供应商配置。
 - 记忆系统：短期工作区、长期记忆折叠、世界实体状态注入。
 - 地图与触发器：场景拓扑、房间状态、物品/AI 条件触发。
 - 多端展示：GM 控制台、投屏端、手机私信、多房间联机桌。

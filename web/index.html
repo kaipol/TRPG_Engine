@@ -34,7 +34,7 @@ tailwind.config = {
 <style>
 /* ── 基础 ── */
 *,:before,:after { box-sizing: border-box; margin:0; padding:0; }
-html,body { height:100%; overflow:hidden; color-scheme:dark; }
+html,body { min-height:100%; overflow:auto; color-scheme:dark; }
 body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd6; -webkit-font-smoothing:antialiased; }
 
 /* ── 滚动条 ── */
@@ -60,6 +60,16 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 /* ── 面板基础 ── */
 .panel { background:var(--panel-bg); border:1px solid var(--panel-border); }
 .panel-deep { background:var(--panel-deep); border:1px solid var(--panel-border); }
+
+/* ── 首页响应式滚动 ── */
+.app-root { min-height:100vh; display:flex; flex-direction:column; position:relative; }
+.launch-grid { flex:1; min-height:100vh; display:flex; align-items:center; justify-content:center; position:relative; overflow-y:auto; padding:24px 12px; }
+.launch-card { width:min(460px, calc(100vw - 24px)); border-radius:10px; box-shadow:0 32px 80px rgba(0,0,0,.5); position:relative; z-index:1; }
+
+@media (max-width: 640px) {
+    .launch-grid { align-items:flex-start; padding:14px 10px 24px; }
+    .launch-card { width:100%; max-width:460px; }
+}
 
 /* ── 标签 ── */
 .tag { font-family:"JetBrains Mono",monospace; font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim); }
@@ -90,19 +100,22 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 .model-picker { position:relative; display:flex; gap:6px; }
 .model-picker .inp { min-width:0; flex:1; }
 .model-picker-menu {
-    position:absolute; z-index:80; left:0; right:0; top:calc(100% + 6px);
+    position:absolute; z-index:80; left:0; top:calc(100% + 6px);
+    width:min(620px, calc(100vw - 48px)); min-width:100%; max-width:calc(100vw - 48px);
     background:#0b0e17; border:1px solid rgba(255,255,255,.1); border-radius:6px;
     box-shadow:0 18px 42px rgba(0,0,0,.45); padding:8px;
 }
+.model-picker-menu.menu-align-right { left:auto; right:0; }
 .model-picker-search { margin-bottom:7px; padding:6px 8px; font-size:12px; }
-.model-picker-list { max-height:190px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
+.model-picker-list { max-height:clamp(220px, 42vh, 360px); overflow:auto; display:flex; flex-direction:column; gap:4px; }
 .model-picker-option {
     width:100%; border:1px solid transparent; border-radius:5px; background:transparent;
     color:var(--text); text-align:left; padding:7px 8px; font-size:12px; cursor:pointer;
-    font-family:"JetBrains Mono",monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-family:"JetBrains Mono",monospace; line-height:1.35; min-height:32px; overflow-wrap:anywhere;
 }
 .model-picker-option:hover,
 .model-picker-option.active { background:rgba(232,180,75,.1); border-color:rgba(232,180,75,.22); color:#f0dea0; }
+.model-picker-option:disabled { cursor:not-allowed; color:#4b5563; opacity:.65; }
 .model-picker-empty { padding:10px 8px; color:#4b5563; font-size:12px; }
 
 /* ── 按钮基础 (放大) ── */
@@ -265,15 +278,15 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 </head>
 
 <body>
-<div id="app" style="height:100vh;display:flex;flex-direction:column;position:relative">
+<div id="app" class="app-root">
 
 <!-- ══════════════════════════════════════════════════════════════
      启动屏
 ══════════════════════════════════════════════════════════════ -->
-<div v-if="appState==='menu'" class="launch-grid" style="flex:1;display:flex;align-items:center;justify-content:center;position:relative">
+<div v-if="appState==='menu'" class="launch-grid">
     <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 50% 40%,rgba(232,180,75,.04) 0%,transparent 65%)"></div>
     
-    <div class="panel" style="width:460px;border-radius:10px;box-shadow:0 32px 80px rgba(0,0,0,.5);position:relative;z-index:1">
+    <div class="panel launch-card">
         <div style="padding:32px 36px 24px;border-bottom:1px solid rgba(255,255,255,.06)">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
                 
@@ -324,7 +337,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                     <label class="tag" style="display:flex;align-items:center;gap:5px">
                         <i class="ph ph-robot" style="font-size:13px"></i> AI 推演模型
                     </label>
-                    <button @click="showApiKeyPanel=true" class="btn btn-ghost btn-icon" title="配置 OpenAI 兼容供应商" style="width:28px;height:28px;padding:0">
+                    <button @click="openApiKeyPanel" class="btn btn-ghost btn-icon" title="配置 OpenAI 兼容供应商" style="width:28px;height:28px;padding:0">
                         <i class="ph ph-sliders-horizontal" style="font-size:14px"></i>
                     </button>
                 </div>
@@ -336,43 +349,26 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             {{ p.name || p.id }}{{ p.configured ? '' : '（未配置）' }}
                         </option>
                     </select>
-                    <button @click="fetchAiModels" :disabled="isFetchingAiModels" class="btn btn-ghost btn-sm" title="从当前供应商获取模型">
+                    <button @click="fetchAiModels(true)" :disabled="isFetchingAiModels" class="btn btn-ghost btn-sm" title="从当前供应商获取模型">
                         <i :class="isFetchingAiModels?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingAiModels?'animation:spin 1s linear infinite':''"></i>
                         获取模型
                     </button>
                 </div>
-                <div style="display:flex;gap:8px;margin-bottom:8px">
-                    <input v-model.trim="aiModelSearch" @keyup.enter="fetchAiModels" class="inp inp-mono"
-                           placeholder="搜索端点模型 ID…" style="flex:1;font-size:12px;padding:7px 9px">
-                    <button @click="fetchAiModels" :disabled="isFetchingAiModels" class="btn btn-ghost btn-icon" title="搜索模型">
-                        <i class="ph ph-magnifying-glass" style="font-size:15px"></i>
+                <div v-if="aiModels.length" class="model-picker" style="margin-bottom:8px">
+                    <input v-model.trim="aiModelDraft" @focus="openAiModelDropdown" @keydown.enter.prevent="applyAiModelDraft" class="inp inp-mono"
+                           placeholder="选择或输入 AI 推演 Chat Model" title="输入模型 ID 后按回车生效，或从下拉列表选择" style="font-size:12px">
+                    <button @click="toggleAiModelDropdown" class="btn btn-ghost btn-icon" title="选择 AI 推演 Chat Model" style="width:34px;height:34px;padding:0;flex:0 0 34px">
+                        <i :class="openAiModelDropdownState?'ph ph-caret-up':'ph ph-caret-down'" style="font-size:14px"></i>
                     </button>
-                </div>
-                <select v-if="aiModels.length" :value="activeAiModel" @change="switchAiModel($event.target.value)" class="inp inp-mono"
-                        style="width:100%;font-size:12px;margin-bottom:8px">
-                    <option value="" disabled>选择 AI 推演 Chat Model</option>
-                    <option v-for="m in aiModels" :key="'select-'+m.key" :value="m.key" :disabled="!m.available">
-                        {{ m.label || m.key }}{{ m.provider ? ' @ ' + m.provider : '' }}{{ m.available ? '' : '（未配置）' }}
-                    </option>
-                </select>
-                <div v-if="aiModels.length" style="display:grid;grid-template-columns:1fr;gap:7px;max-height:156px;overflow-y:auto;padding-right:2px">
-                    <button v-for="m in aiModels" :key="m.key"
-                            @click="switchAiModel(m.key)" :disabled="!m.available"
-                            class="btn btn-sm" style="padding:9px 10px;font-size:12px;transition:all .15s;justify-content:flex-start;min-width:0"
-                            :style="activeAiModel===m.key
-                                ? {background:`rgba(${modelAccentRgb(m.key)},.12)`,
-                                   borderColor:`rgba(${modelAccentRgb(m.key)},.4)`,
-                                   color: modelAccentColor(m.key),
-                                   boxShadow:`0 0 12px rgba(${modelAccentRgb(m.key)},.15)`}
-                                : {background:'#090b10', borderColor:'rgba(255,255,255,.07)', color: m.available ? '#6b7280' : '#374151'}">
-                        <i :class="modelIcon(m.key)"
-                           style="font-size:14px;flex-shrink:0"
-                           :style="{opacity: m.available ? 1 : 0.3}"></i>
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:5px">{{ m.label || m.key }}</span>
-                        <span v-if="m.provider" style="font-size:10px;margin-left:auto;padding-left:6px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:92px">{{ m.provider }}</span>
-                        <span v-if="!m.available" style="font-size:10px;margin-left:4px;opacity:.5;flex-shrink:0">(未配置)</span>
-                        <span v-if="activeAiModel===m.key" style="font-size:10px;margin-left:6px;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px;flex-shrink:0">当前</span>
-                    </button>
+                    <div v-if="openAiModelDropdownState" class="model-picker-menu">
+                        <input v-model.trim="aiModelSearch" class="inp inp-mono model-picker-search" placeholder="在已获取模型中搜索 Chat Model" @keydown.enter.prevent="selectFirstFilteredAiModel">
+                        <div class="model-picker-list">
+                            <button v-for="m in filteredAiModels()" :key="'ai-drop-'+m.key" @click="selectAiModel(m.key)" :disabled="!m.available" class="model-picker-option" :class="{active: activeAiModel===m.key}" :title="m.label || m.key">
+                                {{ m.label || m.key }}{{ m.provider ? ' @ ' + m.provider : '' }}{{ m.available ? '' : '（未配置）' }}
+                            </button>
+                            <div v-if="!filteredAiModels().length" class="model-picker-empty">没有匹配的模型</div>
+                        </div>
+                    </div>
                 </div>
                 <div v-else style="border:1px solid rgba(255,255,255,.06);background:#090b10;border-radius:8px;padding:10px 11px;font-size:12px;color:#6b7280;line-height:1.5">
                     <div style="display:flex;align-items:center;gap:7px;color:#9ca3af;margin-bottom:4px">
@@ -395,13 +391,17 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 {{ isLoading ? '正在初始化...' : '载入剧本并开始' }}
             </button>
 
+            <div v-if="campaignLoadSummary" style="font-size:12px;color:#4fc98a;line-height:1.6;margin:-4px 0 12px;padding:8px 10px;background:rgba(79,201,138,.06);border:1px solid rgba(79,201,138,.18);border-radius:6px">
+                {{ campaignLoadSummary }}
+            </div>
+
             <button @click="enterCurrentGame" class="btn btn-ghost" style="width:100%;font-size:13px">
                 <i class="ph ph-arrow-clockwise"></i> 恢复当前会话
             </button>
 
             <!-- ── API Key 配置入口 ── -->
             <div style="margin-top:20px;border-top:1px solid rgba(255,255,255,.06);padding-top:16px">
-                <button @click="showApiKeyPanel=true"
+                <button @click="openApiKeyPanel"
                         class="btn btn-ghost btn-sm" style="width:100%;justify-content:space-between;padding:8px 10px">
                     <span style="display:flex;align-items:center;gap:6px">
                         <i class="ph ph-key" style="font-size:14px"></i>
@@ -588,7 +588,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             <button v-if="(modelOptions[field.capability]||[]).length" @click="toggleModelDropdown(field.capability)" class="btn btn-ghost btn-icon" :title="'选择 '+field.label" style="width:34px;height:34px;padding:0;flex:0 0 34px">
                                 <i :class="openModelDropdownCapability===field.capability?'ph ph-caret-up':'ph ph-caret-down'" style="font-size:14px"></i>
                             </button>
-                            <div v-if="openModelDropdownCapability===field.capability && (modelOptions[field.capability]||[]).length" class="model-picker-menu">
+                            <div v-if="openModelDropdownCapability===field.capability && (modelOptions[field.capability]||[]).length" class="model-picker-menu" :class="{'menu-align-right': field.capability==='embedding'}">
                                 <input v-model.trim="dropdownModelSearches[field.capability]" class="inp inp-mono model-picker-search" :placeholder="'在已获取模型中搜索 '+field.label" @keydown.enter.prevent="selectFirstFilteredConfigModel(field)">
                                 <div class="model-picker-list">
                                     <button v-for="m in filteredConfigModels(field.capability)" :key="field.capability+'-drop-'+m.key" @click="selectConfigModel(field.key, m.key, field.capability)" class="model-picker-option" :class="{active: apiKeyInputs[field.key]===m.key}" :title="m.label || m.key">
@@ -606,10 +606,6 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                     <div>
                         <label class="tag" style="display:block;margin-bottom:7px">Image Size</label>
                         <input v-model.trim="apiKeyInputs.imageSize" class="inp inp-mono" placeholder="1024x1024" style="font-size:12px">
-                    </div>
-                    <div>
-                        <label class="tag" style="display:block;margin-bottom:7px">TTS Voice</label>
-                        <input v-model.trim="apiKeyInputs.ttsVoice" class="inp inp-mono" placeholder="alloy" style="font-size:12px">
                     </div>
                 </div>
             </div>
@@ -636,9 +632,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
     <audio ref="audioRef" loop :src="currentTrackUrl"></audio>
 
     <!-- ── 顶部应用栏 ── -->
-    <header class="panel" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:20">
+    <header class="panel" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
         <!-- 左侧 -->
-        <div style="display:flex;align-items:center;gap:0">
+        <div style="display:flex;align-items:center;gap:0;min-width:0;flex:1">
             <button @click="appState='menu'" class="btn btn-ghost btn-sm" style="gap:6px;margin-right:16px;padding:6px 10px">
                 <i class="ph ph-arrow-left" style="font-size:15px"></i>
                 <span style="font-family:'JetBrains Mono';font-size:12px;letter-spacing:.06em;font-weight:600">Z.R.I.C</span>
@@ -653,81 +649,46 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 </span>
             </div>
 
-            <div v-if="currentNode" style="display:flex;align-items:center;gap:0;margin-left:24px">
+            <div v-if="currentNode" style="display:flex;align-items:center;gap:0;margin-left:24px;min-width:0">
                 <div style="width:1px;height:24px;background:rgba(255,255,255,.07);margin-right:16px"></div>
                 <span style="font-size:13px;color:#6b7280">当前：</span>
-                <span style="font-size:14px;color:#c9cdd6;margin-left:4px;font-weight:600;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
+                <span style="font-size:14px;color:#c9cdd6;margin-left:4px;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
                 <span style="font-family:'JetBrains Mono';font-size:12px;color:#374151;margin-left:8px">#{{ currentNode.id }}</span>
             </div>
 
-            <!-- AI 模型指示器 -->
-            <div style="display:flex;align-items:center;gap:6px;margin-left:20px;padding:4px 10px;border-radius:4px;cursor:pointer"
-                 :style="{background:`rgba(${modelAccentRgb(activeAiModel)},.06)`,
-                          border:`1px solid rgba(${modelAccentRgb(activeAiModel)},.2)`}"
-                 @click="cycleModel()"
-                 title="点击循环切换模型">
-                <i :class="modelIcon(activeAiModel)" style="font-size:12px"
-                   :style="{color: modelAccentColor(activeAiModel)}"></i>
-                <span style="font-family:'JetBrains Mono';font-size:10px;font-weight:600;letter-spacing:.04em"
-                      :style="{color: modelAccentColor(activeAiModel)}">
-                    {{ aiModels.find(m=>m.key===activeAiModel)?.label || activeAiModel }}
-                </span>
+            <!-- AI 模型选择：输入后回车或从下拉选择才会切换 -->
+            <div class="model-picker" style="width:260px;margin-left:20px;flex-shrink:0">
+                <input v-model.trim="aiModelDraft" @focus="openAiModelDropdown" @keydown.enter.prevent="applyAiModelDraft" class="inp inp-mono"
+                       placeholder="Chat Model" title="输入模型 ID 后按回车生效，或从下拉列表选择"
+                       style="height:34px;font-size:12px;border-color:rgba(79,201,138,.22);color:#9ee6bf">
+                <button @click="toggleAiModelDropdown" class="btn btn-ghost btn-icon" title="选择 AI 推演模型" style="width:34px;height:34px;padding:0;flex:0 0 34px">
+                    <i :class="openAiModelDropdownState?'ph ph-caret-up':'ph ph-caret-down'" style="font-size:14px"></i>
+                </button>
+                <div v-if="openAiModelDropdownState" class="model-picker-menu">
+                    <input v-model.trim="aiModelSearch" class="inp inp-mono model-picker-search" placeholder="在已获取模型中搜索 Chat Model" @keydown.enter.prevent="selectFirstFilteredAiModel">
+                    <div class="model-picker-list">
+                        <button v-for="m in filteredAiModels()" :key="'header-ai-drop-'+m.key" @click="selectAiModel(m.key)" :disabled="!m.available" class="model-picker-option" :class="{active: activeAiModel===m.key}" :title="m.label || m.key">
+                            {{ m.label || m.key }}{{ m.provider ? ' @ ' + m.provider : '' }}{{ m.available ? '' : '（未配置）' }}
+                        </button>
+                        <div v-if="!filteredAiModels().length" class="model-picker-empty">没有匹配的模型</div>
+                    </div>
+                </div>
             </div>
         </div>
 
         <!-- 右侧工具栏 -->
-        <div style="display:flex;align-items:center;gap:6px">
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <button @click="openMultiplayerModal" class="btn btn-sm" style="background:rgba(56,189,248,.06);border-color:rgba(56,189,248,.18);color:#7dd3fc">
+                <i class="ph ph-users-three" style="font-size:15px"></i>
+                <span>{{ multiplayerRoom ? '房间 ' + multiplayerRoom.code : '多人房间' }}</span>
+                <span v-if="multiplayerMembers.length" style="background:rgba(56,189,248,.14);border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700">{{ multiplayerMembers.length }}</span>
+            </button>
             <button @click="exportSave" class="btn btn-ghost btn-sm">
                 <i class="ph ph-floppy-disk" style="font-size:15px"></i> 存档
             </button>
-            <button @click="openBattleReportModal" class="btn btn-sm" style="background:rgba(232,180,75,.06);border-color:rgba(232,180,75,.15);color:#9b7830">
-                <i class="ph ph-scroll" style="font-size:15px"></i> 战报
+            <button @click="openGameSettingsModal" class="btn btn-ghost btn-sm">
+                <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
             </button>
-
-            <div style="width:1px;height:24px;background:rgba(255,255,255,.07);margin:0 6px"></div>
-
-            <!-- 模块入口组 -->
-            <div style="display:flex;align-items:center;background:#0b0e17;border:1px solid rgba(255,255,255,.07);border-radius:6px;overflow:hidden">
-                <button @click="openMemoryModal"   class="btn btn-sm" style="border-radius:0;border:none;border-right:1px solid rgba(255,255,255,.07);background:transparent;color:#c084fc">
-                    <i class="ph ph-brain" style="font-size:14px"></i> 记忆流
-                </button>
-                <button @click="openLorebookModal" class="btn btn-sm" style="border-radius:0;border:none;border-right:1px solid rgba(255,255,255,.07);background:transparent;color:#a78bfa">
-                    <i class="ph ph-books" style="font-size:14px"></i> 百科库
-                </button>
-                <button @click="openTriggerModal"  class="btn btn-sm" style="border-radius:0;border:none;border-right:1px solid rgba(255,255,255,.07);background:transparent;color:#f87171">
-                    <i class="ph ph-lightning" style="font-size:14px"></i> 触发器
-                </button>
-                <button @click="openWorldviewModal" class="btn btn-sm" style="border-radius:0;border:none;background:transparent;color:#60a5fa">
-                    <i class="ph ph-globe" style="font-size:14px"></i> 世界观
-                </button>
-                <button @click="openWorldEntitiesPanel" class="btn btn-sm" style="border-radius:0;border:none;border-left:1px solid rgba(255,255,255,.07);background:transparent;color:#fb923c">
-                    <i class="ph ph-graph" style="font-size:14px"></i> 实体
-                    <span v-if="worldEntities.length" style="background:rgba(251,146,60,.15);color:#fb923c;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700;margin-left:2px">{{ worldEntities.length }}</span>
-                </button>
-                <button @click="openRagModal" class="btn btn-sm" style="border-radius:0;border:none;border-left:1px solid rgba(255,255,255,.07);background:transparent;color:#818cf8">
-                    <i class="ph ph-database" style="font-size:14px"></i> 知识库
-                    <span v-if="ragDocuments.length" style="background:rgba(129,140,248,.15);color:#818cf8;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700;margin-left:2px">{{ ragDocuments.length }}</span>
-                </button>
-                <button @click="openMapModal" class="btn btn-sm" style="border-radius:0;border:none;border-left:1px solid rgba(255,255,255,.07);background:transparent;color:#38bdf8">
-                    <i class="ph ph-map-trifold" style="font-size:14px"></i> 地图
-                    <span v-if="mapRooms.length" style="background:rgba(56,189,248,.15);color:#38bdf8;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700;margin-left:2px">{{ mapRooms.length }}</span>
-                </button>
-                <button @click="openTimelinePanel" class="btn btn-sm" style="border-radius:0;border:none;border-left:1px solid rgba(255,255,255,.07);background:transparent;" :style="{color:timelinePanelOpen?'#34d399':'#6ee7b7'}">
-                    <i class="ph ph-git-branch" style="font-size:14px"></i> 时间线
-                    <span v-if="timelines.filter(t=>t.status==='active').length>1" style="background:rgba(52,211,153,.2);color:#34d399;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700;margin-left:2px">{{ timelines.filter(t=>t.status==='active').length }}</span>
-                </button>
-            </div>
-
-            <div style="width:1px;height:24px;background:rgba(255,255,255,.07);margin:0 6px"></div>
-
-            <!-- 编辑模式 -->
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:0 8px">
-                <div style="position:relative;width:36px;height:20px" @click="isEditMode=!isEditMode">
-                    <div :style="{background:isEditMode?'rgba(79,201,138,.2)':'rgba(255,255,255,.06)',border:isEditMode?'1px solid rgba(79,201,138,.4)':'1px solid rgba(255,255,255,.1)'}" style="width:100%;height:100%;border-radius:10px;transition:all .2s"></div>
-                    <div :style="{transform:isEditMode?'translateX(16px)':'translateX(2px)',background:isEditMode?'#4fc98a':'#4b5563'}" style="position:absolute;top:3px;width:14px;height:14px;border-radius:50%;transition:all .2s"></div>
-                </div>
-                <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.06em;font-weight:600" :style="{color:isEditMode?'#4fc98a':'#4b5563'}">EDIT</span>
-            </label>
         </div>
     </header>
 
@@ -1008,29 +969,6 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                     <template v-if="!isEditMode">
                         <!-- 场景正文 -->
                         <div style="background:#0b0e17;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:20px 24px;margin-bottom:20px">
-                            <!-- 朗读控件 -->
-                            <div style="display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap">
-                                <button @click="ttsSpeak" :title="ttsPlaying?'停止朗读':'朗读场景文本'"
-                                        :style="ttsPlaying?'background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.35);color:#f87171':''"
-                                        class="btn btn-sm btn-ghost" style="gap:5px">
-                                    <i :class="ttsPlaying?'ph ph-stop-circle':'ph ph-speaker-high'" style="font-size:14px"></i>
-                                    {{ ttsPlaying ? '停止' : '朗读' }}
-                                </button>
-                                <input v-model.trim="ttsVoice" class="inp inp-mono" style="width:94px;font-size:11px;padding:4px 6px;height:28px" placeholder="alloy" title="TTS voice">
-                                <select v-model="ttsTone" class="inp" style="width:80px;font-size:11px;padding:4px 6px;height:28px" title="腔调">
-                                    <option value="normal">标准</option>
-                                    <option value="lyrical">抒情</option>
-                                    <option value="creepy">阴森</option>
-                                </select>
-                                <select v-model.number="ttsRate" class="inp" style="width:66px;font-size:11px;padding:4px 6px;height:28px" title="播放倍速">
-                                    <option :value="0.5">0.5×</option>
-                                    <option :value="0.75">0.75×</option>
-                                    <option :value="1.0">1×</option>
-                                    <option :value="1.25">1.25×</option>
-                                    <option :value="1.5">1.5×</option>
-                                    <option :value="2.0">2×</option>
-                                </select>
-                            </div>
                             <!-- 流式展开中：显示打字机效果 -->
                             <div v-if="isExpandingBranch" style="position:relative">
                                 <p class="scene-content" style="font-size:17px">{{ expandingBranchText || currentNode.content }}</p>
@@ -1189,21 +1127,13 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                         <div style="display:flex;gap:10px">
                             <div style="position:relative;flex:1">
                                 <input v-model="playerAction" @keyup.enter="()=>generateDynamicOptions()" type="text"
-                                       :placeholder="isRecording?'正在聆听…':actionType==='dialogue'?'玩家说了什么…（社交对话模式）':actionType==='action'?'玩家做了什么…（物理行动模式）':'玩家尝试执行…（按回车确认）'"
+                                       :placeholder="actionType==='dialogue'?'玩家说了什么…（社交对话模式）':actionType==='action'?'玩家做了什么…（物理行动模式）':'玩家尝试执行…（按回车确认）'"
                                        class="inp" style="flex:1;font-size:14px;padding-right:36px"
-                                       :style="{borderColor: isRecording?'rgba(239,68,68,.5)':actionType==='dialogue'?'rgba(192,132,252,.25)':actionType==='action'?'rgba(239,68,68,.25)':'rgba(232,180,75,.2)'}">
+                                       :style="{borderColor: actionType==='dialogue'?'rgba(192,132,252,.25)':actionType==='action'?'rgba(239,68,68,.25)':'rgba(232,180,75,.2)'}">
                                 <span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:14px;pointer-events:none">
                                     {{ actionType==='dialogue'?'🗣️':actionType==='action'?'🏃':'🎭' }}
                                 </span>
                             </div>
-                            <button @click="toggleVoiceInput" :disabled="isGeneratingOptions"
-                                    class="btn btn-sm" title="语音输入（中文）"
-                                    style="flex-shrink:0;width:38px;padding:0;border-radius:8px;transition:all .2s"
-                                    :style="isRecording
-                                        ?{background:'rgba(239,68,68,.15)',color:'#ef4444',border:'1px solid rgba(239,68,68,.4)',animation:'mic-pulse 1.2s ease-in-out infinite'}
-                                        :{background:'rgba(255,255,255,.05)',color:'#6b7280',border:'1px solid rgba(255,255,255,.08)'}">
-                                <i :class="isRecording?'ph-fill ph-microphone':'ph ph-microphone'" style="font-size:16px"></i>
-                            </button>
                             <button @click="()=>generateDynamicOptions()" :disabled="isGeneratingOptions||!playerAction" class="btn btn-accent btn-lg" style="flex-shrink:0">
                                 <i :class="isGeneratingOptions?'ph ph-circle-notch':'ph ph-dice-three'" :style="isGeneratingOptions?'animation:spin 1s linear infinite':''"></i>
                                 {{ isGeneratingOptions ? '推演命运中…' : '执行推演' }}
@@ -1449,6 +1379,178 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <!-- ══════════════════════════════════════════════════════════════
      模态框集合
 ══════════════════════════════════════════════════════════════ -->
+
+<!-- 游戏设置 -->
+<div v-if="showGameSettingsModal && appState==='game'" class="modal-bg" @click.self="showGameSettingsModal=false">
+    <div class="modal-box" style="width:min(760px,94vw);max-height:88vh;display:flex;flex-direction:column">
+        <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+            <div>
+                <div class="tag" style="color:#9ca3af;font-size:13px;display:flex;align-items:center;gap:7px">
+                    <button v-if="showAdvancedSettings" @click="showAdvancedSettings=false" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0;margin-right:2px" title="返回基础设置">
+                        <i class="ph ph-arrow-left" style="font-size:15px"></i>
+                    </button>
+                    <i v-else class="ph ph-sliders-horizontal" style="font-size:16px"></i>
+                    {{ showAdvancedSettings ? '高级系统' : '游戏设置' }}
+                </div>
+                <div style="font-size:12px;color:#4b5563;margin-top:4px">
+                    {{ showAdvancedSettings ? '返回基础设置或进入对应系统面板。' : '基础操作保留在这里，高级系统按需进入。' }}
+                </div>
+            </div>
+            <button @click="showGameSettingsModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
+                <i class="ph ph-x" style="font-size:15px"></i>
+            </button>
+        </div>
+        <div style="padding:20px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:18px">
+            <section v-if="!showAdvancedSettings">
+                <div class="tag" style="margin-bottom:10px">基础设置</div>
+                <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+                    <button @click="openApiKeyPanel" class="btn btn-ghost" style="justify-content:flex-start">
+                        <i class="ph ph-plugs-connected"></i> API 与模型供应商
+                    </button>
+                    <button @click="openBattleReportModal();showGameSettingsModal=false" class="btn btn-ghost" style="justify-content:flex-start">
+                        <i class="ph ph-scroll"></i> 会话战报
+                    </button>
+                    <button @click="exportSave();showGameSettingsModal=false" class="btn btn-ghost" style="justify-content:flex-start">
+                        <i class="ph ph-floppy-disk"></i> 存档管理
+                    </button>
+                    <label class="btn btn-ghost" style="justify-content:flex-start;cursor:pointer">
+                        <i class="ph ph-pencil-simple"></i>
+                        <span>编辑模式</span>
+                        <input type="checkbox" v-model="isEditMode" style="margin-left:auto;width:auto">
+                    </label>
+                </div>
+            </section>
+
+            <section v-if="!showAdvancedSettings">
+                <button @click="showAdvancedSettings=true" class="btn btn-ghost" style="width:100%;justify-content:space-between">
+                    <span style="display:flex;align-items:center;gap:7px">
+                        <i class="ph ph-wrench"></i> 高级系统
+                    </span>
+                    <span style="display:flex;align-items:center;gap:8px;color:#6b7280;font-size:12px">
+                        世界观 / 地图 / 百科 / 触发器
+                        <i class="ph ph-arrow-right"></i>
+                    </span>
+                </button>
+            </section>
+
+            <section v-if="showAdvancedSettings">
+                <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+                    <button @click="openWorldviewModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#60a5fa">
+                        <i class="ph ph-globe"></i> 世界观
+                    </button>
+                    <button @click="openLorebookModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#a78bfa">
+                        <i class="ph ph-books"></i> 百科库
+                    </button>
+                    <button @click="openRagModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#818cf8">
+                        <i class="ph ph-database"></i> 知识库
+                        <span v-if="ragDocuments.length" style="margin-left:auto;font-family:'JetBrains Mono';font-size:10px;color:#818cf8">{{ ragDocuments.length }}</span>
+                    </button>
+                    <button @click="openMapModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#38bdf8">
+                        <i class="ph ph-map-trifold"></i> 地图
+                        <span v-if="mapRooms.length" style="margin-left:auto;font-family:'JetBrains Mono';font-size:10px;color:#38bdf8">{{ mapRooms.length }}</span>
+                    </button>
+                    <button @click="openWorldEntitiesPanel()" class="btn btn-ghost" style="justify-content:flex-start;color:#fb923c">
+                        <i class="ph ph-graph"></i> 实体
+                        <span v-if="worldEntities.length" style="margin-left:auto;font-family:'JetBrains Mono';font-size:10px;color:#fb923c">{{ worldEntities.length }}</span>
+                    </button>
+                    <button @click="openTriggerModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#f87171">
+                        <i class="ph ph-lightning"></i> 触发器
+                    </button>
+                    <button @click="openMemoryModal()" class="btn btn-ghost" style="justify-content:flex-start;color:#c084fc">
+                        <i class="ph ph-brain"></i> 记忆流
+                    </button>
+                    <button @click="openTimelinePanel(true)" class="btn btn-ghost" style="justify-content:flex-start;color:#6ee7b7">
+                        <i class="ph ph-git-branch"></i> 时间线
+                        <span v-if="timelines.filter(t=>t.status==='active').length>1" style="margin-left:auto;font-family:'JetBrains Mono';font-size:10px;color:#34d399">{{ timelines.filter(t=>t.status==='active').length }}</span>
+                    </button>
+                </div>
+                <button @click="showAdvancedSettings=false" class="btn btn-ghost" style="margin-top:14px;width:100%;justify-content:center">
+                    <i class="ph ph-arrow-left"></i> 返回基础设置
+                </button>
+            </section>
+        </div>
+    </div>
+</div>
+
+<!-- 多人房间 -->
+<div v-if="showMultiplayerModal && appState==='game'" class="modal-bg" @click.self="showMultiplayerModal=false">
+    <div class="modal-box" style="width:min(720px,94vw);max-height:88vh;display:flex;flex-direction:column">
+        <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+            <div>
+                <div class="tag" style="color:#7dd3fc;font-size:13px;display:flex;align-items:center;gap:7px">
+                    <i class="ph ph-users-three" style="font-size:16px"></i> 多人模式
+                </div>
+                <div style="font-size:12px;color:#4b5563;margin-top:4px">创建房间后，把房间码或链接发给远程玩家。</div>
+            </div>
+            <button @click="showMultiplayerModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
+                <i class="ph ph-x" style="font-size:15px"></i>
+            </button>
+        </div>
+        <div style="padding:20px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div>
+                    <label class="tag" style="display:block;margin-bottom:7px">你的显示名</label>
+                    <input v-model.trim="multiplayerProfileName" class="inp" placeholder="GM">
+                </div>
+                <div>
+                    <label class="tag" style="display:block;margin-bottom:7px">房间名</label>
+                    <input v-model.trim="multiplayerRoomName" class="inp" placeholder="新的跑团房间">
+                </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <button @click="createMultiplayerRoom" :disabled="multiplayerBusy" class="btn btn-info" style="height:42px">
+                    <i :class="multiplayerBusy?'ph ph-circle-notch':'ph ph-plus-circle'" :style="multiplayerBusy?'animation:spin 1s linear infinite':''"></i>
+                    创建房间
+                </button>
+                <div style="display:flex;gap:8px">
+                    <input v-model.trim="multiplayerJoinCode" @keyup.enter="joinMultiplayerRoom" class="inp inp-mono" placeholder="输入房间码" style="text-transform:uppercase">
+                    <button @click="joinMultiplayerRoom" :disabled="multiplayerBusy||!multiplayerJoinCode.trim()" class="btn btn-ghost" style="flex-shrink:0">
+                        加入
+                    </button>
+                </div>
+            </div>
+
+            <div v-if="multiplayerRoom" style="background:#090b10;border:1px solid rgba(56,189,248,.18);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:12px">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                    <div>
+                        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">当前房间码</div>
+                        <div style="font-family:'JetBrains Mono';font-size:24px;font-weight:700;letter-spacing:.12em;color:#7dd3fc">{{ multiplayerRoom.code }}</div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+                        <button @click="copyMultiplayerInvite" class="btn btn-ghost btn-sm">
+                            <i class="ph ph-copy"></i> 复制邀请
+                        </button>
+                        <button @click="openMultiplayerTable" class="btn btn-ghost btn-sm">
+                            <i class="ph ph-arrow-square-out"></i> 打开联机桌
+                        </button>
+                    </div>
+                </div>
+                <div style="font-size:12px;color:#6b7280;word-break:break-all">{{ multiplayerInviteUrl }}</div>
+                <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280">
+                    <span :style="{background:multiplayerWsConnected?'#4fc98a':'#6b7280'}" style="width:8px;height:8px;border-radius:50%"></span>
+                    {{ multiplayerWsConnected ? '实时同步中' : '房间已创建，完整联机桌会建立实时连接' }}
+                </div>
+            </div>
+
+            <div v-if="multiplayerMembers.length" style="display:flex;flex-direction:column;gap:8px">
+                <div class="tag">成员</div>
+                <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
+                    <div v-for="m in multiplayerMembers" :key="m.player_id" style="border:1px solid rgba(255,255,255,.07);border-radius:6px;padding:9px 10px;background:#090b10;display:flex;align-items:center;gap:8px">
+                        <span :style="{background:m.connected?'#4fc98a':'#4b5563'}" style="width:7px;height:7px;border-radius:50%;flex-shrink:0"></span>
+                        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.display_name }}</span>
+                        <span style="margin-left:auto;font-size:10px;color:#4b5563">{{ m.role }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div v-if="multiplayerStatusMsg || multiplayerError" style="font-size:12px;line-height:1.6"
+                 :style="{color: multiplayerError ? '#e05c5c' : '#4fc98a'}">
+                {{ multiplayerError || multiplayerStatusMsg }}
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- 新建角色 -->
 <div v-if="showCharModal" class="modal-bg" @click.self="showCharModal=false;resetNewChar()">
@@ -1702,7 +1804,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <div v-if="showMemoryModal" class="modal-bg" @click.self="showMemoryModal=false">
     <div class="modal-box" style="width:720px;height:75vh">
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-            <div class="tag" style="color:#c084fc;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-brain" style="font-size:16px"></i> 动态剧情记忆流</div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                <div class="tag" style="color:#c084fc;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-brain" style="font-size:16px"></i> 动态剧情记忆流</div>
+            </div>
             <button @click="showMemoryModal=false" class="btn btn-ghost btn-icon"><i class="ph ph-x"></i></button>
         </div>
         <div style="flex:1;padding:24px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
@@ -1720,7 +1825,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <div v-if="showWorldviewModal" class="modal-bg" @click.self="showWorldviewModal=false">
     <div class="modal-box" style="width:720px;height:75vh">
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-            <div class="tag" style="color:#60a5fa;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-globe" style="font-size:16px"></i> 基础世界观设定</div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                <div class="tag" style="color:#60a5fa;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-globe" style="font-size:16px"></i> 基础世界观设定</div>
+            </div>
             <button @click="showWorldviewModal=false" class="btn btn-ghost btn-icon"><i class="ph ph-x"></i></button>
         </div>
         <div style="flex:1;padding:24px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
@@ -1738,7 +1846,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <div v-if="showLorebookModal" class="modal-bg" @click.self="showLorebookModal=false">
     <div class="modal-box" style="width:900px;height:85vh">
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-            <div class="tag" style="color:#a78bfa;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-books" style="font-size:16px"></i> RAG 动态百科字典</div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                <div class="tag" style="color:#a78bfa;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-books" style="font-size:16px"></i> RAG 动态百科字典</div>
+            </div>
             <button @click="showLorebookModal=false" class="btn btn-ghost btn-icon"><i class="ph ph-x"></i></button>
         </div>
         <div style="flex:1;display:flex;overflow:hidden">
@@ -1784,7 +1895,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <div v-if="showTriggerModal" class="modal-bg" @click.self="showTriggerModal=false">
     <div class="modal-box" style="width:860px;height:82vh">
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-            <div class="tag" style="color:#f87171;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-lightning" style="font-size:16px"></i> 逻辑触发器 (Triggers)</div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                <div class="tag" style="color:#f87171;display:flex;align-items:center;gap:6px;font-size:13px"><i class="ph ph-lightning" style="font-size:16px"></i> 逻辑触发器 (Triggers)</div>
+            </div>
             <div style="display:flex;align-items:center;gap:8px">
                 <button @click="resetAllTriggers" class="btn btn-ghost btn-sm" style="font-size:11px;color:#f87171;border-color:rgba(248,113,113,.3)" title="将所有触发器重置为未触发状态"><i class="ph ph-arrow-counter-clockwise"></i> 全部重置</button>
                 <button @click="showTriggerModal=false" class="btn btn-ghost btn-icon"><i class="ph ph-x"></i></button>
@@ -2182,6 +2296,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
     <!-- 面板顶栏 -->
     <div style="padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
         <div style="display:flex;align-items:center;gap:10px">
+            <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0;flex-shrink:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
             <i class="ph ph-git-branch" style="color:#34d399;font-size:18px"></i>
             <span style="font-family:'JetBrains Mono';font-size:13px;font-weight:700;color:#34d399;letter-spacing:.06em">时间线管理器</span>
             <span style="font-size:11px;color:#4b5563;font-family:'JetBrains Mono'">{{ timelines.filter(t=>t.status==='active').length }} 条活跃</span>
@@ -2487,8 +2602,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
         <!-- 顶栏 -->
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
             <div>
-                <div class="tag" style="color:#fb923c;font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:3px">
-                    <i class="ph ph-graph" style="font-size:16px"></i> 世界实体注册表 (World Entity Registry)
+                <div class="tag" style="color:#fb923c;font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:3px">
+                    <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                    <span style="display:flex;align-items:center;gap:6px"><i class="ph ph-graph" style="font-size:16px"></i> 世界实体注册表 (World Entity Registry)</span>
                 </div>
                 <p style="font-size:12px;color:#4b5563">跨时间线共享的可变世界状态——AI 推演时将自动读取并保持一致性</p>
             </div>
@@ -2622,8 +2738,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
         <!-- 顶栏 -->
         <div style="padding:20px 26px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
             <div>
-                <div class="tag" style="color:#818cf8;font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:3px">
-                    <i class="ph ph-database" style="font-size:16px"></i> 本地 RAG 知识库
+                <div class="tag" style="color:#818cf8;font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:3px">
+                    <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
+                    <span style="display:flex;align-items:center;gap:6px"><i class="ph ph-database" style="font-size:16px"></i> 本地 RAG 知识库</span>
                 </div>
                 <p style="font-size:12px;color:#4b5563">导入剧本背景文档 → 自动切片 + Embedding → AI 推演时语义检索注入</p>
             </div>
@@ -2897,7 +3014,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
   <!-- 顶栏 -->
   <div style="padding:10px 20px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
     <div style="display:flex;align-items:center;gap:12px">
-      <div style="display:flex;align-items:center;gap:8px">
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <button @click="returnToAdvancedSettings" class="btn btn-ghost btn-icon" style="width:28px;height:28px;padding:0" title="返回高级系统"><i class="ph ph-arrow-left" style="font-size:15px"></i></button>
         <i class="ph ph-map-trifold" style="color:#38bdf8;font-size:18px"></i>
         <span style="font-family:'JetBrains Mono';font-size:13px;font-weight:700;color:#38bdf8">地图编辑器</span>
       </div>
@@ -3380,7 +3498,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
 <script>
 const { createApp, ref, onMounted, watch, computed, nextTick } = Vue;
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : "http://localhost:8000";
 
 createApp({
     setup() {
@@ -3388,6 +3506,13 @@ createApp({
         const isLoading = ref(false);
         const dbConnected = ref(false);
         const campaignFiles = ref([]);
+        const campaignLoadSummary = ref('');
+        const showGameSettingsModal = ref(false);
+        const showAdvancedSettings = ref(false);
+        const openGameSettingsModal = () => {
+            showAdvancedSettings.value = false;
+            showGameSettingsModal.value = true;
+        };
         const showCampaignImportModal = ref(false);
         const campaignImportName = ref('');
         const campaignImportMainFile = ref(null);
@@ -3402,6 +3527,10 @@ createApp({
 
         // ── API 供应商配置 ──
         const showApiKeyPanel = ref(false);
+        const openApiKeyPanel = () => {
+            showGameSettingsModal.value = false;
+            showApiKeyPanel.value = true;
+        };
         const apiKeyStatus = ref({ openai: false });
         const apiProviders = ref([]);
         const activeProviderId = ref('');
@@ -3411,18 +3540,16 @@ createApp({
             if (active?.name) return active.name;
             return apiProviders.value.find(p => p.id === activeProviderId.value)?.name || '';
         });
-        const blankConfigModelSearches = () => ({ chat: '', embedding: '', image: '', stt: '', tts: '' });
+        const blankConfigModelSearches = () => ({ chat: '', embedding: '', image: '' });
         const dropdownModelSearches = ref(blankConfigModelSearches());
         const openModelDropdownCapability = ref('');
-        const modelOptions = ref({ chat: [], embedding: [], image: [], stt: [], tts: [] });
+        const modelOptions = ref({ chat: [], embedding: [], image: [] });
         const isFetchingConfigModels = ref(false);
         const fetchingConfigCapability = ref('');
         const modelConfigFields = [
             { key: 'chatModel', capability: 'chat', label: 'Chat Model', placeholder: 'gpt-4.1 / qwen-plus / custom-chat-model' },
             { key: 'embeddingModel', capability: 'embedding', label: 'Embedding Model', placeholder: 'text-embedding-3-small / bge-m3' },
             { key: 'imageModel', capability: 'image', label: 'Image Model', placeholder: 'gpt-image-1 / flux-kontext' },
-            { key: 'sttModel', capability: 'stt', label: 'STT Model', placeholder: 'whisper-1' },
-            { key: 'ttsModel', capability: 'tts', label: 'TTS Model', placeholder: 'gpt-4o-mini-tts / tts-1' },
         ];
         const blankApiKeyInputs = (providerName = '') => ({
             providerId: '',
@@ -3433,9 +3560,6 @@ createApp({
             embeddingModel: '',
             imageModel: '',
             imageSize: '1024x1024',
-            sttModel: '',
-            ttsModel: '',
-            ttsVoice: 'alloy',
         });
         const apiKeyInputs = ref({
             ...blankApiKeyInputs(),
@@ -3463,12 +3587,8 @@ createApp({
                     embeddingModel: d.config.embedding_model || '',
                     imageModel: d.config.image_model || '',
                     imageSize: d.config.image_size || '1024x1024',
-                    sttModel: d.config.stt_model || '',
-                    ttsModel: d.config.tts_model || '',
-                    ttsVoice: d.config.tts_voice || 'alloy',
                 };
                 imgModel.value = d.config.image_model || imgModel.value;
-                if (d.config.tts_voice) ttsVoice.value = d.config.tts_voice;
             }
         };
 
@@ -3486,19 +3606,15 @@ createApp({
                 embeddingModel: provider.embedding_model || '',
                 imageModel: provider.image_model || '',
                 imageSize: provider.image_size || '1024x1024',
-                sttModel: provider.stt_model || '',
-                ttsModel: provider.tts_model || '',
-                ttsVoice: provider.tts_voice || 'alloy',
             };
             imgModel.value = provider.image_model || imgModel.value;
-            if (provider.tts_voice) ttsVoice.value = provider.tts_voice;
         };
 
         const newApiProvider = () => {
             activeProviderId.value = '';
             apiKeyStatus.value = { openai: false };
             apiKeyInputs.value = blankApiKeyInputs(`Provider ${apiProviders.value.length + 1}`);
-            modelOptions.value = { chat: [], embedding: [], image: [], stt: [], tts: [] };
+            modelOptions.value = { chat: [], embedding: [], image: [] };
             dropdownModelSearches.value = blankConfigModelSearches();
             openModelDropdownCapability.value = '';
             apiKeySaveMsg.value = '';
@@ -3518,7 +3634,7 @@ createApp({
             if (!providerId) return;
             const localProfile = apiProviders.value.find(p => p.id === providerId);
             if (localProfile) fillProviderInputs(localProfile);
-            modelOptions.value = { chat: [], embedding: [], image: [], stt: [], tts: [] };
+            modelOptions.value = { chat: [], embedding: [], image: [] };
             dropdownModelSearches.value = blankConfigModelSearches();
             openModelDropdownCapability.value = '';
             try {
@@ -3633,9 +3749,11 @@ createApp({
                         [capability]: models
                     };
                     dropdownModelSearches.value = { ...dropdownModelSearches.value, [capability]: '' };
-                    if (models.length) openModelDropdownCapability.value = capability;
                     if (field && d.active && !apiKeyInputs.value[field.key]) {
                         apiKeyInputs.value[field.key] = d.active;
+                    }
+                    if (field?.key === 'chatModel') {
+                        syncChatModelSelection(apiKeyInputs.value.chatModel || d.active || '', { models, provider: d.provider });
                     }
                     if (d.provider) {
                         activeAiProvider.value = {
@@ -3687,6 +3805,12 @@ createApp({
                     if (data.active && !apiKeyInputs.value[field.key]) {
                         apiKeyInputs.value[field.key] = data.active;
                     }
+                    if (field.key === 'chatModel') {
+                        syncChatModelSelection(apiKeyInputs.value.chatModel || data.active || '', {
+                            models: nextOptions[field.capability],
+                            provider: data.provider
+                        });
+                    }
                     if (data.provider) {
                         activeAiProvider.value = {
                             id: data.provider.id,
@@ -3698,7 +3822,6 @@ createApp({
                 modelOptions.value = nextOptions;
                 dropdownModelSearches.value = nextDropdownSearches;
                 if (!apiKeySaveMsg.value) {
-                    openModelDropdownCapability.value = modelConfigFields.find(field => (modelOptions.value[field.capability] || []).length)?.capability || '';
                     apiKeySaveOk.value = true;
                     apiKeySaveMsg.value = '模型列表已更新';
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 2500);
@@ -3712,8 +3835,13 @@ createApp({
             }
         };
 
-        const selectConfigModel = (fieldKey, modelId, capability = '') => {
+        const selectConfigModel = async (fieldKey, modelId, capability = '') => {
             if (!modelId) return;
+            if (fieldKey === 'chatModel') {
+                await switchAiModel(modelId);
+                if (capability) openModelDropdownCapability.value = '';
+                return;
+            }
             apiKeyInputs.value[fieldKey] = modelId;
             if (fieldKey === 'imageModel') imgModel.value = modelId;
             if (capability) openModelDropdownCapability.value = '';
@@ -3735,9 +3863,6 @@ createApp({
                         embedding_model: apiKeyInputs.value.embeddingModel || null,
                         image_model: apiKeyInputs.value.imageModel || null,
                         image_size: apiKeyInputs.value.imageSize || null,
-                        stt_model: apiKeyInputs.value.sttModel || null,
-                        tts_model: apiKeyInputs.value.ttsModel || null,
-                        tts_voice: apiKeyInputs.value.ttsVoice || null,
                         make_active: true,
                     })
                 });
@@ -3765,8 +3890,30 @@ createApp({
         const aiModels = ref([]);
         const aiModelSearch = ref('');
         const activeAiModel = ref('');
+        const aiModelDraft = ref('');
+        const openAiModelDropdownState = ref(false);
         const isFetchingAiModels = ref(false);
         const aiModelError = ref('');
+        const syncChatModelSelection = (modelKey, { models = null, provider = null } = {}) => {
+            const key = (modelKey || '').trim();
+            activeAiModel.value = key;
+            aiModelDraft.value = key;
+            if (apiKeyInputs.value.chatModel !== key) {
+                apiKeyInputs.value = { ...apiKeyInputs.value, chatModel: key };
+            }
+            if (!key) return;
+            const providerInfo = provider || activeAiProvider.value || {
+                id: activeProviderId.value,
+                name: activeProviderName.value,
+            };
+            const remoteModels = Array.isArray(models) && models.length ? models : aiModels.value;
+            aiModels.value = ensureModelOption(remoteModels, key, providerInfo);
+            const chatOptions = (modelOptions.value.chat || []).length ? modelOptions.value.chat : aiModels.value;
+            modelOptions.value = {
+                ...modelOptions.value,
+                chat: ensureModelOption(chatOptions, key, providerInfo)
+            };
+        };
         const storyNodes = ref([]);
         const characters = ref([]);
         const currentNode = ref(null);
@@ -3791,135 +3938,6 @@ createApp({
         const isRollingBack = ref(false);
         const isGeneratingOptions = ref(false);
 
-        // ── 语音输入（MediaRecorder → 后端 Whisper，无需 Google 服务器）──
-        const isRecording = ref(false);
-        let _mediaRecorder = null;
-        let _audioChunks = [];
-        const toggleVoiceInput = async () => {
-            if (isRecording.value) {
-                _mediaRecorder?.stop();
-                return;
-            }
-            let stream;
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            } catch(e) {
-                if (e.name === 'NotAllowedError') alert('麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。');
-                else alert('无法访问麦克风：' + e.message);
-                return;
-            }
-            _audioChunks = [];
-            // 优先选 opus（SenseVoice 支持最好），回退到浏览器默认
-            const preferredMime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm']
-                .find(t => MediaRecorder.isTypeSupported(t)) || '';
-            _mediaRecorder = new MediaRecorder(stream, preferredMime ? { mimeType: preferredMime } : {});
-            _mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) _audioChunks.push(e.data); };
-            _mediaRecorder.onstop = async () => {
-                isRecording.value = false;
-                stream.getTracks().forEach(t => t.stop());
-                const actualMime = _mediaRecorder.mimeType || 'audio/webm';
-                const ext = actualMime.includes('ogg') ? 'ogg' : 'webm';
-                const blob = new Blob(_audioChunks, { type: actualMime });
-                const form = new FormData();
-                form.append('audio', blob, `recording.${ext}`);
-                try {
-                    const resp = await fetch(`${API_BASE_URL}/api/stt`, { method: 'POST', body: form });
-                    const data = await resp.json();
-                    if (data.text) {
-                        playerAction.value = (playerAction.value ? playerAction.value + ' ' : '') + data.text;
-                    } else if ('text' in data) {
-                        alert('未识别到语音内容，请说得更清晰或靠近麦克风后再试。');
-                    } else {
-                        alert('语音识别失败：' + (data.message || data.detail || JSON.stringify(data)));
-                    }
-                } catch(e) {
-                    alert('语音识别请求失败，请检查网络或后端是否运行。');
-                }
-            };
-            _mediaRecorder.start();
-            isRecording.value = true;
-        };
-
-        // ── TTS 朗读 ──
-        const ttsPlaying = ref(false);
-        const ttsVoice = ref('alloy');
-        const ttsTone  = ref('normal');   // 'normal' | 'lyrical' | 'creepy'
-        const ttsRate  = ref(1.0);        // 倍速：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0
-        let _ttsAudio = null;
-        let _ttsAudioUrl = '';
-        let _ttsAbortController = null;
-
-        const _stopTtsPlayback = () => {
-            if (_ttsAbortController) {
-                _ttsAbortController.abort();
-                _ttsAbortController = null;
-            }
-            if (_ttsAudio) {
-                _ttsAudio.pause();
-                _ttsAudio.src = '';
-                _ttsAudio = null;
-            }
-            if (_ttsAudioUrl) {
-                URL.revokeObjectURL(_ttsAudioUrl);
-                _ttsAudioUrl = '';
-            }
-            ttsPlaying.value = false;
-        };
-
-        const ttsSpeak = async () => {
-            if (!currentNode.value) return;
-            if (ttsPlaying.value) { _stopTtsPlayback(); return; }
-
-            const text = currentNode.value.expanded_content || currentNode.value.content || '';
-            if (!text.trim()) return;
-
-            // 腔调参数映射
-            const toneMap = {
-                normal:  1.0,
-                lyrical: 0.85,
-                creepy:  0.72,
-            };
-            const speed = Math.max(0.25, Math.min(4, (toneMap[ttsTone.value] || 1.0) * Number(ttsRate.value || 1)));
-            const controller = new AbortController();
-            _ttsAbortController = controller;
-            ttsPlaying.value = true;
-            try {
-                const r = await fetch(`${API_BASE_URL}/api/tts`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    signal: controller.signal,
-                    body: JSON.stringify({
-                        text,
-                        voice: ttsVoice.value || undefined,
-                        speed,
-                        response_format: 'mp3',
-                    })
-                });
-                if (!r.ok) {
-                    let msg = '朗读生成失败';
-                    try {
-                        const d = await r.json();
-                        msg = d.message || d.detail || msg;
-                    } catch(e) {}
-                    throw new Error(msg);
-                }
-                if (controller.signal.aborted) return;
-                const blob = await r.blob();
-                if (controller.signal.aborted) return;
-                _ttsAudioUrl = URL.createObjectURL(blob);
-                _ttsAudio = new Audio(_ttsAudioUrl);
-                _ttsAudio.onended = _stopTtsPlayback;
-                _ttsAudio.onerror = _stopTtsPlayback;
-                await _ttsAudio.play();
-            } catch(e) {
-                const wasAbort = e && e.name === 'AbortError';
-                _stopTtsPlayback();
-                if (!wasAbort) alert(e.message || '朗读请求失败，请检查 TTS 模型配置。');
-            }
-        };
-
-        // 切换场景时停止朗读
-        watch(() => currentNode.value?.id, () => { if (ttsPlaying.value) _stopTtsPlayback(); });
         // GM 干预/纠正推演
         const gmCorrection = ref('');
         const lastDynamicContext = ref(null);  // {action, sceneName, content, nodeId, branchCount}
@@ -4015,6 +4033,248 @@ createApp({
             if (result.outcome) return result.outcome;
             return JSON.stringify(result, null, 2);
         });
+
+        // ── 多人房间：复用 /api/multiplayer 与 /ws/rooms ──
+        const readLocalJson = (key, fallback) => {
+            try {
+                return JSON.parse(localStorage.getItem(key) || '') || fallback;
+            } catch(e) {
+                return fallback;
+            }
+        };
+        const savedMpProfile = readLocalJson('zric-mp-profile', {});
+        const savedMpTokens = readLocalJson('zric-mp-tokens', {});
+        const showMultiplayerModal = ref(false);
+        const multiplayerRoom = ref(null);
+        const multiplayerMembers = ref([]);
+        const multiplayerMessages = ref([]);
+        const multiplayerBusy = ref(false);
+        const multiplayerError = ref('');
+        const multiplayerStatusMsg = ref('');
+        const multiplayerWsConnected = ref(false);
+        const multiplayerRoomName = ref('新的跑团房间');
+        const multiplayerJoinCode = ref('');
+        const multiplayerProfileName = ref(savedMpProfile.name || 'GM');
+        const multiplayerPlayerId = ref(savedMpProfile.id || `gm-${Math.random().toString(36).slice(2, 10)}`);
+        const multiplayerRoomTokens = ref(savedMpTokens.roomTokens || {});
+        const multiplayerMemberTokens = ref(savedMpTokens.memberTokens || {});
+        let multiplayerWs = null;
+
+        const multiplayerInviteUrl = computed(() => {
+            if (!multiplayerRoom.value?.code) return '';
+            const origin = window.location.protocol.startsWith('http') ? window.location.origin : API_BASE_URL;
+            return `${origin}/multiplayer.html?room=${encodeURIComponent(multiplayerRoom.value.code)}`;
+        });
+
+        const saveMultiplayerLocalState = () => {
+            localStorage.setItem('zric-mp-profile', JSON.stringify({
+                id: multiplayerPlayerId.value,
+                name: multiplayerProfileName.value || 'GM',
+                role: 'gm',
+                color: '#7dd3fc',
+            }));
+            localStorage.setItem('zric-mp-tokens', JSON.stringify({
+                roomTokens: multiplayerRoomTokens.value,
+                memberTokens: multiplayerMemberTokens.value,
+            }));
+        };
+
+        const multiplayerExtractRoomCode = (path) => {
+            const match = String(path || '').match(/\/api\/multiplayer\/rooms\/([^/?]+)/);
+            return match ? decodeURIComponent(match[1]) : '';
+        };
+
+        const multiplayerHeaders = (path, jsonBody = true) => {
+            const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
+            const code = multiplayerRoom.value?.code || multiplayerExtractRoomCode(path);
+            if (code && multiplayerRoomTokens.value[code]) headers['X-Room-Token'] = multiplayerRoomTokens.value[code];
+            if (code && multiplayerMemberTokens.value[code]) headers['X-Member-Token'] = multiplayerMemberTokens.value[code];
+            return headers;
+        };
+
+        const multiplayerApi = async (path, options = {}) => {
+            const jsonBody = !(options.body instanceof FormData);
+            const r = await fetch(`${API_BASE_URL}${path}`, {
+                ...options,
+                headers: { ...multiplayerHeaders(path, jsonBody), ...(options.headers || {}) },
+            });
+            const data = await r.json();
+            if (!r.ok || data.status === 'error') throw new Error(data.message || '多人房间请求失败');
+            return data;
+        };
+
+        const applyMultiplayerSnapshot = (data) => {
+            if (data.room) {
+                multiplayerRoom.value = data.room;
+                multiplayerJoinCode.value = data.room.code || multiplayerJoinCode.value;
+                multiplayerRoomName.value = data.room.name || multiplayerRoomName.value;
+            }
+            multiplayerMembers.value = data.members || multiplayerMembers.value;
+            multiplayerMessages.value = data.messages || multiplayerMessages.value;
+        };
+
+        const connectMultiplayerWs = () => {
+            if (!multiplayerRoom.value?.code || !window.location.protocol.startsWith('http')) return;
+            if (multiplayerWs) multiplayerWs.close();
+            const code = multiplayerRoom.value.code;
+            const params = new URLSearchParams({
+                player_id: multiplayerPlayerId.value,
+                name: multiplayerProfileName.value || 'GM',
+                role: multiplayerRoomTokens.value[code] ? 'gm' : 'player',
+            });
+            if (multiplayerMemberTokens.value[code]) params.set('member_token', multiplayerMemberTokens.value[code]);
+            const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/rooms/${code}?${params}`;
+            multiplayerWs = new WebSocket(wsUrl);
+            multiplayerWs.onopen = () => { multiplayerWsConnected.value = true; };
+            multiplayerWs.onclose = () => { multiplayerWsConnected.value = false; };
+            multiplayerWs.onerror = () => { multiplayerWsConnected.value = false; };
+            multiplayerWs.onmessage = (event) => {
+                const evt = JSON.parse(event.data);
+                if (evt.member_token && evt.room?.code) {
+                    multiplayerMemberTokens.value = { ...multiplayerMemberTokens.value, [evt.room.code]: evt.member_token };
+                    saveMultiplayerLocalState();
+                }
+                if (evt.type === 'snapshot') applyMultiplayerSnapshot(evt);
+                else if (evt.type === 'member.updated') {
+                    const idx = multiplayerMembers.value.findIndex(m => m.player_id === evt.member.player_id);
+                    if (idx >= 0) multiplayerMembers.value[idx] = evt.member;
+                    else multiplayerMembers.value.push(evt.member);
+                } else if (evt.type === 'member.left') {
+                    const member = multiplayerMembers.value.find(m => m.player_id === evt.player_id);
+                    if (member) member.connected = 0;
+                } else if (evt.type === 'message.created') {
+                    if (!multiplayerMessages.value.some(m => m.id === evt.message.id)) multiplayerMessages.value.push(evt.message);
+                } else if (evt.type === 'game.state') {
+                    if (evt.game_state?.characters) characters.value = evt.game_state.characters;
+                }
+            };
+        };
+
+        const syncMultiplayerRoomState = async () => {
+            const room = multiplayerRoom.value;
+            if (!room?.code || !multiplayerRoomTokens.value[room.code]) return;
+            try {
+                const activeMapRoom = (typeof mapRooms !== 'undefined' && mapRooms.value || []).find(r => r.state === 'active');
+                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(room.code)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                        current_scene_id: currentNode.value?.id || null,
+                        current_room_id: activeMapRoom?.id || null,
+                        settings: {
+                            gm_console: true,
+                            campaign_path: selectedCampaign.value || currentSaveFolder.value || '',
+                        },
+                    }),
+                });
+                applyMultiplayerSnapshot(data);
+            } catch(e) {}
+        };
+
+        const postMultiplayerAiEvent = async (kind, content, payload = {}, options = {}) => {
+            const room = multiplayerRoom.value;
+            if (!room?.code || !multiplayerRoomTokens.value[room.code]) return;
+            const text = (content || '').trim();
+            if (!text) return;
+            try {
+                await syncMultiplayerRoomState();
+                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(room.code)}/events`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        kind,
+                        content: text,
+                        payload,
+                        sender_name: 'AI-KP',
+                        broadcast_state: options.broadcastState !== false,
+                    }),
+                });
+                applyMultiplayerSnapshot(data);
+            } catch(e) {}
+        };
+
+        const createMultiplayerRoom = async () => {
+            multiplayerBusy.value = true;
+            multiplayerError.value = '';
+            multiplayerStatusMsg.value = '';
+            saveMultiplayerLocalState();
+            try {
+                const data = await multiplayerApi('/api/multiplayer/rooms', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        name: multiplayerRoomName.value || currentSaveFolder.value || '新的跑团房间',
+                        gm_name: multiplayerProfileName.value || 'GM',
+                        campaign_path: selectedCampaign.value || currentSaveFolder.value || '',
+                        settings: { gm_console: true },
+                    }),
+                });
+                if (data.room?.code && data.room_token) {
+                    multiplayerRoomTokens.value = { ...multiplayerRoomTokens.value, [data.room.code]: data.room_token };
+                    saveMultiplayerLocalState();
+                }
+                applyMultiplayerSnapshot(data);
+                await joinMultiplayerRoom(data.room.code, 'gm');
+                await syncMultiplayerRoomState();
+                multiplayerStatusMsg.value = `房间 ${data.room.code} 已创建`;
+            } catch(e) {
+                multiplayerError.value = e.message || '创建房间失败';
+            } finally {
+                multiplayerBusy.value = false;
+            }
+        };
+
+        const joinMultiplayerRoom = async (codeArg = '', roleOverride = '') => {
+            const code = String(codeArg || multiplayerJoinCode.value || '').trim().toUpperCase();
+            if (!code) return;
+            multiplayerBusy.value = true;
+            multiplayerError.value = '';
+            multiplayerStatusMsg.value = '';
+            saveMultiplayerLocalState();
+            try {
+                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(code)}/join`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        player_id: multiplayerPlayerId.value,
+                        display_name: multiplayerProfileName.value || 'GM',
+                        role: roleOverride || (multiplayerRoomTokens.value[code] ? 'gm' : 'player'),
+                        color: '#7dd3fc',
+                    }),
+                });
+                if (data.room?.code && data.member_token) {
+                    multiplayerMemberTokens.value = { ...multiplayerMemberTokens.value, [data.room.code]: data.member_token };
+                    saveMultiplayerLocalState();
+                }
+                applyMultiplayerSnapshot(data);
+                connectMultiplayerWs();
+                await syncMultiplayerRoomState();
+                multiplayerStatusMsg.value = `已加入房间 ${data.room.code}`;
+            } catch(e) {
+                multiplayerError.value = e.message || '加入房间失败';
+            } finally {
+                multiplayerBusy.value = false;
+            }
+        };
+
+        const openMultiplayerModal = () => {
+            multiplayerError.value = '';
+            multiplayerStatusMsg.value = '';
+            showMultiplayerModal.value = true;
+            if (multiplayerRoom.value?.code && !multiplayerWsConnected.value) connectMultiplayerWs();
+        };
+
+        const copyMultiplayerInvite = async () => {
+            if (!multiplayerInviteUrl.value) return;
+            try {
+                await navigator.clipboard.writeText(multiplayerInviteUrl.value);
+                multiplayerStatusMsg.value = '邀请链接已复制';
+            } catch(e) {
+                multiplayerStatusMsg.value = `邀请链接：${multiplayerInviteUrl.value}`;
+            }
+        };
+
+        const openMultiplayerTable = () => {
+            if (!multiplayerInviteUrl.value) return;
+            window.open(multiplayerInviteUrl.value, '_blank', 'noopener');
+        };
+
         const showTriggerModal = ref(false);
         const triggers = ref([]);
         const currentTrigger = ref(null);
@@ -4116,9 +4376,11 @@ createApp({
             } catch(e) {}
         };
 
-        const openTimelinePanel = () => {
+        const openTimelinePanel = (forceOpen = false) => {
+            const nextOpen = forceOpen || !timelinePanelOpen.value;
+            enterAdvancedPanel();
             fetchTimelines();
-            timelinePanelOpen.value = !timelinePanelOpen.value;
+            timelinePanelOpen.value = nextOpen;
         };
 
         const openNewTimelineModal = () => {
@@ -4423,6 +4685,7 @@ createApp({
         };
 
         const openWorldEntitiesPanel = () => {
+            enterAdvancedPanel();
             fetchWorldEntities();
             showWorldEntitiesModal.value = true;
         };
@@ -4490,6 +4753,7 @@ createApp({
         };
 
         const openRagModal = () => {
+            enterAdvancedPanel();
             fetchRagDocuments();
             ragTab.value = 'import';
             ragIngestResult.value = null;
@@ -4682,7 +4946,7 @@ createApp({
                 });
             } catch(e) {}
         };
-        const openTriggerModal = () => { fetchTriggers(); showTriggerModal.value=true; };
+        const openTriggerModal = () => { enterAdvancedPanel(); fetchTriggers(); showTriggerModal.value=true; };
         const newTrigger = () => { currentTrigger.value={label:'',target_node_id:'',mode:'soft',conditions:[{type:'scene',value:'',negate:false}],fired:0,fire_count:0,cooldown:0,max_fire_count:0,actions:[],prerequisite_trigger_ids:[],exclude_trigger_ids:[]}; };
         const selectTrigger = t => { const copy=JSON.parse(JSON.stringify(t)); if(!Array.isArray(copy.conditions)||!copy.conditions.length){if(copy.cond_type)copy.conditions=[{type:copy.cond_type,value:copy.cond_value||'',negate:false}];else copy.conditions=[];} if(!Array.isArray(copy.actions))copy.actions=[]; currentTrigger.value=copy; };
         const saveTrigger = async () => {
@@ -4777,17 +5041,19 @@ createApp({
             }
         };
         // ── AI 模型管理 ──
-        const fetchAiModels = async () => {
+        const fetchAiModels = async (openOnSuccess = false) => {
             if (isFetchingAiModels.value) return;
             isFetchingAiModels.value = true;
             aiModelError.value = '';
             try {
-                const q = aiModelSearch.value ? `?search=${encodeURIComponent(aiModelSearch.value)}` : '';
-                const r = await fetch(`${API_BASE_URL}/api/ai/models${q}`);
+                const r = await fetch(`${API_BASE_URL}/api/ai/models`);
                 const d = await r.json();
                 if (d.status === 'success') {
-                    aiModels.value = d.models || [];
-                    activeAiModel.value = d.active || '';
+                    const currentModel = d.active || apiKeyInputs.value.chatModel || '';
+                    aiModels.value = ensureModelOption(d.models || [], currentModel, d.provider);
+                    syncChatModelSelection(currentModel, { models: aiModels.value, provider: d.provider });
+                    aiModelSearch.value = '';
+                    openAiModelDropdownState.value = openOnSuccess && !!aiModels.value.length;
                     if (d.error) aiModelError.value = `获取模型失败：${d.error}`;
                     if (d.provider) {
                         activeAiProvider.value = {
@@ -4806,17 +5072,51 @@ createApp({
                 isFetchingAiModels.value = false;
             }
         };
+        const openAiModelDropdown = () => {
+            if (aiModels.value.length) openAiModelDropdownState.value = true;
+        };
+        const toggleAiModelDropdown = () => {
+            openAiModelDropdownState.value = !openAiModelDropdownState.value;
+        };
+        const filteredAiModels = () => {
+            const q = aiModelSearch.value.trim().toLowerCase();
+            const models = aiModels.value || [];
+            if (!q) return models;
+            return models.filter(m => `${m.label || ''} ${m.key || ''} ${m.model_id || ''} ${m.provider || ''}`.toLowerCase().includes(q));
+        };
+        const selectAiModel = async (modelKey) => {
+            await switchAiModel(modelKey);
+            openAiModelDropdownState.value = false;
+        };
+        const selectFirstFilteredAiModel = () => {
+            const first = filteredAiModels().find(m => m.available);
+            if (first?.key) selectAiModel(first.key);
+        };
+        const applyAiModelDraft = async () => {
+            const target = aiModelDraft.value.trim();
+            if (!target) {
+                aiModelDraft.value = activeAiModel.value;
+                return;
+            }
+            await switchAiModel(target);
+            openAiModelDropdownState.value = false;
+        };
         const switchAiModel = async (modelKey) => {
-            if (!modelKey) return;
-            if (modelKey === activeAiModel.value) return;
+            const targetModel = (modelKey || '').trim();
+            if (!targetModel) return;
+            if (targetModel === activeAiModel.value) {
+                syncChatModelSelection(targetModel);
+                return;
+            }
             try {
                 const r = await fetch(`${API_BASE_URL}/api/ai/models/switch`, {
                     method: 'POST', headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({ model: modelKey })
+                    body: JSON.stringify({ model: targetModel })
                 });
                 const d = await r.json();
                 if (d.status === 'success') {
-                    activeAiModel.value = d.active;
+                    syncChatModelSelection(d.active || targetModel);
+                    await fetchApiKeyStatus();
                 } else {
                     alert(d.message || '切换失败');
                 }
@@ -4836,8 +5136,48 @@ createApp({
             const idx = available.indexOf(activeAiModel.value);
             switchAiModel(available[(idx + 1) % available.length]);
         };
-        const loadAndStart = async () => { if(!selectedCampaign.value)return; isLoading.value=true; isExpandingBranch.value=false; expandingBranchText.value=''; try { const r=await fetch(`${API_BASE_URL}/api/game/load`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:selectedCampaign.value})}); if(r.ok){ const parts=selectedCampaign.value.split('/'); currentSaveFolder.value=parts[parts.length-1]; await fetchGameState();appState.value='game';} } catch(e){} finally{isLoading.value=false;} };
-        const enterCurrentGame = async () => { await fetchGameState(); appState.value='game'; };
+        const refreshLoadedCampaignResources = async () => {
+            await Promise.all([
+                fetchGameState(),
+                fetchTimelines(),
+                fetchMapData(),
+                fetchLorebook(),
+                fetchRagDocuments(),
+            ]);
+        };
+        const loadAndStart = async () => {
+            if (!selectedCampaign.value) return;
+            isLoading.value = true;
+            isExpandingBranch.value = false;
+            expandingBranchText.value = '';
+            campaignLoadSummary.value = '';
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/game/load`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({filename:selectedCampaign.value})
+                });
+                const d = await r.json().catch(() => ({}));
+                if (r.ok) {
+                    const parts = selectedCampaign.value.split('/');
+                    currentSaveFolder.value = parts[parts.length - 1];
+                    campaignLoadSummary.value = d.message || '剧本已载入，世界观、地图、百科库与知识库已同步';
+                    await refreshLoadedCampaignResources();
+                    await syncMultiplayerRoomState();
+                    appState.value = 'game';
+                } else {
+                    campaignLoadSummary.value = d.message || '载入失败';
+                }
+            } catch(e) {
+                campaignLoadSummary.value = '载入失败，请检查后端是否运行';
+            } finally {
+                isLoading.value = false;
+            }
+        };
+        const enterCurrentGame = async () => {
+            await refreshLoadedCampaignResources();
+            appState.value = 'game';
+        };
         const exportSave = () => { exportShowNameInput.value=false; exportNewName.value=''; showExportModal.value=true; };
         const doExportOverwrite = async () => { showExportModal.value=false; try { const r=await fetch(`${API_BASE_URL}/api/game/export`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({save_name:currentSaveFolder.value})}); const d=await r.json(); if(r.ok){currentSaveFolder.value=d.folder;fetchCampaigns();} } catch(e){} };
         const doExportNew = async () => { showExportModal.value=false; const name=exportNewName.value.trim(); exportNewName.value=''; try { const r=await fetch(`${API_BASE_URL}/api/game/export`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({save_name:name})}); const d=await r.json(); if(r.ok){currentSaveFolder.value=d.folder;fetchCampaigns();} } catch(e){} };
@@ -5048,17 +5388,26 @@ createApp({
                 }).catch(e=>{ console.error('[check-triggers error]', e); });
             }
             fetch(`${API_BASE_URL}/api/player/state`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_scene_id:next.id,scene_image:generatedImageUrl.value||'',scene_prompt:imgPromptUsed.value||'',scene_ai_text:'',bgm_url:currentTrackUrl.value||'',bgm_name:(tracks.value.find(t=>t.id===currentTrackId.value)||{}).name||''})}).catch(()=>{});
+            await syncMultiplayerRoomState();
+            if (optionText) {
+                const sceneText = next.expanded_content || expandingBranchText.value || next.content || '';
+                await postMultiplayerAiEvent(
+                    'ai',
+                    `场景推进：${next.name}\n${sceneText}`,
+                    { source: 'scene_transition', node_id: next.id, option_text: optionText },
+                );
+            }
         };
 
         // ── Worldview / Memory / Lorebook ──
         const fetchWorldview=async()=>{try{const r=await fetch(`${API_BASE_URL}/api/game/worldview`);worldviewContent.value=(await r.json()).content;}catch(e){}};
         const saveWorldview=async()=>{try{await fetch(`${API_BASE_URL}/api/game/worldview`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:worldviewContent.value})});showWorldviewModal.value=false;}catch(e){}};
-        const openWorldviewModal=()=>{fetchWorldview();showWorldviewModal.value=true;};
+        const openWorldviewModal=()=>{enterAdvancedPanel();fetchWorldview();showWorldviewModal.value=true;};
         const fetchMemory=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/memory`);memoryContent.value=(await r.json()).content;};
         const saveMemory=async()=>{await fetch(`${API_BASE_URL}/api/game/memory`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:memoryContent.value})});showMemoryModal.value=false;};
-        const openMemoryModal=()=>{fetchMemory();showMemoryModal.value=true;};
+        const openMemoryModal=()=>{enterAdvancedPanel();fetchMemory();showMemoryModal.value=true;};
         const fetchLorebook=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/lorebook`);lorebook.value=(await r.json()).lorebook;};
-        const openLorebookModal=()=>{fetchLorebook();showLorebookModal.value=true;currentLore.value={keywords:'',content:''};};
+        const openLorebookModal=()=>{enterAdvancedPanel();fetchLorebook();showLorebookModal.value=true;currentLore.value={keywords:'',content:''};};
         const saveLore=async()=>{if(!currentLore.value.keywords||!currentLore.value.content)return;await fetch(`${API_BASE_URL}/api/game/lorebook`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keywords:currentLore.value.keywords,content:currentLore.value.content})});currentLore.value={keywords:'',content:''};await fetchLorebook();};
         const deleteLore=async id=>{if(!confirm('确定移除该百科记录？'))return;await fetch(`${API_BASE_URL}/api/game/lorebook/${id}`,{method:'DELETE'});currentLore.value={keywords:'',content:''};await fetchLorebook();};
 
@@ -5071,7 +5420,7 @@ createApp({
 
         // ── Characters ──
         const saveStatLabels=async()=>{try{await fetch(`${API_BASE_URL}/api/game/stat-labels`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hp_label:hpLabel.value,san_label:sanLabel.value})});}catch(e){}};
-        const saveCharacterState=async char=>{try{await fetch(`${API_BASE_URL}/api/game/character/${char.id}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',personality:char.personality||'',status:char.status||'active'})});}catch(e){}};
+        const saveCharacterState=async char=>{try{await fetch(`${API_BASE_URL}/api/game/character/${char.id}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',personality:char.personality||'',status:char.status||'active'})});await postMultiplayerAiEvent('state',`${char.name} 状态更新：${hpLabel.value} ${char.hp}，${sanLabel.value} ${char.san}，${{active:'在场',hidden:'未登场',benched:'暂离',dead:'死亡'}[char.status||'active']||char.status||'在场'}${char.inventory?'；'+char.inventory:''}`,{source:'character_update',character:{id:char.id,name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',status:char.status||'active'}});}catch(e){}};
         const createCharacter=async()=>{if(!newChar.value.name.trim())return;try{await fetch(`${API_BASE_URL}/api/game/character`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(newChar.value)});showCharModal.value=false;resetNewChar();await fetchGameState();}catch(e){}};
         const deleteCharacter=async charId=>{if(!confirm('放逐该实体？'))return;try{await fetch(`${API_BASE_URL}/api/game/character/${charId}`,{method:'DELETE'});await fetchGameState();}catch(e){}};
 
@@ -5429,6 +5778,11 @@ createApp({
                     result = await requestDiceService('/api/dice/roll', payload);
                 }
                 diceResult.value = result;
+                await postMultiplayerAiEvent('dice', diceResultText.value, {
+                    source: 'gm_dice',
+                    mode,
+                    result,
+                });
             } catch (err) {
                 diceError.value = err?.message || '骰子服务不可用';
             } finally {
@@ -5554,12 +5908,9 @@ createApp({
             if (audioRef.value) audioRef.value.volume = 0.3;
         });
 
-        // 进入游戏时一并拉取时间线和地图
+        // 进入游戏时一并拉取时间线、地图、百科与知识库
         const enterCurrentGameWithTl = async () => {
-            await fetchGameState();
-            await fetchTimelines();
-            await fetchMapData();
-            appState.value = 'game';
+            await enterCurrentGame();
         };
 
         // ══════════════════════════════════════════════════════
@@ -5650,6 +6001,7 @@ createApp({
 
         // 工具函数
         const mapRoomById = (id) => mapRooms.value.find(r => r.id === id);
+        watch(() => currentNode.value?.id, () => { syncMultiplayerRoomState(); });
 
         const mapClientToSvg = (e) => {
             const el = mapCanvasRef.value;
@@ -5661,6 +6013,34 @@ createApp({
         };
 
         const mapSnap = (v) => mapSnapGrid.value ? Math.round(v / MAP_GRID) * MAP_GRID : v;
+
+        const closeAdvancedSystemPanels = () => {
+            showWorldviewModal.value = false;
+            showLorebookModal.value = false;
+            showRagModal.value = false;
+            showMapModal.value = false;
+            showWorldEntitiesModal.value = false;
+            showTriggerModal.value = false;
+            showMemoryModal.value = false;
+            timelinePanelOpen.value = false;
+            showTlEditModal.value = false;
+            showTlMemoryModal.value = false;
+            showTlDynamicModal.value = false;
+            showMergeModal.value = false;
+            showTlRoomModal.value = false;
+        };
+
+        const enterAdvancedPanel = () => {
+            closeAdvancedSystemPanels();
+            showGameSettingsModal.value = false;
+            showAdvancedSettings.value = true;
+        };
+
+        const returnToAdvancedSettings = () => {
+            closeAdvancedSystemPanels();
+            showAdvancedSettings.value = true;
+            showGameSettingsModal.value = true;
+        };
 
         // 数据获取
         const fetchMapData = async () => {
@@ -5677,6 +6057,7 @@ createApp({
         };
 
         const openMapModal = () => {
+            enterAdvancedPanel();
             fetchMapData();
             showMapModal.value = true;
             nextTick(() => {
@@ -5883,6 +6264,7 @@ createApp({
             const r = mapRooms.value.find(r => r.id === roomId);
             if (r) r.state = 'active';
             if (mapSelectedRoom.value?.id === roomId) mapSelectedRoom.value.state = 'active';
+            await syncMultiplayerRoomState();
         };
 
         const mapDeleteSelectedRoom = async () => {
@@ -5986,17 +6368,23 @@ createApp({
         };
 
         return {
-            appState, isLoading, dbConnected, campaignFiles, selectedCampaign,
+            appState, isLoading, dbConnected, campaignFiles, selectedCampaign, campaignLoadSummary,
+            showGameSettingsModal, showAdvancedSettings, openGameSettingsModal, returnToAdvancedSettings,
             showCampaignImportModal, campaignImportName, campaignImportMainFile,
             campaignImportAssets, campaignImportBusy, campaignImportResult,
             campaignImportFormatsText, openCampaignImportModal, campaignImportPickMain,
             campaignImportPickAssets, importCampaign,
             // AI 模型
-            aiModels, aiModelSearch, activeAiModel, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
-            showApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
+            aiModels, aiModelSearch, activeAiModel, aiModelDraft, openAiModelDropdownState, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, openAiModelDropdown, toggleAiModelDropdown, filteredAiModels, selectAiModel, selectFirstFilteredAiModel, applyAiModelDraft, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
+            showApiKeyPanel, openApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
-            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, isRecording, toggleVoiceInput, ttsPlaying, ttsVoice, ttsTone, ttsRate, ttsSpeak, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            // 多人房间
+            showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,
+            multiplayerBusy, multiplayerError, multiplayerStatusMsg, multiplayerWsConnected,
+            multiplayerRoomName, multiplayerJoinCode, multiplayerProfileName, multiplayerInviteUrl,
+            openMultiplayerModal, createMultiplayerRoom, joinMultiplayerRoom, copyMultiplayerInvite, openMultiplayerTable,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,
             showTlMemoryModal, tlMemoryTarget, tlMemoryContent,

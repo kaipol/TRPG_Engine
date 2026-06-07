@@ -25,22 +25,21 @@ ENV_CHAT_MODEL = "OPENAI_COMPAT_CHAT_MODEL"
 ENV_EMBEDDING_MODEL = "OPENAI_COMPAT_EMBEDDING_MODEL"
 ENV_IMAGE_MODEL = "OPENAI_COMPAT_IMAGE_MODEL"
 ENV_IMAGE_SIZE = "OPENAI_COMPAT_IMAGE_SIZE"
-ENV_STT_MODEL = "OPENAI_COMPAT_STT_MODEL"
-ENV_TTS_MODEL = "OPENAI_COMPAT_TTS_MODEL"
-ENV_TTS_VOICE = "OPENAI_COMPAT_TTS_VOICE"
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_IMAGE_SIZE = "1024x1024"
-DEFAULT_TTS_VOICE = "alloy"
 DEFAULT_PROVIDER_ID = "default"
 DEFAULT_PROVIDER_NAME = "Default endpoint"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
 MODEL_CAPABILITY_FIELDS = {
     "chat": "chat_model",
     "embedding": "embedding_model",
     "image": "image_model",
-    "stt": "stt_model",
-    "tts": "tts_model",
 }
 
 _provider_store_path: Path | None = None
@@ -57,9 +56,6 @@ class OpenAICompatibleConfig:
     embedding_model: str
     image_model: str
     image_size: str
-    stt_model: str
-    tts_model: str
-    tts_voice: str
 
     @property
     def configured(self) -> bool:
@@ -89,9 +85,6 @@ def _env_record() -> dict:
         "embedding_model": os.environ.get(ENV_EMBEDDING_MODEL, "").strip(),
         "image_model": os.environ.get(ENV_IMAGE_MODEL, "").strip(),
         "image_size": os.environ.get(ENV_IMAGE_SIZE, DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
-        "stt_model": os.environ.get(ENV_STT_MODEL, "").strip(),
-        "tts_model": os.environ.get(ENV_TTS_MODEL, "").strip(),
-        "tts_voice": os.environ.get(ENV_TTS_VOICE, DEFAULT_TTS_VOICE).strip() or DEFAULT_TTS_VOICE,
     }
 
 
@@ -131,9 +124,6 @@ def _normalize_record(raw: dict, fallback_id: str = DEFAULT_PROVIDER_ID) -> dict
         "embedding_model": str(raw.get("embedding_model") or "").strip(),
         "image_model": str(raw.get("image_model") or "").strip(),
         "image_size": str(raw.get("image_size") or DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
-        "stt_model": str(raw.get("stt_model") or "").strip(),
-        "tts_model": str(raw.get("tts_model") or "").strip(),
-        "tts_voice": str(raw.get("tts_voice") or DEFAULT_TTS_VOICE).strip() or DEFAULT_TTS_VOICE,
     }
 
 
@@ -172,9 +162,6 @@ def _config_from_record(record: dict | None) -> OpenAICompatibleConfig:
         embedding_model=record["embedding_model"],
         image_model=record["image_model"],
         image_size=record["image_size"],
-        stt_model=record["stt_model"],
-        tts_model=record["tts_model"],
-        tts_voice=record["tts_voice"],
     )
 
 
@@ -209,9 +196,6 @@ def list_provider_profiles() -> list[dict]:
             "embedding_model": cfg.embedding_model,
             "image_model": cfg.image_model,
             "image_size": cfg.image_size,
-            "stt_model": cfg.stt_model,
-            "tts_model": cfg.tts_model,
-            "tts_voice": cfg.tts_voice,
         })
     return profiles
 
@@ -238,9 +222,6 @@ def upsert_provider_profile(
     embedding_model: str | None = None,
     image_model: str | None = None,
     image_size: str | None = None,
-    stt_model: str | None = None,
-    tts_model: str | None = None,
-    tts_voice: str | None = None,
     make_active: bool = True,
 ) -> OpenAICompatibleConfig:
     active_id, records = _provider_records(include_env=True)
@@ -265,9 +246,6 @@ def upsert_provider_profile(
     existing["embedding_model"] = pick(embedding_model, existing["embedding_model"])
     existing["image_model"] = pick(image_model, existing["image_model"])
     existing["image_size"] = pick(image_size, existing["image_size"] or DEFAULT_IMAGE_SIZE)
-    existing["stt_model"] = pick(stt_model, existing["stt_model"])
-    existing["tts_model"] = pick(tts_model, existing["tts_model"])
-    existing["tts_voice"] = pick(tts_voice, existing["tts_voice"] or DEFAULT_TTS_VOICE)
 
     if make_active:
         active_id = existing["id"]
@@ -305,7 +283,11 @@ def get_client(timeout: float | None = None, provider_id: str | None = None) -> 
     cfg = get_config(provider_id)
     if not cfg.configured:
         raise RuntimeError("OpenAI-compatible endpoint is not configured.")
-    kwargs = {"api_key": cfg.api_key, "base_url": cfg.base_url}
+    kwargs = {
+        "api_key": cfg.api_key,
+        "base_url": cfg.base_url,
+        "default_headers": {"User-Agent": BROWSER_USER_AGENT},
+    }
     if timeout is not None:
         kwargs["timeout"] = timeout
     return OpenAI(**kwargs)
@@ -319,8 +301,6 @@ def get_active_model(capability: str = "chat") -> str:
         "chat": cfg.chat_model,
         "embedding": cfg.embedding_model,
         "image": cfg.image_model,
-        "stt": cfg.stt_model,
-        "tts": cfg.tts_model,
     }
     return defaults.get(capability, "")
 
@@ -433,27 +413,3 @@ def image_generate(prompt: str, *, model: str = "", size: str = ""):
             raise
         kwargs.pop("response_format", None)
         return client.images.generate(**kwargs)
-
-
-def transcribe_audio(filename: str, audio_bytes: bytes, content_type: str = "audio/webm"):
-    model_id = get_active_model("stt").strip()
-    if not model_id:
-        raise RuntimeError("No OpenAI-compatible STT model is configured.")
-    return get_client(timeout=120).audio.transcriptions.create(
-        model=model_id,
-        file=(filename, audio_bytes, content_type or "audio/webm"),
-    )
-
-
-def speech_create(text: str, *, voice: str = "", response_format: str = "mp3", speed: float = 1.0):
-    model_id = get_active_model("tts").strip()
-    if not model_id:
-        raise RuntimeError("No OpenAI-compatible TTS model is configured.")
-    cfg = get_config()
-    return get_client(timeout=120).audio.speech.create(
-        model=model_id,
-        voice=(voice or cfg.tts_voice),
-        input=text,
-        response_format=response_format,
-        speed=speed,
-    )

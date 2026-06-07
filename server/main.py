@@ -7,7 +7,7 @@ Z.R.I.C 引擎 — 主系统模块 (main.py)
 import fastapi
 from fastapi import Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 import uvicorn
@@ -50,7 +50,7 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Admin-Token", "X-Room-Token"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Token", "X-Room-Token", "X-Member-Token"],
 )
 
 # ---------------------------------------------------------
@@ -1023,10 +1023,14 @@ def load_campaign(req: LoadCampaignRequest):
                 "INSERT INTO options (node_id, text, next_node_id) VALUES (?,?,?)",
                 (opt.get("node_id"), opt.get("text"), opt.get("next_node_id"))
             )
+        explicit_lore_keywords: set[str] = set()
         for lore in config.get("lorebook", []):
+            keywords = str(lore.get("keywords") or "").strip()
+            if keywords:
+                explicit_lore_keywords.add(keywords.lower())
             cursor.execute(
                 "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
-                (lore.get("keywords"), lore.get("content"))
+                (keywords, lore.get("content"))
             )
         for t in config.get("triggers", []):
             # 兼容旧存档：可能只有 cond_type/cond_value，没有 conditions
@@ -1117,6 +1121,36 @@ def load_campaign(req: LoadCampaignRequest):
                  log.get("message", ""), log.get("created_at", ""))
             )
 
+        # ── knowledge/ 资料：无论 RAG 是否预计算，都先灌入百科库 ───────
+        raw_library = []
+        if is_folder and kb_dir and os.path.isdir(kb_dir):
+            for kb_file in sorted(glob.glob(os.path.join(kb_dir, "*.txt")) +
+                                  glob.glob(os.path.join(kb_dir, "*.md"))):
+                try:
+                    with open(kb_file, "r", encoding="utf-8") as kf:
+                        kb_text = kf.read().strip()
+                    if kb_text:
+                        raw_library.append({
+                            "title": os.path.splitext(os.path.basename(kb_file))[0],
+                            "source": f"knowledge/{os.path.basename(kb_file)}",
+                            "text": kb_text
+                        })
+                except Exception as e:
+                    _log.warning("知识库文件读取失败: %s — %s", kb_file, e)
+
+        auto_lore_count = 0
+        for raw_item in raw_library:
+            title = str(raw_item.get("title") or "").strip()
+            text = str(raw_item.get("text") or "").strip()
+            if not title or not text or title.lower() in explicit_lore_keywords:
+                continue
+            cursor.execute(
+                "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
+                (title, text[:12000])
+            )
+            explicit_lore_keywords.add(title.lower())
+            auto_lore_count += 1
+
         # ── 还原 RAG 知识库 ────────────────────────────────────
         rag_library = config.get("rag_library", [])
         load_type = "文件夹" if is_folder else "单文件"
@@ -1125,7 +1159,7 @@ def load_campaign(req: LoadCampaignRequest):
         has_precomputed = bool(rag_library) and all("chunks" in item for item in rag_library)
 
         if has_precomputed:
-            # 直接恢复预计算数据，跳过 knowledge/ 目录和 embedding API，毫秒级完成
+            # 直接恢复预计算数据，跳过 embedding API，毫秒级完成
             for doc_item in rag_library:
                 cur_doc = cursor.execute(
                     "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
@@ -1143,24 +1177,19 @@ def load_campaign(req: LoadCampaignRequest):
             conn.close()
             _refresh_vector_cache()
             _log.info("RAG 知识库从存档直接恢复，共 %d 个文档，跳过 embedding 重建", len(rag_library))
-            return {"status": "success", "message": f"成功加载 {req.filename}（{load_type}，含 {len(rag_library)} 个RAG文档）"}
-
-        # 原始剧本（无预计算数据）：从 knowledge/ 目录完整导入管道
-        raw_library = []
-        if is_folder and kb_dir and os.path.isdir(kb_dir):
-            for kb_file in sorted(glob.glob(os.path.join(kb_dir, "*.txt")) +
-                                  glob.glob(os.path.join(kb_dir, "*.md"))):
-                try:
-                    with open(kb_file, "r", encoding="utf-8") as kf:
-                        kb_text = kf.read().strip()
-                    if kb_text:
-                        raw_library.append({
-                            "title": os.path.splitext(os.path.basename(kb_file))[0],
-                            "source": f"knowledge/{os.path.basename(kb_file)}",
-                            "text": kb_text
-                        })
-                except Exception as e:
-                    _log.warning("知识库文件读取失败: %s — %s", kb_file, e)
+            return {
+                "status": "success",
+                "message": (
+                    f"成功加载 {req.filename}（{load_type}，含 {len(rag_library)} 个RAG文档"
+                    f"，自动百科 {auto_lore_count} 条）"
+                ),
+                "auto_setup": {
+                    "rag_documents": len(rag_library),
+                    "auto_lore": auto_lore_count,
+                    "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
+                    "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
+                },
+            }
 
         for rag_item in raw_library:
             title  = rag_item.get("title", "未命名")
@@ -1224,7 +1253,19 @@ def load_campaign(req: LoadCampaignRequest):
         conn.close()
         # 加载完成后立即刷新向量缓存（embedding 为空的 chunks 会在后台线程重建后再次刷新）
         _refresh_vector_cache()
-        return {"status": "success", "message": f"成功加载 {req.filename}（{load_type}，含 {len(raw_library)} 个RAG文档）"}
+        return {
+            "status": "success",
+            "message": (
+                f"成功加载 {req.filename}（{load_type}，含 {len(raw_library)} 个RAG文档"
+                f"，自动百科 {auto_lore_count} 条）"
+            ),
+            "auto_setup": {
+                "rag_documents": len(raw_library),
+                "auto_lore": auto_lore_count,
+                "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
+                "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
+            },
+        }
 
     except Exception as e:
         _log.error("load_campaign 异常: %s", e, exc_info=True)
@@ -2187,9 +2228,6 @@ class ApiKeysUpdateRequest(BaseModel):
     embedding_model: str | None = None
     image_model: str | None = None
     image_size: str | None = None
-    stt_model: str | None = None
-    tts_model: str | None = None
-    tts_voice: str | None = None
     make_active: bool = True
 
 
@@ -2204,13 +2242,6 @@ class ProviderDeleteRequest(BaseModel):
 class ModelListRequest(BaseModel):
     capability: str = "chat"
     search: str = ""
-
-
-class TTSRequest(BaseModel):
-    text: str
-    voice: str = ""
-    speed: float = 1.0
-    response_format: str = "mp3"
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -2262,9 +2293,6 @@ def get_api_keys_status():
             "embedding_model": ai_provider.get_active_model("embedding") or cfg.embedding_model,
             "image_model": ai_provider.get_active_model("image") or cfg.image_model,
             "image_size": cfg.image_size,
-            "stt_model": ai_provider.get_active_model("stt") or cfg.stt_model,
-            "tts_model": ai_provider.get_active_model("tts") or cfg.tts_model,
-            "tts_voice": cfg.tts_voice,
         },
     }
 
@@ -2286,9 +2314,6 @@ def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
             embedding_model=req.embedding_model,
             image_model=req.image_model,
             image_size=req.image_size,
-            stt_model=req.stt_model,
-            tts_model=req.tts_model,
-            tts_voice=req.tts_voice,
             make_active=req.make_active,
         )
     except Exception as e:
@@ -2300,10 +2325,6 @@ def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
         ai_provider.set_active_model(req.embedding_model.strip(), "embedding")
     if req.image_model and req.make_active:
         ai_provider.set_active_model(req.image_model.strip(), "image")
-    if req.stt_model and req.make_active:
-        ai_provider.set_active_model(req.stt_model.strip(), "stt")
-    if req.tts_model and req.make_active:
-        ai_provider.set_active_model(req.tts_model.strip(), "tts")
 
     # 重新配置 agent（刷新注入函数引用）。
     from .agent import configure_agent as _reconfigure_agent
@@ -2377,6 +2398,15 @@ def delete_provider(req: ProviderDeleteRequest, request: Request):
 @app.get("/api/config/models")
 def list_config_models(capability: str = "chat", search: str = ""):
     """为配置面板获取当前供应商的模型列表，并按能力返回当前选中模型。"""
+    field = ai_provider.MODEL_CAPABILITY_FIELDS.get(capability)
+    if not field:
+        return {
+            "status": "error",
+            "message": f"不支持的模型能力：{capability}",
+            "capability": capability,
+            "active": "",
+            "models": [],
+        }
     try:
         models = ai_provider.list_remote_models(search)
         error = ""
@@ -2384,7 +2414,7 @@ def list_config_models(capability: str = "chat", search: str = ""):
         models = []
         error = f"{type(e).__name__}: {e}"
     cfg = ai_provider.get_config()
-    active = ai_provider.get_active_model(capability) or getattr(cfg, ai_provider.MODEL_CAPABILITY_FIELDS.get(capability, "chat_model"), "")
+    active = ai_provider.get_active_model(capability) or getattr(cfg, field, "")
     if active and not any(m["key"] == active for m in models):
         needle = search.strip().lower()
         if not needle or needle in active.lower():
@@ -2404,52 +2434,6 @@ def list_config_models(capability: str = "chat", search: str = ""):
         "provider": {"id": cfg.provider_id, "name": cfg.provider_name, "base_url": cfg.base_url},
         "error": error,
     }
-
-
-# ---------------------------------------------------------
-# API 接口：语音转文字（STT）/ 文本转语音（TTS）
-# ---------------------------------------------------------
-@app.post("/api/stt")
-async def speech_to_text(audio: UploadFile = File(...)):
-    """接收前端录音 blob，调用统一 OpenAI 兼容端点转写为文字。"""
-    audio_bytes = await audio.read()
-    filename = audio.filename or "recording.webm"
-    try:
-        transcript = ai_provider.transcribe_audio(filename, audio_bytes, audio.content_type or "audio/webm")
-        return {"text": transcript.text}
-    except Exception as e:
-        raise fastapi.HTTPException(status_code=500, detail=f"语音识别失败：{e}")
-
-
-@app.post("/api/tts")
-def text_to_speech(req: TTSRequest):
-    """调用统一 OpenAI 兼容端点生成语音音频。"""
-    text = (req.text or "").strip()
-    if not text:
-        raise fastapi.HTTPException(status_code=400, detail="TTS 文本不能为空")
-    fmt = (req.response_format or "mp3").strip().lower()
-    if fmt not in {"mp3", "opus", "aac", "flac", "wav", "pcm"}:
-        fmt = "mp3"
-    speed = min(max(float(req.speed or 1.0), 0.25), 4.0)
-    try:
-        speech = ai_provider.speech_create(text[:4000], voice=req.voice, response_format=fmt, speed=speed)
-        if hasattr(speech, "content"):
-            content = speech.content
-        elif hasattr(speech, "read"):
-            content = speech.read()
-        else:
-            content = bytes(speech)
-        media_types = {
-            "mp3": "audio/mpeg",
-            "opus": "audio/ogg",
-            "aac": "audio/aac",
-            "flac": "audio/flac",
-            "wav": "audio/wav",
-            "pcm": "audio/L16",
-        }
-        return Response(content=content, media_type=media_types.get(fmt, "audio/mpeg"))
-    except Exception as e:
-        raise fastapi.HTTPException(status_code=500, detail=f"语音合成失败：{e}")
 
 
 # =============================================================

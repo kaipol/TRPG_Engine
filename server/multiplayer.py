@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -238,6 +239,11 @@ class JoinRoomRequest(BaseModel):
     color: str = Field(default="", max_length=20)
 
 
+class CharacterClaimRequest(BaseModel):
+    player_id: str = Field(default="", max_length=80)
+    character_ids: list[int] = Field(default_factory=list, max_length=6)
+
+
 class MessageCreateRequest(BaseModel):
     sender_id: str = Field(default="", max_length=80)
     sender_name: str = Field(default="玩家", max_length=40)
@@ -256,6 +262,22 @@ class DiceRollRequest(BaseModel):
     target_number: int | None = Field(default=None, ge=-9999, le=9999)
     ask_ai: bool = False
     context: str = Field(default="", max_length=1200)
+
+
+class PlayerActionRequest(BaseModel):
+    actor_id: str = Field(default="", max_length=80)
+    actor_name: str = Field(default="玩家", max_length=40)
+    action: str = Field(default="", max_length=1200)
+    action_type: str = Field(default="mixed", max_length=20)
+    context: str = Field(default="", max_length=1200)
+
+
+class AiEventRequest(BaseModel):
+    kind: str = Field(default="ai", max_length=20)
+    content: str = Field(default="", max_length=4000)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    sender_name: str = Field(default="AI-KP", max_length=40)
+    broadcast_state: bool = True
 
 
 class TokenUpsertRequest(BaseModel):
@@ -388,6 +410,132 @@ def _serialize_member(row) -> dict[str, Any]:
     return data
 
 
+def _system_value(conn, key: str) -> str:
+    row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _serialize_scene_for_players(conn, scene_id: int | None) -> dict[str, Any] | None:
+    if not scene_id:
+        return None
+    node = conn.execute("SELECT * FROM nodes WHERE id=?", (scene_id,)).fetchone()
+    if not node:
+        return None
+    options = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, text, next_node_id FROM options WHERE node_id=? ORDER BY id",
+            (scene_id,),
+        ).fetchall()
+    ]
+    scene = dict(node)
+    scene["options"] = options
+    return scene
+
+
+def _first_scene_id(conn) -> int | None:
+    row = conn.execute("SELECT id FROM nodes ORDER BY id LIMIT 1").fetchone()
+    return int(row["id"]) if row else None
+
+
+def _stable_stat_seed(name: str) -> random.Random:
+    digest = hashlib.sha256((name or "玩家").encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:12], 16))
+
+
+def _normalize_player_characters(conn) -> None:
+    chars = conn.execute("SELECT id, name, role, hp, san FROM characters ORDER BY id").fetchall()
+    if not chars:
+        rng = _stable_stat_seed("默认调查员")
+        conn.execute(
+            "INSERT INTO characters (name, role, hp, san, inventory, personality, status) VALUES (?,?,?,?,?,?,?)",
+            ("调查员", "PC", rng.randint(70, 100), rng.randint(55, 85), "", "", "active"),
+        )
+        return
+    for char in chars:
+        hp = char["hp"]
+        san = char["san"]
+        updates: dict[str, int] = {}
+        rng = _stable_stat_seed(char["name"] or f"角色{char['id']}")
+        if hp is None:
+            updates["hp"] = rng.randint(60, 100)
+        if san is None:
+            updates["san"] = rng.randint(45, 90)
+        if updates:
+            conn.execute(
+                "UPDATE characters SET hp=COALESCE(?, hp), san=COALESCE(?, san) WHERE id=?",
+                (updates.get("hp"), updates.get("san"), char["id"]),
+            )
+
+
+def _ensure_room_opening(conn, room) -> sqlite3.Row:
+    _normalize_player_characters(conn)
+    scene_id = _int_or_none(room["current_scene_id"]) or _int_or_none(_system_value(conn, "player_current_scene_id")) or _first_scene_id(conn)
+    if scene_id and not _int_or_none(room["current_scene_id"]):
+        conn.execute(
+            "UPDATE multiplayer_rooms SET current_scene_id=?, updated_at=? WHERE id=?",
+            (scene_id, _now(), room["id"]),
+        )
+        room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room["id"],)).fetchone()
+    conn.commit()
+    return room
+
+
+def _serialize_map_room(conn, room_id: int | None) -> dict[str, Any] | None:
+    if not room_id:
+        return None
+    try:
+        room = conn.execute("SELECT * FROM map_rooms WHERE id=?", (room_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return dict(room) if room else None
+
+
+def _build_game_state(conn, room_row=None) -> dict[str, Any]:
+    if room_row:
+        room_row = _ensure_room_opening(conn, room_row)
+    room_scene_id = _int_or_none(room_row["current_scene_id"]) if room_row else None
+    room_map_id = _int_or_none(room_row["current_room_id"]) if room_row else None
+    player_scene_id = _int_or_none(_system_value(conn, "player_current_scene_id"))
+    current_room_id = room_map_id or _int_or_none(_system_value(conn, "current_room_id"))
+    current_scene_id = room_scene_id or player_scene_id
+    current_scene = _serialize_scene_for_players(conn, current_scene_id)
+
+    characters = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, name, role, hp, san, inventory, personality, status FROM characters ORDER BY role, name"
+        ).fetchall()
+    ]
+    active_characters = [c for c in characters if (c.get("status") or "active") != "hidden"]
+    player_characters = [c for c in active_characters if str(c.get("role") or "").upper() != "NPC"] or active_characters
+    map_room = _serialize_map_room(conn, current_room_id)
+    return {
+        "current_scene_id": current_scene_id,
+        "current_scene": current_scene,
+        "scene_image": _system_value(conn, "player_scene_image") or (current_scene or {}).get("scene_image", ""),
+        "scene_prompt": _system_value(conn, "player_scene_prompt"),
+        "scene_ai_text": _system_value(conn, "player_scene_ai_text"),
+        "bgm_url": _system_value(conn, "player_bgm_url"),
+        "bgm_name": _system_value(conn, "player_bgm_name"),
+        "characters": active_characters,
+        "playable_characters": player_characters,
+        "all_characters": characters,
+        "current_room_id": current_room_id,
+        "current_room": map_room,
+        "updated_at": _now(),
+    }
+
+
 def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
     room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
     if not room:
@@ -429,6 +577,7 @@ def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
     return {
         "type": "snapshot",
         "room": _serialize_room(room),
+        "game_state": _build_game_state(conn, room),
         "members": members,
         "messages": messages,
         "tokens": tokens,
@@ -484,6 +633,10 @@ async def _broadcast(room_id: int, event: dict[str, Any]):
     for ws in dead:
         _ws_clients_by_room.get(room_id, set()).discard(ws)
         _ws_meta.pop(ws, None)
+
+
+async def _broadcast_game_state(conn, room):
+    await _broadcast(room["id"], {"type": "game.state", "game_state": _build_game_state(conn, room)})
 
 
 def _ensure_member(conn, room_id: int, req: JoinRoomRequest, member_token: str = "") -> tuple[dict[str, Any], str]:
@@ -623,6 +776,171 @@ def _deterministic_dice_feedback(room_name: str, roll: dict[str, Any]) -> str:
     return f"{roll['actor_name']}在「{room_name}」掷出 {roll['expression']} = {roll['total']}。{outcome}"
 
 
+def _strip_json_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        parts = cleaned.split("```")
+        if len(parts) >= 2:
+            cleaned = parts[1].strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+    return cleaned
+
+
+def _apply_character_updates(conn, updates: Any) -> list[dict[str, Any]]:
+    if not isinstance(updates, list):
+        return []
+    allowed_statuses = {"active", "hidden", "benched", "dead"}
+    applied: list[dict[str, Any]] = []
+    for item in updates[:12]:
+        if not isinstance(item, dict):
+            continue
+        char_id = _int_or_none(item.get("id") or item.get("character_id"))
+        name = str(item.get("name") or "").strip()
+        row = None
+        if char_id:
+            row = conn.execute("SELECT * FROM characters WHERE id=?", (char_id,)).fetchone()
+        if not row and name:
+            row = conn.execute("SELECT * FROM characters WHERE name=?", (name[:50],)).fetchone()
+        if not row:
+            continue
+
+        before = dict(row)
+        hp = before.get("hp")
+        san = before.get("san")
+        status = before.get("status") or "active"
+        inventory = before.get("inventory") or ""
+
+        try:
+            if item.get("hp") is not None:
+                hp = max(0, min(999, int(item.get("hp"))))
+            if item.get("san") is not None:
+                san = max(0, min(999, int(item.get("san"))))
+        except (TypeError, ValueError):
+            continue
+        if item.get("status"):
+            next_status = str(item.get("status")).strip().lower()
+            if next_status in allowed_statuses:
+                status = next_status
+        if item.get("inventory") is not None:
+            inventory = str(item.get("inventory") or "")[:500]
+
+        if hp == before.get("hp") and san == before.get("san") and status == (before.get("status") or "active") and inventory == (before.get("inventory") or ""):
+            continue
+
+        conn.execute(
+            "UPDATE characters SET hp=?, san=?, inventory=?, status=? WHERE id=?",
+            (hp, san, inventory, status, before["id"]),
+        )
+        applied.append(
+            {
+                "id": before["id"],
+                "name": before["name"],
+                "before": {
+                    "hp": before.get("hp"),
+                    "san": before.get("san"),
+                    "inventory": before.get("inventory") or "",
+                    "status": before.get("status") or "active",
+                },
+                "after": {"hp": hp, "san": san, "inventory": inventory, "status": status},
+                "reason": str(item.get("reason") or "")[:240],
+            }
+        )
+    if applied:
+        conn.commit()
+    return applied
+
+
+def _format_character_changes(changes: list[dict[str, Any]]) -> str:
+    lines = []
+    for change in changes:
+        before = change["before"]
+        after = change["after"]
+        bits = []
+        for key, label in (("hp", "HP"), ("san", "SAN"), ("status", "状态"), ("inventory", "物品")):
+            if before.get(key) != after.get(key):
+                bits.append(f"{label}: {before.get(key)} -> {after.get(key)}")
+        if bits:
+            reason = f"（{change['reason']}）" if change.get("reason") else ""
+            lines.append(f"{change['name']}：" + "，".join(bits) + reason)
+    return "\n".join(lines)
+
+
+def _ai_adjudicate_json(system_prompt: str, user_payload: dict[str, Any], fallback: str) -> dict[str, Any]:
+    if not ai_provider.is_configured():
+        return {"narration": fallback, "character_updates": []}
+    try:
+        resp = ai_provider.chat_completion(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "请只返回 json 对象。\n" + json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            temperature=0.55,
+            max_tokens=520,
+            json_mode=True,
+        )
+        raw = _strip_json_fence(resp.choices[0].message.content or "")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("AI did not return an object")
+        data["narration"] = str(data.get("narration") or fallback).strip()[:1800]
+        if not isinstance(data.get("character_updates"), list):
+            data["character_updates"] = []
+        return data
+    except Exception as exc:
+        _log.warning("AI-KP adjudication failed: %s", exc)
+        return {"narration": fallback, "character_updates": []}
+
+
+def _ai_roll_adjudication(conn, room, roll: dict[str, Any], context: str) -> dict[str, Any]:
+    room_name = room["name"]
+    fallback = _deterministic_dice_feedback(room_name, roll)
+    state = _build_game_state(conn, room)
+    system_prompt = (
+        "你是多人联机 TRPG 的 AI-KP。主持人职责是描述世界、扮演 NPC、裁定规则、"
+        "根据骰点和玩家行动给出公平后果。严格返回 JSON / json："
+        "{\"narration\":\"1-3句给所有玩家看的叙事裁定\","
+        "\"character_updates\":[{\"id\":角色ID或省略,\"name\":\"角色名\","
+        "\"hp\":新的HP可省略,\"san\":新的SAN可省略,\"status\":\"active|hidden|benched|dead\"可省略,"
+        "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}]}。"
+        "只能改已有角色；没有明确后果时 character_updates 返回空数组；不要替玩家继续行动。"
+    )
+    return _ai_adjudicate_json(
+        system_prompt,
+        {"room": room_name, "roll": roll, "context": context[:1200], "game_state": state},
+        fallback,
+    )
+
+
+def _ai_player_action_adjudication(conn, room, req: PlayerActionRequest) -> dict[str, Any]:
+    room_name = room["name"]
+    action = req.action.strip()
+    fallback = f"AI-KP 记录了{req.actor_name}的行动：{action}。等待下一步裁定。"
+    state = _build_game_state(conn, room)
+    system_prompt = (
+        "你是多人联机 TRPG 的 AI-KP。玩家只控制自己的角色；你负责建立场景、扮演 NPC/环境、"
+        "判断行动是否可行、是否需要掷骰，并叙述当前即时后果。严格返回 JSON / json："
+        "{\"narration\":\"给所有玩家看的主持人回应\","
+        "\"needs_roll\":false,\"suggested_roll\":\"可选骰式或检定\","
+        "\"character_updates\":[{\"id\":角色ID或省略,\"name\":\"角色名\",\"hp\":新的HP可省略,"
+        "\"san\":新的SAN可省略,\"status\":\"active|hidden|benched|dead\"可省略,"
+        "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}]}。"
+        "没有明确规则后果时不要改角色；需要检定时提出检定而不是代替玩家宣告成功。"
+    )
+    return _ai_adjudicate_json(
+        system_prompt,
+        {
+            "room": room_name,
+            "actor": {"id": req.actor_id, "name": req.actor_name},
+            "action_type": req.action_type,
+            "action": action,
+            "context": req.context[:1200],
+            "game_state": state,
+        },
+        fallback,
+    )
+
+
 def _ai_dice_feedback(room_name: str, roll: dict[str, Any], context: str) -> str:
     if not ai_provider.is_configured():
         return _deterministic_dice_feedback(room_name, roll)
@@ -661,7 +979,12 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
         roll["summary"],
         roll,
     )
-    feedback = _ai_dice_feedback(room["name"], roll, req.context) if req.ask_ai else _deterministic_dice_feedback(room["name"], roll)
+    adjudication = _ai_roll_adjudication(conn, room, roll, req.context) if req.ask_ai else {
+        "narration": _deterministic_dice_feedback(room["name"], roll),
+        "character_updates": [],
+    }
+    changes = _apply_character_updates(conn, adjudication.get("character_updates"))
+    feedback = adjudication.get("narration") or _deterministic_dice_feedback(room["name"], roll)
     ai_msg = _save_message(
         conn,
         room["id"],
@@ -669,12 +992,82 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
         "AI-KP",
         "ai",
         feedback,
-        {"source": "dice", "roll": roll},
+        {"source": "dice", "roll": roll, "character_updates": changes},
     )
+    change_msg = None
+    if changes:
+        change_msg = _save_message(
+            conn,
+            room["id"],
+            "ai-kp",
+            "AI-KP",
+            "state",
+            _format_character_changes(changes),
+            {"source": "character_updates", "changes": changes},
+        )
     _remember_room_event(conn, room["code"], f"{roll['summary']}；AI反馈：{feedback}")
     await _broadcast(room["id"], {"type": "message.created", "message": dice_msg})
     await _broadcast(room["id"], {"type": "message.created", "message": ai_msg})
-    return {"status": "success", "roll": roll, "message": dice_msg, "ai_message": ai_msg}
+    if change_msg:
+        await _broadcast(room["id"], {"type": "message.created", "message": change_msg})
+    await _broadcast_game_state(conn, room)
+    return {
+        "status": "success",
+        "roll": roll,
+        "message": dice_msg,
+        "ai_message": ai_msg,
+        "state_message": change_msg,
+        "character_updates": changes,
+        "game_state": _build_game_state(conn, room),
+    }
+
+
+async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dict[str, Any]:
+    action = req.action.strip()
+    if not action:
+        raise fastapi.HTTPException(status_code=400, detail="行动不能为空")
+    player_msg = _save_message(
+        conn,
+        room["id"],
+        req.actor_id,
+        req.actor_name,
+        "action",
+        action,
+        {"action_type": req.action_type, "context": req.context},
+    )
+    adjudication = _ai_player_action_adjudication(conn, room, req)
+    changes = _apply_character_updates(conn, adjudication.get("character_updates"))
+    narration = adjudication.get("narration") or f"AI-KP 记录了{req.actor_name}的行动：{action}。"
+    payload = {"source": "player_action", "action": action, "action_type": req.action_type, "character_updates": changes}
+    if adjudication.get("needs_roll"):
+        payload["needs_roll"] = True
+        payload["suggested_roll"] = str(adjudication.get("suggested_roll") or "")[:120]
+    ai_msg = _save_message(conn, room["id"], "ai-kp", "AI-KP", "ai", narration, payload)
+    change_msg = None
+    if changes:
+        change_msg = _save_message(
+            conn,
+            room["id"],
+            "ai-kp",
+            "AI-KP",
+            "state",
+            _format_character_changes(changes),
+            {"source": "character_updates", "changes": changes},
+        )
+    _remember_room_event(conn, room["code"], f"{req.actor_name}行动：{action[:300]}；AI反馈：{narration[:300]}")
+    await _broadcast(room["id"], {"type": "message.created", "message": player_msg})
+    await _broadcast(room["id"], {"type": "message.created", "message": ai_msg})
+    if change_msg:
+        await _broadcast(room["id"], {"type": "message.created", "message": change_msg})
+    await _broadcast_game_state(conn, room)
+    return {
+        "status": "success",
+        "message": player_msg,
+        "ai_message": ai_msg,
+        "state_message": change_msg,
+        "character_updates": changes,
+        "game_state": _build_game_state(conn, room),
+    }
 
 
 def _safe_asset_path(asset_path: str) -> Path:
@@ -841,7 +1234,7 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
                 skill_name=req.payload.get("skill_name", ""),
                 skill_value=req.payload.get("skill_value"),
                 target_number=req.payload.get("target_number"),
-                ask_ai=bool(req.payload.get("ask_ai", False)),
+                ask_ai=bool(req.payload.get("ask_ai", True)),
                 context=req.payload.get("context", ""),
             )
             return await _roll_and_record(conn, room, dice_req)
@@ -863,6 +1256,127 @@ async def roll_dice(room_code: str, req: DiceRollRequest, request: Request):
             _room_token_from_request(request),
         )
         return await _roll_and_record(conn, room, req)
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/action")
+async def submit_player_action(room_code: str, req: PlayerActionRequest, request: Request):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        _require_member_or_gm(
+            conn,
+            room,
+            req.actor_id,
+            _member_token_from_request(request),
+            _room_token_from_request(request),
+        )
+        return await _adjudicate_player_action(conn, room, req)
+
+
+@multiplayer_router.get("/api/multiplayer/rooms/{room_code}/state")
+def get_room_game_state(room_code: str):
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        return {"status": "success", "game_state": _build_game_state(conn, room)}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/characters/claim")
+async def claim_room_characters(room_code: str, req: CharacterClaimRequest, request: Request):
+    character_ids = [int(cid) for cid in req.character_ids if int(cid) > 0][:6]
+    if not character_ids:
+        raise fastapi.HTTPException(status_code=400, detail="请至少选择一个角色")
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        _require_member_or_gm(
+            conn,
+            room,
+            req.player_id,
+            _member_token_from_request(request),
+            _room_token_from_request(request),
+        )
+        placeholders = ",".join("?" for _ in character_ids)
+        rows = conn.execute(
+            f"SELECT id, name, role, hp, san, inventory, status FROM characters WHERE id IN ({placeholders})",
+            character_ids,
+        ).fetchall()
+        if not rows:
+            raise fastapi.HTTPException(status_code=404, detail="角色不存在")
+        names = [r["name"] for r in rows]
+        notes = json.dumps({"character_ids": [r["id"] for r in rows], "character_names": names}, ensure_ascii=False)
+        token_id = f"pc_{req.player_id}"
+        conn.execute(
+            """
+            INSERT INTO multiplayer_tokens
+            (room_id, token_id, name, kind, owner_id, avatar_url, color, x, y, size,
+             linked_room_id, linked_entity_id, linked_character_id, notes, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(room_id, token_id) DO UPDATE SET
+                name=excluded.name,
+                kind=excluded.kind,
+                owner_id=excluded.owner_id,
+                linked_character_id=excluded.linked_character_id,
+                notes=excluded.notes,
+                updated_at=excluded.updated_at
+            """,
+            (
+                room["id"],
+                token_id,
+                "/".join(names)[:80],
+                "pc",
+                req.player_id[:80],
+                "",
+                "#7dd3fc",
+                160 + len(names) * 18,
+                160 + len(names) * 12,
+                48,
+                _int_or_none(room["current_room_id"]),
+                None,
+                rows[0]["id"],
+                notes,
+                _now(),
+            ),
+        )
+        msg = _save_message(
+            conn,
+            room["id"],
+            req.player_id,
+            "/".join(names)[:40],
+            "system",
+            f"已选择角色：{'、'.join(names)}",
+            {"character_ids": [r["id"] for r in rows]},
+        )
+        conn.commit()
+        token = _serialize_token(conn.execute("SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?", (room["id"], token_id)).fetchone())
+        snap = _snapshot(conn, room["id"])
+    await _broadcast(room["id"], {"type": "token.updated", "token": token})
+    await _broadcast(room["id"], {"type": "message.created", "message": msg})
+    await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
+    return {"status": "success", "message": msg, "token": token, **snap}
+
+
+@multiplayer_router.post("/api/multiplayer/rooms/{room_code}/events")
+async def post_ai_kp_event(room_code: str, req: AiEventRequest, request: Request):
+    content = (req.content or "").strip()
+    if not content:
+        raise fastapi.HTTPException(status_code=400, detail="事件内容不能为空")
+    with safe_db() as conn:
+        room = _room_by_code(conn, room_code)
+        _require_gm(room, _room_token_from_request(request))
+        kind = req.kind if req.kind in {"ai", "state", "system", "dice"} else "ai"
+        msg = _save_message(
+            conn,
+            room["id"],
+            "ai-kp",
+            req.sender_name or "AI-KP",
+            kind,
+            content,
+            req.payload,
+        )
+        _remember_room_event(conn, room["code"], f"AI-KP事件：{content[:300]}")
+        game_state = _build_game_state(conn, room)
+    await _broadcast(room["id"], {"type": "message.created", "message": msg})
+    if req.broadcast_state:
+        await _broadcast(room["id"], {"type": "game.state", "game_state": game_state})
+    return {"status": "success", "message": msg, "game_state": game_state}
 
 
 @multiplayer_router.get("/api/multiplayer/rooms/{room_code}/tokens")
@@ -1138,7 +1652,8 @@ async def room_websocket(
                             expression=content,
                             actor_id=req.sender_id,
                             actor_name=req.sender_name,
-                            ask_ai=bool(req.payload.get("ask_ai", False)),
+                            ask_ai=bool(req.payload.get("ask_ai", True)),
+                            context=req.payload.get("context", ""),
                         )
                         await _roll_and_record(conn, room, dice_req)
                     else:
@@ -1159,6 +1674,16 @@ async def room_websocket(
                         context=payload.get("context", ""),
                     )
                     await _roll_and_record(conn, room, dice_req)
+                elif msg_type == "player.action":
+                    payload = incoming.get("payload") or {}
+                    action_req = PlayerActionRequest(
+                        actor_id=meta.get("player_id", ""),
+                        actor_name=meta.get("name", name),
+                        action=payload.get("action", ""),
+                        action_type=payload.get("action_type", "mixed"),
+                        context=payload.get("context", ""),
+                    )
+                    await _adjudicate_player_action(conn, room, action_req)
                 elif msg_type == "token.move":
                     payload = incoming.get("payload") or {}
                     token_id = str(payload.get("token_id", ""))
