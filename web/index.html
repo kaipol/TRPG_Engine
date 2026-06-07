@@ -34,7 +34,7 @@ tailwind.config = {
 <style>
 /* ── 基础 ── */
 *,:before,:after { box-sizing: border-box; margin:0; padding:0; }
-html,body { height:100%; overflow:hidden; }
+html,body { height:100%; overflow:hidden; color-scheme:dark; }
 body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd6; -webkit-font-smoothing:antialiased; }
 
 /* ── 滚动条 ── */
@@ -69,10 +69,41 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
     width:100%; background:#0b0e17; border:1px solid rgba(255,255,255,0.08);
     border-radius:6px; padding:9px 12px; font-size:14px; color:var(--text);
     font-family:"Noto Sans SC",sans-serif; outline:none; transition:border-color .15s;
+    color-scheme:dark;
 }
 .inp:focus { border-color:rgba(232,180,75,0.4); box-shadow:0 0 0 2px rgba(232,180,75,0.06); }
 .inp::placeholder { color:#4b5563; }
+.inp option,
+.inp optgroup {
+    background:#0b0e17;
+    color:var(--text);
+}
+.inp option:disabled { color:#4b5563; }
+.inp:-webkit-autofill,
+.inp:-webkit-autofill:hover,
+.inp:-webkit-autofill:focus {
+    -webkit-text-fill-color:var(--text);
+    -webkit-box-shadow:0 0 0 1000px #0b0e17 inset;
+    caret-color:var(--text);
+}
 .inp-mono { font-family:"JetBrains Mono",monospace; font-size:13px; }
+.model-picker { position:relative; display:flex; gap:6px; }
+.model-picker .inp { min-width:0; flex:1; }
+.model-picker-menu {
+    position:absolute; z-index:80; left:0; right:0; top:calc(100% + 6px);
+    background:#0b0e17; border:1px solid rgba(255,255,255,.1); border-radius:6px;
+    box-shadow:0 18px 42px rgba(0,0,0,.45); padding:8px;
+}
+.model-picker-search { margin-bottom:7px; padding:6px 8px; font-size:12px; }
+.model-picker-list { max-height:190px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
+.model-picker-option {
+    width:100%; border:1px solid transparent; border-radius:5px; background:transparent;
+    color:var(--text); text-align:left; padding:7px 8px; font-size:12px; cursor:pointer;
+    font-family:"JetBrains Mono",monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.model-picker-option:hover,
+.model-picker-option.active { background:rgba(232,180,75,.1); border-color:rgba(232,180,75,.22); color:#f0dea0; }
+.model-picker-empty { padding:10px 8px; color:#4b5563; font-size:12px; }
 
 /* ── 按钮基础 (放大) ── */
 .btn {
@@ -541,29 +572,34 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
                     <span class="tag">模型配置</span>
-                    <div style="display:flex;gap:8px;align-items:center">
-                        <input v-model.trim="configModelSearch" class="inp inp-mono" placeholder="搜索模型 ID" style="width:180px;font-size:12px;padding:6px 8px">
-                        <button @click="fetchAllConfigModels" :disabled="isFetchingConfigModels" class="btn btn-ghost btn-sm">
-                            <i :class="isFetchingConfigModels?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingConfigModels?'animation:spin 1s linear infinite':''"></i>
-                            获取全部模型
-                        </button>
-                    </div>
+                    <button @click="fetchAllConfigModels" :disabled="isFetchingConfigModels" class="btn btn-ghost btn-sm">
+                        <i :class="isFetchingConfigModels&&fetchingConfigCapability==='all'?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingConfigModels&&fetchingConfigCapability==='all'?'animation:spin 1s linear infinite':''"></i>
+                        获取全部模型
+                    </button>
                 </div>
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
                     <div v-for="field in modelConfigFields" :key="field.key" style="min-width:0">
-                        <label class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+                        <label class="tag" style="display:block;margin-bottom:7px">
                             {{ field.label }}
-                            <button @click="fetchConfigModels(field.capability)" :disabled="isFetchingConfigModels" class="btn btn-ghost btn-icon" :title="'获取 '+field.label" style="margin-left:auto;width:26px;height:26px;padding:0">
-                                <i class="ph ph-download-simple" style="font-size:13px"></i>
-                            </button>
                         </label>
-                        <div style="display:flex;gap:6px">
-                            <input v-model.trim="apiKeyInputs[field.key]" class="inp inp-mono" :placeholder="field.placeholder" style="font-size:12px;min-width:0;flex:1">
-                            <select v-if="(modelOptions[field.capability]||[]).length" @change="selectConfigModel(field.key, $event.target.value)" class="inp inp-mono" style="font-size:12px;padding:0 8px;min-width:130px;max-width:45%;flex:0 1 180px" title="选择模型">
-                                <option value="">--</option>
-                                <option v-for="m in modelOptions[field.capability]" :key="field.capability+'-'+m.key" :value="m.key">{{ m.label || m.key }}</option>
-                            </select>
+                        <div class="model-picker">
+                            <input v-model.trim="apiKeyInputs[field.key]" @focus="openModelDropdown(field.capability)" class="inp inp-mono" :placeholder="field.placeholder" style="font-size:12px">
+                            <button v-if="(modelOptions[field.capability]||[]).length" @click="toggleModelDropdown(field.capability)" class="btn btn-ghost btn-icon" :title="'选择 '+field.label" style="width:34px;height:34px;padding:0;flex:0 0 34px">
+                                <i :class="openModelDropdownCapability===field.capability?'ph ph-caret-up':'ph ph-caret-down'" style="font-size:14px"></i>
+                            </button>
+                            <div v-if="openModelDropdownCapability===field.capability && (modelOptions[field.capability]||[]).length" class="model-picker-menu">
+                                <input v-model.trim="dropdownModelSearches[field.capability]" class="inp inp-mono model-picker-search" :placeholder="'在已获取模型中搜索 '+field.label" @keydown.enter.prevent="selectFirstFilteredConfigModel(field)">
+                                <div class="model-picker-list">
+                                    <button v-for="m in filteredConfigModels(field.capability)" :key="field.capability+'-drop-'+m.key" @click="selectConfigModel(field.key, m.key, field.capability)" class="model-picker-option" :class="{active: apiKeyInputs[field.key]===m.key}" :title="m.label || m.key">
+                                        {{ m.label || m.key }}
+                                    </button>
+                                    <div v-if="!filteredConfigModels(field.capability).length" class="model-picker-empty">没有匹配的模型</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-if="(modelOptions[field.capability]||[]).length" style="font-size:10px;color:#4b5563;margin-top:5px">
+                            已获取 {{ modelOptions[field.capability].length }} 个模型
                         </div>
                     </div>
 
@@ -3375,9 +3411,12 @@ createApp({
             if (active?.name) return active.name;
             return apiProviders.value.find(p => p.id === activeProviderId.value)?.name || '';
         });
-        const configModelSearch = ref('');
+        const blankConfigModelSearches = () => ({ chat: '', embedding: '', image: '', stt: '', tts: '' });
+        const dropdownModelSearches = ref(blankConfigModelSearches());
+        const openModelDropdownCapability = ref('');
         const modelOptions = ref({ chat: [], embedding: [], image: [], stt: [], tts: [] });
         const isFetchingConfigModels = ref(false);
+        const fetchingConfigCapability = ref('');
         const modelConfigFields = [
             { key: 'chatModel', capability: 'chat', label: 'Chat Model', placeholder: 'gpt-4.1 / qwen-plus / custom-chat-model' },
             { key: 'embeddingModel', capability: 'embedding', label: 'Embedding Model', placeholder: 'text-embedding-3-small / bge-m3' },
@@ -3460,6 +3499,8 @@ createApp({
             apiKeyStatus.value = { openai: false };
             apiKeyInputs.value = blankApiKeyInputs(`Provider ${apiProviders.value.length + 1}`);
             modelOptions.value = { chat: [], embedding: [], image: [], stt: [], tts: [] };
+            dropdownModelSearches.value = blankConfigModelSearches();
+            openModelDropdownCapability.value = '';
             apiKeySaveMsg.value = '';
         };
 
@@ -3477,6 +3518,9 @@ createApp({
             if (!providerId) return;
             const localProfile = apiProviders.value.find(p => p.id === providerId);
             if (localProfile) fillProviderInputs(localProfile);
+            modelOptions.value = { chat: [], embedding: [], image: [], stt: [], tts: [] };
+            dropdownModelSearches.value = blankConfigModelSearches();
+            openModelDropdownCapability.value = '';
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/switch`, {
                     method: 'POST',
@@ -3522,22 +3566,74 @@ createApp({
             }
         };
 
-        const fetchConfigModels = async (capability = 'chat') => {
-            if (isFetchingConfigModels.value && capability === 'all') return;
-            isFetchingConfigModels.value = true;
-            try {
-                const params = new URLSearchParams({
-                    capability,
-                    search: configModelSearch.value || ''
+        const ensureModelOption = (models, modelId, provider) => {
+            const modelKey = (modelId || '').trim();
+            const list = Array.isArray(models) ? [...models] : [];
+            if (modelKey && !list.some(m => m.key === modelKey)) {
+                list.unshift({
+                    key: modelKey,
+                    model_id: modelKey,
+                    label: modelKey,
+                    available: apiKeyStatus.value.openai,
+                    provider: provider?.name || activeProviderName.value,
+                    provider_id: provider?.id || activeProviderId.value,
                 });
+            }
+            return list;
+        };
+
+        const mergeModelOptions = (...modelLists) => {
+            const seen = new Set();
+            const merged = [];
+            modelLists.flat().forEach(model => {
+                const key = (model?.key || model?.model_id || '').trim();
+                if (!key || seen.has(key)) return;
+                seen.add(key);
+                merged.push({ ...model, key, model_id: model.model_id || key, label: model.label || key });
+            });
+            return merged;
+        };
+
+        const openModelDropdown = (capability) => {
+            if ((modelOptions.value[capability] || []).length) {
+                openModelDropdownCapability.value = capability;
+            }
+        };
+
+        const toggleModelDropdown = (capability) => {
+            openModelDropdownCapability.value = openModelDropdownCapability.value === capability ? '' : capability;
+        };
+
+        const filteredConfigModels = (capability) => {
+            const q = (dropdownModelSearches.value[capability] || '').trim().toLowerCase();
+            const models = modelOptions.value[capability] || [];
+            if (!q) return models;
+            return models.filter(m => `${m.label || ''} ${m.key || ''} ${m.model_id || ''}`.toLowerCase().includes(q));
+        };
+
+        const selectFirstFilteredConfigModel = (field) => {
+            const first = filteredConfigModels(field.capability)[0];
+            if (first) selectConfigModel(field.key, first.key, field.capability);
+        };
+
+        const fetchConfigModels = async (capability = 'chat') => {
+            if (isFetchingConfigModels.value) return;
+            isFetchingConfigModels.value = true;
+            fetchingConfigCapability.value = capability;
+            try {
+                const params = new URLSearchParams({ capability });
                 const r = await fetch(`${API_BASE_URL}/api/config/models?${params.toString()}`);
                 const d = await r.json();
                 if (d.status === 'success') {
+                    const field = modelConfigFields.find(f => f.capability === capability);
+                    const currentModel = field ? (apiKeyInputs.value[field.key] || d.active || '') : (d.active || '');
+                    const models = ensureModelOption(d.models || [], currentModel, d.provider);
                     modelOptions.value = {
                         ...modelOptions.value,
-                        [capability]: d.models || []
+                        [capability]: models
                     };
-                    const field = modelConfigFields.find(f => f.capability === capability);
+                    dropdownModelSearches.value = { ...dropdownModelSearches.value, [capability]: '' };
+                    if (models.length) openModelDropdownCapability.value = capability;
                     if (field && d.active && !apiKeyInputs.value[field.key]) {
                         apiKeyInputs.value[field.key] = d.active;
                     }
@@ -3561,40 +3657,48 @@ createApp({
                 apiKeySaveMsg.value = '获取模型失败';
             } finally {
                 isFetchingConfigModels.value = false;
+                fetchingConfigCapability.value = '';
             }
         };
 
         const fetchAllConfigModels = async () => {
+            if (isFetchingConfigModels.value) return;
             isFetchingConfigModels.value = true;
+            fetchingConfigCapability.value = 'all';
             try {
-                await Promise.all(modelConfigFields.map(async field => {
-                    const params = new URLSearchParams({
-                        capability: field.capability,
-                        search: configModelSearch.value || ''
-                    });
+                const results = await Promise.all(modelConfigFields.map(async field => {
+                    const params = new URLSearchParams({ capability: field.capability });
                     const r = await fetch(`${API_BASE_URL}/api/config/models?${params.toString()}`);
                     const d = await r.json();
-                    if (d.status === 'success') {
-                        modelOptions.value = {
-                            ...modelOptions.value,
-                            [field.capability]: d.models || []
-                        };
-                        if (d.active && !apiKeyInputs.value[field.key]) {
-                            apiKeyInputs.value[field.key] = d.active;
-                        }
-                        if (d.provider) {
-                            activeAiProvider.value = {
-                                id: d.provider.id,
-                                name: d.provider.name,
-                                base_url: d.provider.base_url,
-                            };
-                        }
-                    } else if (!apiKeySaveMsg.value) {
+                    if (d.status !== 'success') {
                         apiKeySaveOk.value = false;
                         apiKeySaveMsg.value = d.message || '获取模型失败';
                     }
+                    return { field, data: d };
                 }));
+                const allModels = mergeModelOptions(...results.map(result => result.data?.models || []));
+                const nextOptions = { ...modelOptions.value };
+                const nextDropdownSearches = { ...dropdownModelSearches.value };
+                results.forEach(({ field, data }) => {
+                    if (data?.status !== 'success') return;
+                    const currentModel = apiKeyInputs.value[field.key] || data.active || '';
+                    nextOptions[field.capability] = ensureModelOption(allModels, currentModel, data.provider);
+                    nextDropdownSearches[field.capability] = '';
+                    if (data.active && !apiKeyInputs.value[field.key]) {
+                        apiKeyInputs.value[field.key] = data.active;
+                    }
+                    if (data.provider) {
+                        activeAiProvider.value = {
+                            id: data.provider.id,
+                            name: data.provider.name,
+                            base_url: data.provider.base_url,
+                        };
+                    }
+                });
+                modelOptions.value = nextOptions;
+                dropdownModelSearches.value = nextDropdownSearches;
                 if (!apiKeySaveMsg.value) {
+                    openModelDropdownCapability.value = modelConfigFields.find(field => (modelOptions.value[field.capability] || []).length)?.capability || '';
                     apiKeySaveOk.value = true;
                     apiKeySaveMsg.value = '模型列表已更新';
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 2500);
@@ -3604,13 +3708,15 @@ createApp({
                 apiKeySaveMsg.value = '获取模型失败';
             } finally {
                 isFetchingConfigModels.value = false;
+                fetchingConfigCapability.value = '';
             }
         };
 
-        const selectConfigModel = (fieldKey, modelId) => {
+        const selectConfigModel = (fieldKey, modelId, capability = '') => {
             if (!modelId) return;
             apiKeyInputs.value[fieldKey] = modelId;
             if (fieldKey === 'imageModel') imgModel.value = modelId;
+            if (capability) openModelDropdownCapability.value = '';
         };
 
         const saveApiKeys = async () => {
@@ -5888,8 +5994,8 @@ createApp({
             // AI 模型
             aiModels, aiModelSearch, activeAiModel, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
             showApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
-            isSavingKeys, apiKeySaveMsg, apiKeySaveOk, configModelSearch, modelOptions, modelConfigFields, isFetchingConfigModels,
-            fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel,
+            isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
+            fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
             storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, isRecording, toggleVoiceInput, ttsPlaying, ttsVoice, ttsTone, ttsRate, ttsSpeak, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,

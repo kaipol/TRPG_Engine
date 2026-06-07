@@ -4,6 +4,10 @@ AI 驱动的 TRPG 主持、剧情推演、知识库检索和多人跑团工具�
 
 ## 快速启动
 
+Windows 下推荐直接双击根目录的 `start.bat`。脚本会自动创建 `.venv`、安装依赖并启动服务。
+
+也可以在 PowerShell 中手动运行：
+
 ```powershell
 pip install -r requirements.txt
 python main.py
@@ -35,6 +39,10 @@ Copy-Item .env.example .env
 - `OPENAI_COMPAT_TTS_MODEL`
 
 前端支持保存多个 OpenAI 兼容供应商 profile，并写入本地 `openai_providers.json`。该文件包含本地 API Key，已在 `.gitignore` 中忽略。
+
+模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding、Image、STT 和 TTS 每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
+
+如果兼容端点的 `/models` 请求失败，后端会保留当前已配置的模型作为兜底选项，避免前端列表为空。这种情况下下拉框可能只显示当前 active model，并会在接口响应的 `error` 字段中返回远端错误原因。
 
 ## 目录结构
 
