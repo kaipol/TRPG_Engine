@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Z.R.I.C — GM 主控台</title>
+<title>Z.R.I.C — TRPG Engine</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
@@ -257,6 +257,41 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
     background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
     background-size:32px 32px;
 }
+.launch-mode-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+.launch-mode-btn {
+    min-height:86px; flex-direction:column; align-items:flex-start; justify-content:center;
+    padding:14px 16px; white-space:normal; text-align:left; line-height:1.45;
+}
+.launch-mode-btn i { font-size:20px; margin-bottom:3px; }
+.launch-mode-title { font-size:15px; font-weight:700; color:#f5edd8; }
+.launch-mode-desc { font-size:11px; color:#6b7280; font-weight:400; }
+@media (max-width: 560px) { .launch-mode-grid { grid-template-columns:1fr; } }
+
+/* 单人玩家桌 */
+.solo-play-shell { flex:1; display:grid; grid-template-columns:300px minmax(0,1fr) 340px; overflow:hidden; background:#090b10; }
+.solo-panel { background:#0f1420; border-right:1px solid rgba(255,255,255,.06); display:flex; flex-direction:column; min-width:0; overflow:hidden; }
+.solo-panel.right { border-right:none; border-left:1px solid rgba(255,255,255,.06); }
+.solo-section { padding:16px; border-bottom:1px solid rgba(255,255,255,.06); }
+.solo-scroll { flex:1; overflow-y:auto; padding:12px; }
+.solo-character-card {
+    width:100%; text-align:left; border:1px solid rgba(255,255,255,.07); border-radius:8px;
+    background:#0b0e17; color:var(--text); padding:12px; cursor:pointer; transition:all .15s;
+}
+.solo-character-card + .solo-character-card { margin-top:8px; }
+.solo-character-card:hover { border-color:rgba(147,197,253,.25); background:rgba(147,197,253,.04); }
+.solo-character-card.selected { border-color:rgba(147,197,253,.48); background:rgba(147,197,253,.08); box-shadow:0 0 0 1px rgba(147,197,253,.08) inset; }
+.solo-character-card.locked { border-color:rgba(79,201,138,.45); background:rgba(79,201,138,.06); box-shadow:0 0 0 1px rgba(79,201,138,.08) inset; cursor:default; }
+.solo-scene { display:flex; flex-direction:column; min-width:0; overflow:hidden; }
+.solo-scene-scroll { flex:1; overflow-y:auto; padding:24px 28px; }
+.solo-scene-card { background:#0b0e17; border:1px solid rgba(255,255,255,.06); border-radius:8px; overflow:hidden; }
+.solo-scene-image { width:100%; max-height:340px; object-fit:cover; display:block; background:#05070c; border-bottom:1px solid rgba(255,255,255,.06); }
+.solo-message { border:1px solid rgba(255,255,255,.06); border-radius:8px; padding:10px 12px; background:#0b0e17; margin-bottom:8px; }
+.solo-message.player { border-color:rgba(147,197,253,.18); }
+.solo-message.ai { border-color:rgba(232,180,75,.18); background:rgba(232,180,75,.04); }
+.solo-action-type { display:flex; align-items:center; background:#090b10; border:1px solid rgba(255,255,255,.07); border-radius:6px; overflow:hidden; }
+.solo-action-type .btn { border-radius:0; border:none; font-size:11px; padding:6px 10px; }
+@media (max-width: 1180px) { .solo-play-shell { grid-template-columns:260px minmax(0,1fr); } .solo-panel.right { grid-column:1 / -1; border-left:none; border-top:1px solid rgba(255,255,255,.06); min-height:340px; } }
+@media (max-width: 760px) { .solo-play-shell { display:block; overflow:auto; } .solo-panel, .solo-scene, .solo-panel.right { min-height:420px; border-left:none; border-right:none; border-bottom:1px solid rgba(255,255,255,.06); } }
 
 /* ── 检定结果卡 ── */
 .check-result-card { border-radius:6px; padding:14px; border:1px solid; text-align:center; }
@@ -316,7 +351,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
             <div style="margin-bottom:24px">
                 <label class="tag" style="display:block;margin-bottom:8px">选择剧本 / 存档</label>
                 <div style="display:flex;gap:10px">
-                    <select v-model="selectedCampaign" class="inp" style="flex:1">
+                    <select v-model="selectedCampaign" class="inp" style="flex:1" data-testid="campaign-select">
                         <option value="" disabled>-- 请选择剧本 --</option>
                         <option v-for="f in campaignFiles" :key="f.path" :value="f.path">
                             {{ f.type==='folder' ? '📁 ' : '📄 ' }}{{ f.name }}{{ f.has_map ? ' 🗺️' : '' }}{{ f.kb_count ? ` 📚${f.kb_count}` : '' }}
@@ -385,10 +420,24 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 </div>
             </div>
 
-            <button @click="loadAndStart" :disabled="!selectedCampaign||isLoading" class="btn btn-accent btn-lg" style="width:100%;margin-bottom:14px">
-                <i v-if="isLoading" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
-                <i v-else class="ph ph-play-circle" style="font-size:18px"></i>
-                {{ isLoading ? '正在初始化...' : '载入剧本并开始' }}
+            <div class="launch-mode-grid">
+                <button @click="loadAndStart('solo')" :disabled="!selectedCampaign||isLoading||campaignImportBusy" class="btn btn-accent launch-mode-btn" data-testid="solo-entry">
+                    <i v-if="isLoading&&pendingLaunchMode==='solo'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+                    <i v-else class="ph ph-user-circle"></i>
+                    <span class="launch-mode-title">单人游玩</span>
+                    <span class="launch-mode-desc">AI-GM 主持，选择剧中角色后开始行动。</span>
+                </button>
+                <button @click="openMenuMultiplayer" :disabled="isLoading||campaignImportBusy" class="btn btn-info launch-mode-btn" data-testid="multiplayer-entry">
+                    <i class="ph ph-users-three"></i>
+                    <span class="launch-mode-title">多人游玩</span>
+                    <span class="launch-mode-desc">创建或加入房间，玩家各自选择角色扮演。</span>
+                </button>
+            </div>
+
+            <button @click="loadAndStart('gm')" :disabled="!selectedCampaign||isLoading||campaignImportBusy" class="btn btn-ghost" style="width:100%;margin-bottom:14px;font-size:13px" data-testid="gm-entry">
+                <i v-if="isLoading&&pendingLaunchMode==='gm'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+                <i v-else class="ph ph-game-controller"></i>
+                {{ isLoading&&pendingLaunchMode==='gm' ? '正在初始化...' : '载入到 GM 控制台' }}
             </button>
 
             <div v-if="campaignLoadSummary" style="font-size:12px;color:#4fc98a;line-height:1.6;margin:-4px 0 12px;padding:8px 10px;background:rgba(79,201,138,.06);border:1px solid rgba(79,201,138,.18);border-radius:6px">
@@ -399,19 +448,6 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 <i class="ph ph-arrow-clockwise"></i> 恢复当前会话
             </button>
 
-            <!-- ── API Key 配置入口 ── -->
-            <div style="margin-top:20px;border-top:1px solid rgba(255,255,255,.06);padding-top:16px">
-                <button @click="openApiKeyPanel"
-                        class="btn btn-ghost btn-sm" style="width:100%;justify-content:space-between;padding:8px 10px">
-                    <span style="display:flex;align-items:center;gap:6px">
-                        <i class="ph ph-key" style="font-size:14px"></i>
-                        <span>API 供应商配置</span>
-                        <span v-if="apiKeysMissing" style="font-size:10px;background:rgba(224,92,92,.15);border:1px solid rgba(224,92,92,.3);color:#e05c5c;padding:1px 7px;border-radius:10px;margin-left:2px">未配置</span>
-                        <span v-else style="font-size:10px;background:rgba(79,201,138,.1);border:1px solid rgba(79,201,138,.3);color:#4fc98a;padding:1px 7px;border-radius:10px;margin-left:2px">已配置</span>
-                    </span>
-                    <i class="ph ph-arrow-right" style="font-size:13px;opacity:.4"></i>
-                </button>
-            </div>
         </div>
     </div>
 </div>
@@ -446,9 +482,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
             <div>
                 <label class="tag" style="display:block;margin-bottom:7px">主剧本文档 <span style="color:#e05c5c">*</span></label>
-                <div @click="$refs.campaignImportMainInput.click()"
-                     style="border:2px dashed rgba(91,156,245,.25);border-radius:8px;padding:22px 16px;text-align:center;cursor:pointer;background:#0b0e17">
-                    <input ref="campaignImportMainInput" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.doc" style="display:none" @change="campaignImportPickMain">
+                <div @click="!campaignImportBusy && $refs.campaignImportMainInput.click()"
+                     :style="{opacity: campaignImportBusy ? .55 : 1, cursor: campaignImportBusy ? 'not-allowed' : 'pointer'}"
+                     style="border:2px dashed rgba(91,156,245,.25);border-radius:8px;padding:22px 16px;text-align:center;background:#0b0e17">
+                    <input ref="campaignImportMainInput" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.doc" :disabled="campaignImportBusy" style="display:none" @change="campaignImportPickMain">
                     <i class="ph ph-cloud-arrow-up" style="font-size:34px;color:#4b5563;display:block;margin-bottom:10px"></i>
                     <div v-if="!campaignImportMainFile" style="font-size:13px;color:#6b7280;line-height:1.8">
                         点击选择主剧本文档<br>
@@ -466,7 +503,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
             <div>
                 <label class="tag" style="display:block;margin-bottom:7px">图片资源（可选）</label>
-                <input type="file" multiple accept="image/*" class="inp" style="font-size:12px" @change="campaignImportPickAssets">
+                <input type="file" multiple accept="image/*" :disabled="campaignImportBusy" class="inp" style="font-size:12px" @change="campaignImportPickAssets">
                 <div style="font-size:11px;color:#4b5563;margin-top:6px">
                     已选择 {{ campaignImportAssets.length }} 个图片；DOCX / PDF 内嵌图片也会尽量提取。
                 </div>
@@ -492,6 +529,30 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 {{ campaignImportBusy ? '正在转换…' : '转换为可玩剧本' }}
             </button>
             <button @click="showCampaignImportModal=false" :disabled="campaignImportBusy" class="btn btn-ghost">关闭</button>
+        </div>
+    </div>
+</div>
+
+<div v-if="campaignImportBusy"
+     style="position:fixed;inset:0;z-index:10050;display:flex;align-items:center;justify-content:center;background:rgba(3,6,13,.82);backdrop-filter:blur(5px);cursor:wait">
+    <div class="panel" style="width:min(520px,92vw);border-radius:8px;padding:24px 26px;box-shadow:0 32px 90px rgba(0,0,0,.7)">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+            <div style="width:36px;height:36px;border-radius:8px;background:rgba(91,156,245,.1);border:1px solid rgba(91,156,245,.28);display:flex;align-items:center;justify-content:center;flex:0 0 auto">
+                <i class="ph ph-circle-notch" style="font-size:18px;color:#5b9cf5;animation:spin 1s linear infinite"></i>
+            </div>
+            <div style="min-width:0">
+                <div style="font-size:15px;font-weight:650;color:#d8dde8">正在解析剧本</div>
+                <div style="font-size:12px;color:#7d8594;margin-top:3px;line-height:1.5">{{ campaignImportProgressMessage }}</div>
+            </div>
+            <div style="margin-left:auto;font-family:'JetBrains Mono';font-size:13px;color:#9fb8ff">{{ campaignImportProgress }}%</div>
+        </div>
+        <div style="height:10px;border-radius:999px;background:#090b10;border:1px solid rgba(255,255,255,.07);overflow:hidden">
+            <div :style="{width: campaignImportProgress + '%'}"
+                 style="height:100%;border-radius:999px;background:linear-gradient(90deg,#5b9cf5,#4fc98a);transition:width .28s ease"></div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;font-size:11px;color:#566074">
+            <span>{{ campaignImportProgressStep }}</span>
+            <span>解析期间已锁定其他操作</span>
         </div>
     </div>
 </div>
@@ -628,7 +689,225 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 <!-- ══════════════════════════════════════════════════════════════
      主控台
 ══════════════════════════════════════════════════════════════ -->
-<div v-if="appState==='game'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
+<div v-if="appState==='game' && playSurface==='player'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
+    <header class="panel" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
+        <div style="display:flex;align-items:center;gap:14px;min-width:0">
+            <button @click="appState='menu'" class="btn btn-ghost btn-sm" style="gap:6px;padding:6px 10px">
+                <i class="ph ph-arrow-left" style="font-size:15px"></i>
+                <span style="font-family:'JetBrains Mono';font-size:12px;letter-spacing:.06em;font-weight:600">Z.R.I.C</span>
+            </button>
+            <div style="width:1px;height:24px;background:rgba(255,255,255,.07)"></div>
+            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                <div :style="{width:'8px',height:'8px',borderRadius:'50%',background:dbConnected?'#4fc98a':'#e05c5c'}" :class="dbConnected?'pulse-dot':''"></div>
+                <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.06em" :style="{color:dbConnected?'#4fc98a':'#e05c5c'}">
+                    {{ dbConnected ? 'AI-GM 在线' : '未连接' }}
+                </span>
+            </div>
+            <div v-if="currentNode" style="display:flex;align-items:center;gap:5px;min-width:0">
+                <span style="font-size:12px;color:#6b7280">当前场景</span>
+                <span style="font-size:14px;color:#f5edd8;font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
+                <span style="font-family:'JetBrains Mono';font-size:11px;color:#374151">#{{ currentNode.id }}</span>
+            </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+            <button @click="openMultiplayerModal" class="btn btn-sm" style="background:rgba(56,189,248,.06);border-color:rgba(56,189,248,.18);color:#7dd3fc">
+                <i class="ph ph-users-three" style="font-size:15px"></i>
+                <span>{{ multiplayerRoom ? '房间 ' + multiplayerRoom.code : '多人房间' }}</span>
+            </button>
+            <button @click="playSurface='gm'" class="btn btn-ghost btn-sm" data-testid="gm-surface-switch">
+                <i class="ph ph-game-controller" style="font-size:15px"></i> GM 控制台
+            </button>
+            <button @click="openGameSettingsModal" class="btn btn-ghost btn-sm">
+                <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
+            </button>
+        </div>
+    </header>
+
+    <div class="solo-play-shell">
+        <aside class="solo-panel">
+            <section class="solo-section">
+                <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:#93c5fd">
+                    <i class="ph ph-user-circle" style="font-size:14px"></i> 玩家入场
+                </div>
+                <input v-model.trim="soloPlayerName" class="inp" placeholder="玩家名" style="margin-bottom:10px">
+                <div style="font-size:12px;color:#6b7280;line-height:1.6">
+                    {{ soloHasConfirmedCharacters ? '当前扮演：' + soloConfirmedNames.join(' / ') : soloSelectedNames.length ? '待确认：' + soloSelectedNames.join(' / ') : '选择一个剧中角色并确认后开始行动。' }}
+                </div>
+            </section>
+
+            <section class="solo-section" style="padding-bottom:10px">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                    <div class="tag" style="display:flex;align-items:center;gap:6px;color:#93c5fd">
+                        <i class="ph ph-users" style="font-size:14px"></i> 选择扮演角色
+                    </div>
+                    <button @click="clearSoloCharacters" :disabled="soloHasConfirmedCharacters" class="btn btn-ghost btn-sm" style="padding:4px 7px" title="清空选择">
+                        <i class="ph ph-x" style="font-size:12px"></i>
+                    </button>
+                </div>
+                <div v-if="soloHasConfirmedCharacters" style="font-size:12px;color:#4fc98a;line-height:1.6;margin-top:8px">
+                    角色已确认，开局后不可改选。
+                </div>
+            </section>
+
+            <div class="solo-scroll">
+                <button v-for="char in soloPlayableCharacters" :key="char.id"
+                        @click="toggleSoloCharacter(char.id)"
+                        class="solo-character-card"
+                        :class="{selected: isSoloCharacterSelected(char.id), locked: isSoloCharacterLocked(char.id)}">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                        <strong style="font-size:14px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
+                        <span style="font-family:'JetBrains Mono';font-size:10px;padding:2px 6px;border-radius:3px;background:rgba(147,197,253,.1);border:1px solid rgba(147,197,253,.22);color:#93c5fd">{{ isSoloCharacterLocked(char.id) ? '已确认' : (char.role || 'PC') }}</span>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;font-family:'JetBrains Mono';font-size:11px;font-weight:700">
+                        <span style="color:#f87171">{{ hpLabel }} {{ char.hp }}</span>
+                        <span style="color:#fde047">{{ sanLabel }} {{ char.san }}</span>
+                    </div>
+                    <div style="font-size:12px;color:#6b7280;line-height:1.5">{{ char.inventory || '无附加状态' }}</div>
+                    <div v-if="char.personality" style="font-size:12px;color:#8b95a7;line-height:1.55;margin-top:6px">{{ char.personality }}</div>
+                </button>
+                <div v-if="!soloPlayableCharacters.length" style="text-align:center;color:#4b5563;font-size:13px;line-height:1.7;padding:32px 10px">
+                    <i class="ph ph-users" style="font-size:36px;display:block;margin-bottom:10px;opacity:.25"></i>
+                    当前剧本还没有可扮演角色
+                </div>
+                <button v-if="soloPlayableCharacters.length" @click="confirmSoloCharacters" :disabled="!soloSelectedCharacterIds.length || soloHasConfirmedCharacters" class="btn btn-accent" style="width:100%;margin-top:10px">
+                    <i :class="soloHasConfirmedCharacters ? 'ph ph-lock-key' : 'ph ph-check-circle'" style="font-size:15px"></i>
+                    {{ soloHasConfirmedCharacters ? '角色已确认' : soloSelectedNames.length ? '确认扮演 ' + soloSelectedNames.join(' / ') : '选择角色后确认' }}
+                </button>
+            </div>
+        </aside>
+
+        <main class="solo-scene">
+            <div v-if="!soloHasConfirmedCharacters" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#374151;text-align:center;padding:24px">
+                <i class="ph ph-user-circle-check" style="font-size:58px;opacity:.22"></i>
+                <p style="font-size:15px;color:#8b95a7;margin:0">先在左侧确认扮演角色</p>
+                <p style="font-size:12px;color:#4b5563;line-height:1.7;max-width:420px;margin:0">
+                    {{ soloSelectedNames.length ? '已选择：' + soloSelectedNames.join(' / ') + '。确认后才会打开主场景和行动区。' : '选择一个剧中角色，确认后进入剧情。' }}
+                </p>
+                <button @click="confirmSoloCharacters" :disabled="!soloSelectedCharacterIds.length" class="btn btn-accent" style="margin-top:4px">
+                    <i class="ph ph-check-circle"></i> 确认角色
+                </button>
+            </div>
+
+            <div v-else-if="!currentNode" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#374151">
+                <i class="ph ph-map-trifold" style="font-size:56px;opacity:.2"></i>
+                <p style="font-size:14px">等待载入场景</p>
+            </div>
+
+            <template v-else>
+                <div class="solo-scene-scroll">
+                    <article class="solo-scene-card">
+                        <img v-if="generatedImageUrl&&!imgLoadError" :src="generatedImageUrl" alt="场景图" class="solo-scene-image">
+                        <div style="padding:24px 26px">
+                            <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:#e8b44b">
+                                <i class="ph ph-map-pin" style="font-size:13px"></i> 场景 #{{ currentNode.id }}
+                            </div>
+                            <h1 style="font-family:'Noto Serif SC';font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin-bottom:16px">{{ currentNode.name }}</h1>
+                            <div v-if="isExpandingBranch" style="position:relative">
+                                <p class="scene-content">{{ expandingBranchText || currentNode.content }}</p>
+                                <div style="display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:6px 12px;background:rgba(232,180,75,.08);border:1px solid rgba(232,180,75,.2);border-radius:6px">
+                                    <i class="ph ph-circle-notch" style="font-size:14px;animation:spin 1s linear infinite;color:#e8b44b"></i>
+                                    <span style="font-size:12px;color:#e8b44b">AI-GM 正在铺陈场景</span>
+                                </div>
+                            </div>
+                            <p v-else-if="currentNode.expanded_content" class="scene-content">{{ currentNode.expanded_content }}</p>
+                            <p v-else class="scene-content">{{ currentNode.content }}</p>
+                            <div v-if="aiGeneratedText[currentNode.id]" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                                <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                                    <i class="ph ph-sparkle"></i> 追加细节
+                                </div>
+                                <p style="font-size:15px;line-height:1.8;color:#a5b4fc">{{ aiGeneratedText[currentNode.id] }}</p>
+                            </div>
+                        </div>
+                    </article>
+
+                    <section style="margin-top:18px">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                            <span class="tag" style="display:flex;align-items:center;gap:6px">
+                                <i class="ph ph-signpost" style="font-size:14px"></i> 可见行动方向
+                            </span>
+                            <span v-if="!currentNode.options?.length" style="font-size:12px;color:#4b5563">等待自由行动</span>
+                        </div>
+                        <button v-for="(opt,i) in currentNode.options || []" :key="opt.id || opt.next_node_id"
+                                @click="jumpToNode(opt.next_node_id, opt.text)"
+                                class="option-btn">
+                            <span class="opt-num">{{ String(i+1).padStart(2,'0') }}</span>
+                            <span style="flex:1">{{ opt.text }}</span>
+                            <span v-if="optionLikelihoods[opt.next_node_id]" style="font-size:10px;color:#6b7280;font-style:italic;font-family:'JetBrains Mono';flex-shrink:0;margin-left:6px">{{ optionLikelihoods[opt.next_node_id] }}</span>
+                        </button>
+                    </section>
+                </div>
+
+                <div style="padding:16px 22px 18px;border-top:1px solid rgba(255,255,255,.06);background:#0b0e17;flex-shrink:0">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px">
+                        <span class="tag" style="display:flex;align-items:center;gap:6px;color:rgba(232,180,75,.86)">
+                            <i class="ph-fill ph-lightning" style="font-size:14px"></i> {{ soloActorLabel }} 的行动
+                        </span>
+                        <div class="solo-action-type">
+                            <button @click="actionType='dialogue'" class="btn" :style="actionType==='dialogue'?{background:'rgba(192,132,252,.12)',color:'#c084fc'}:{background:'transparent',color:'#4b5563'}">对话</button>
+                            <button @click="actionType='mixed'" class="btn" :style="actionType==='mixed'?{background:'rgba(232,180,75,.12)',color:'#e8b44b'}:{background:'transparent',color:'#4b5563'}">混合</button>
+                            <button @click="actionType='action'" class="btn" :style="actionType==='action'?{background:'rgba(239,68,68,.12)',color:'#ef4444'}:{background:'transparent',color:'#4b5563'}">行动</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:10px">
+                        <input v-model="playerAction" @keyup.enter="submitSoloAction" type="text"
+                               :disabled="!soloHasConfirmedCharacters"
+                               :placeholder="soloHasConfirmedCharacters ? (soloActorLabel + '尝试做什么...') : '先确认要扮演的角色'"
+                               class="inp" style="flex:1;font-size:14px"
+                               :style="{borderColor: actionType==='dialogue'?'rgba(192,132,252,.25)':actionType==='action'?'rgba(239,68,68,.25)':'rgba(232,180,75,.2)'}">
+                        <button @click="submitSoloAction" :disabled="isGeneratingOptions||!playerAction.trim()||!soloHasConfirmedCharacters" class="btn btn-accent btn-lg" style="flex-shrink:0">
+                            <i :class="isGeneratingOptions?'ph ph-circle-notch':'ph ph-sparkle'" :style="isGeneratingOptions?'animation:spin 1s linear infinite':''"></i>
+                            {{ isGeneratingOptions ? '裁定中' : '交给 AI-GM' }}
+                        </button>
+                    </div>
+                </div>
+            </template>
+        </main>
+
+        <aside class="solo-panel right">
+            <section class="solo-section">
+                <div class="tag" style="display:flex;align-items:center;gap:6px;color:#e8b44b;margin-bottom:10px">
+                    <i class="ph ph-scroll" style="font-size:14px"></i> AI-GM 记录
+                </div>
+                <div style="font-size:12px;color:#6b7280;line-height:1.6">
+                    {{ soloHasConfirmedCharacters ? '当前扮演：' + soloConfirmedNames.join(' / ') : '角色确认后可提交自由行动。' }}
+                </div>
+            </section>
+            <div class="solo-scroll" ref="soloLogRef" style="border-bottom:1px solid rgba(255,255,255,.06)">
+                <div v-for="entry in soloActionLog" :key="entry.id" class="solo-message" :class="entry.kind">
+                    <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:#6b7280">
+                        <span style="font-weight:700" :style="{color:entry.kind==='ai'?'#e8b44b':'#93c5fd'}">{{ entry.sender }}</span>
+                        <span style="font-family:'JetBrains Mono'">{{ entry.time }}</span>
+                    </div>
+                    <div style="font-size:13px;line-height:1.65;color:#c9cdd6;white-space:pre-wrap">{{ entry.text }}</div>
+                </div>
+                <div v-if="!soloActionLog.length" style="text-align:center;color:#4b5563;font-size:13px;line-height:1.7;padding:30px 10px">
+                    <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
+                    行动与裁定会记录在这里
+                </div>
+            </div>
+            <section class="solo-section" style="border-bottom:none">
+                <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
+                    <i class="ph ph-heartbeat" style="font-size:14px"></i> 角色状态
+                </div>
+                <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto">
+                    <div v-for="char in soloVisibleCharacters" :key="char.id" style="background:#090b10;border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:10px">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px">
+                            <strong style="font-size:13px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
+                            <span style="font-size:10px;color:#6b7280">{{ char.role || '角色' }}</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:'JetBrains Mono';font-size:11px;font-weight:700;margin-bottom:6px">
+                            <span style="color:#f87171">{{ hpLabel }} {{ char.hp }}</span>
+                            <span style="color:#fde047">{{ sanLabel }} {{ char.san }}</span>
+                        </div>
+                        <div style="font-size:11px;color:#6b7280;line-height:1.5">{{ char.inventory || '无附加状态' }}</div>
+                    </div>
+                </div>
+            </section>
+        </aside>
+    </div>
+</div>
+
+<div v-if="appState==='game' && playSurface==='gm'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
     <audio ref="audioRef" loop :src="currentTrackUrl"></audio>
 
     <!-- ── 顶部应用栏 ── -->
@@ -678,6 +957,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 
         <!-- 右侧工具栏 -->
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <button @click="playSurface='player'" class="btn btn-sm" style="background:rgba(232,180,75,.08);border-color:rgba(232,180,75,.22);color:#e8b44b" data-testid="player-surface-switch">
+                <i class="ph ph-user-circle" style="font-size:15px"></i> 玩家桌
+            </button>
             <button @click="openMultiplayerModal" class="btn btn-sm" style="background:rgba(56,189,248,.06);border-color:rgba(56,189,248,.18);color:#7dd3fc">
                 <i class="ph ph-users-three" style="font-size:15px"></i>
                 <span>{{ multiplayerRoom ? '房间 ' + multiplayerRoom.code : '多人房间' }}</span>
@@ -1323,6 +1605,29 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
             <div style="border-top:1px solid rgba(255,255,255,.06);flex-shrink:0;display:flex;flex-direction:column;background:#0b0e17;padding:12px;gap:10px">
                 <div style="font-size:11px;font-weight:600;letter-spacing:.06em;color:#6b7280;text-transform:uppercase">🎭 叙事控制台</div>
 
+                <div style="padding:10px;background:rgba(91,156,245,.04);border:1px solid rgba(91,156,245,.14);border-radius:6px;display:flex;flex-direction:column;gap:8px">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                        <div style="font-size:11px;font-weight:700;color:#93c5fd;display:flex;align-items:center;gap:5px">
+                            <i class="ph ph-game-controller"></i> GM 手动接管
+                        </div>
+                        <select v-model="gmManualEventKind" class="inp" style="width:82px;font-size:11px;padding:4px 6px">
+                            <option value="ai">旁白</option>
+                            <option value="state">状态</option>
+                            <option value="system">系统</option>
+                        </select>
+                    </div>
+                    <textarea v-model="gmManualEventText" class="inp" rows="3" style="resize:none;font-size:12px;line-height:1.55" placeholder="AI-GM 不可用时，在这里输入当前裁定、NPC 回应或场景描述..."></textarea>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:#6b7280">
+                        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="checkbox" v-model="gmManualSyncPlayer" style="width:auto"> 同步玩家桌</label>
+                        <label style="display:flex;align-items:center;gap:5px;margin:0"><input type="checkbox" v-model="gmManualRecordMemory" style="width:auto"> 写入记忆</label>
+                    </div>
+                    <button @click="publishGmManualEvent" :disabled="gmManualEventBusy||!gmManualEventText.trim()" class="btn btn-info btn-sm" style="width:100%;font-size:12px">
+                        <i :class="gmManualEventBusy?'ph ph-circle-notch':'ph ph-broadcast'" :style="gmManualEventBusy?'animation:spin 1s linear infinite':''"></i>
+                        {{ gmManualEventBusy ? '发布中' : '发布给当前游戏' }}
+                    </button>
+                    <div v-if="gmManualEventMsg" style="font-size:11px;line-height:1.5" :style="{color:gmManualEventMsg.includes('失败')?'#e05c5c':'#4fc98a'}">{{ gmManualEventMsg }}</div>
+                </div>
+
                 <!-- 1. 氛围预设 -->
                 <select v-model="narrativeMood" class="inp" style="font-size:12px">
                     <option value="">— 氛围预设（默认）—</option>
@@ -1473,14 +1778,14 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 </div>
 
 <!-- 多人房间 -->
-<div v-if="showMultiplayerModal && appState==='game'" class="modal-bg" @click.self="showMultiplayerModal=false">
+<div v-if="showMultiplayerModal" class="modal-bg" @click.self="showMultiplayerModal=false">
     <div class="modal-box" style="width:min(720px,94vw);max-height:88vh;display:flex;flex-direction:column">
         <div style="padding:20px 24px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
             <div>
                 <div class="tag" style="color:#7dd3fc;font-size:13px;display:flex;align-items:center;gap:7px">
                     <i class="ph ph-users-three" style="font-size:16px"></i> 多人模式
                 </div>
-                <div style="font-size:12px;color:#4b5563;margin-top:4px">创建房间后，把房间码或链接发给远程玩家。</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:4px">AI-GM 主持同一剧本，玩家进房后选择角色扮演。</div>
             </div>
             <button @click="showMultiplayerModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
                 <i class="ph ph-x" style="font-size:15px"></i>
@@ -1498,10 +1803,20 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 </div>
             </div>
 
+            <div style="background:#090b10;border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:12px;display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:12px;align-items:end">
+                <div>
+                    <label class="tag" style="display:block;margin-bottom:7px">玩家席位</label>
+                    <div style="font-size:12px;color:#6b7280;line-height:1.6">
+                        当前剧本可扮演角色 {{ multiplayerPlayableCharacterLimit }} 个，创建房间最多开放 {{ multiplayerMaxPlayersUpper }} 个席位。
+                    </div>
+                </div>
+                <input v-model.number="multiplayerMaxPlayers" @input="clampMultiplayerMaxPlayers" type="number" min="1" :max="multiplayerMaxPlayersUpper" class="inp inp-mono" style="text-align:center">
+            </div>
+
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-                <button @click="createMultiplayerRoom" :disabled="multiplayerBusy" class="btn btn-info" style="height:42px">
+                <button @click="createMultiplayerRoomForSelectedCampaign" :disabled="multiplayerBusy || (appState==='menu'&&!selectedCampaign)" class="btn btn-info" style="height:42px">
                     <i :class="multiplayerBusy?'ph ph-circle-notch':'ph ph-plus-circle'" :style="multiplayerBusy?'animation:spin 1s linear infinite':''"></i>
-                    创建房间
+                    {{ appState==='menu' ? '载入剧本并创建房间' : '创建房间' }}
                 </button>
                 <div style="display:flex;gap:8px">
                     <input v-model.trim="multiplayerJoinCode" @keyup.enter="joinMultiplayerRoom" class="inp inp-mono" placeholder="输入房间码" style="text-transform:uppercase">
@@ -1530,6 +1845,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6b7280">
                     <span :style="{background:multiplayerWsConnected?'#4fc98a':'#6b7280'}" style="width:8px;height:8px;border-radius:50%"></span>
                     {{ multiplayerWsConnected ? '实时同步中' : '房间已创建，完整联机桌会建立实时连接' }}
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#6b7280;border-top:1px solid rgba(255,255,255,.06);padding-top:10px">
+                    <span>玩家席位 {{ multiplayerClaimedPlayerCount }} / {{ multiplayerRoomMaxPlayers }}</span>
+                    <span :style="{color: multiplayerRoomSeatsRemaining > 0 ? '#4fc98a' : '#e05c5c'}">
+                        {{ multiplayerRoomSeatsRemaining > 0 ? '剩余 ' + multiplayerRoomSeatsRemaining + ' 席' : '席位已满' }}
+                    </span>
                 </div>
             </div>
 
@@ -3503,6 +3824,15 @@ const API_BASE_URL = window.location.protocol.startsWith('http') ? window.locati
 createApp({
     setup() {
         const appState = ref('menu');
+        const playSurface = ref('player');
+        const pendingLaunchMode = ref('');
+        const readStoredJson = (key, fallback) => {
+            try {
+                return JSON.parse(localStorage.getItem(key) || '') || fallback;
+            } catch(e) {
+                return fallback;
+            }
+        };
         const isLoading = ref(false);
         const dbConnected = ref(false);
         const campaignFiles = ref([]);
@@ -3519,6 +3849,10 @@ createApp({
         const campaignImportAssets = ref([]);
         const campaignImportBusy = ref(false);
         const campaignImportResult = ref(null);
+        const campaignImportJobId = ref('');
+        const campaignImportProgress = ref(0);
+        const campaignImportProgressStep = ref('等待');
+        const campaignImportProgressMessage = ref('等待上传剧本文档');
         const campaignImportFormats = ref([]);
         const campaignImportFormatsText = computed(() => {
             const exts = (campaignImportFormats.value || []).map(f => f.ext).filter(Boolean);
@@ -3575,6 +3909,15 @@ createApp({
             activeProviderId.value = d.active_provider || d.config?.provider_id || activeProviderId.value;
             const configured = d.keys?.openai_compatible?.configured;
             const activeProfile = apiProviders.value.find(p => p.id === activeProviderId.value);
+            activeAiProvider.value = activeProfile ? {
+                id: activeProfile.id,
+                name: activeProfile.name,
+                base_url: activeProfile.base_url,
+            } : (d.config ? {
+                id: d.config.provider_id || activeProviderId.value || '',
+                name: d.config.provider_name || '',
+                base_url: d.config.base_url || '',
+            } : activeAiProvider.value);
             apiKeyStatus.value = { openai: configured ?? !!activeProfile?.configured };
             if (d.config) {
                 apiKeyInputs.value = {
@@ -3626,6 +3969,7 @@ createApp({
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
+                    syncConfiguredModelState();
                 }
             } catch(e) {}
         };
@@ -3646,7 +3990,7 @@ createApp({
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
-                    await fetchAiModels();
+                    syncConfiguredModelState();
                 } else {
                     apiKeySaveOk.value = false;
                     apiKeySaveMsg.value = d.message || '切换失败';
@@ -3670,7 +4014,7 @@ createApp({
                     apiKeySaveOk.value = true;
                     apiKeySaveMsg.value = '已删除';
                     applyApiConfigPayload(d);
-                    await fetchAiModels();
+                    syncConfiguredModelState();
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 2500);
                 } else {
                     apiKeySaveOk.value = false;
@@ -3872,7 +4216,7 @@ createApp({
                     apiKeySaveMsg.value = d.message || '已保存';
                     apiKeyInputs.value.openaiApiKey = '';
                     applyApiConfigPayload(d);
-                    await fetchAiModels();
+                    syncConfiguredModelState();
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 3000);
                 } else {
                     apiKeySaveOk.value = false;
@@ -3914,6 +4258,30 @@ createApp({
                 chat: ensureModelOption(chatOptions, key, providerInfo)
             };
         };
+        const syncConfiguredModelState = () => {
+            const providerInfo = activeAiProvider.value || {
+                id: activeProviderId.value,
+                name: activeProviderName.value,
+            };
+            const chatModel = (apiKeyInputs.value.chatModel || '').trim();
+            if (chatModel) {
+                syncChatModelSelection(chatModel, { models: [], provider: providerInfo });
+            } else {
+                activeAiModel.value = '';
+                aiModelDraft.value = '';
+                aiModels.value = [];
+                modelOptions.value = { ...modelOptions.value, chat: [] };
+            }
+            const embeddingModel = (apiKeyInputs.value.embeddingModel || '').trim();
+            const imageModel = (apiKeyInputs.value.imageModel || '').trim();
+            modelOptions.value = {
+                ...modelOptions.value,
+                embedding: embeddingModel ? ensureModelOption([], embeddingModel, providerInfo) : [],
+                image: imageModel ? ensureModelOption([], imageModel, providerInfo) : []
+            };
+            aiModelError.value = '';
+            openAiModelDropdownState.value = false;
+        };
         const storyNodes = ref([]);
         const characters = ref([]);
         const currentNode = ref(null);
@@ -3933,6 +4301,17 @@ createApp({
         const aiGeneratedText = ref({});
         const playerAction = ref('');
         const actionType = ref('mixed');  // 动作经济分离：'dialogue' | 'action' | 'mixed'
+        const savedSoloProfile = readStoredJson('zric-solo-profile', {});
+        const normalizeSoloCharacterSelection = (ids) => {
+            const list = Array.isArray(ids) ? ids : (ids ? [ids] : []);
+            const first = list.find(id => id !== null && id !== undefined && String(id).trim() !== '');
+            return first === undefined ? [] : [first];
+        };
+        const soloPlayerName = ref(savedSoloProfile.name || '玩家');
+        const soloSelectedCharacterIds = ref(normalizeSoloCharacterSelection(savedSoloProfile.characterIds));
+        const soloConfirmedCharacterIds = ref([]);
+        const soloActionLog = ref([]);
+        const soloLogRef = ref(null);
         const isGeneratingText = ref(false);
         const checkpointCount = ref(0);
         const isRollingBack = ref(false);
@@ -3941,6 +4320,12 @@ createApp({
         // GM 干预/纠正推演
         const gmCorrection = ref('');
         const lastDynamicContext = ref(null);  // {action, sceneName, content, nodeId, branchCount}
+        const gmManualEventText = ref('');
+        const gmManualEventKind = ref('ai');
+        const gmManualEventBusy = ref(false);
+        const gmManualEventMsg = ref('');
+        const gmManualSyncPlayer = ref(true);
+        const gmManualRecordMemory = ref(true);
         // NPC Persona 编辑模态
         const showPersonaModal = ref(false);
         const personaTarget = ref(null);  // 当前正在编辑的角色对象
@@ -4035,15 +4420,8 @@ createApp({
         });
 
         // ── 多人房间：复用 /api/multiplayer 与 /ws/rooms ──
-        const readLocalJson = (key, fallback) => {
-            try {
-                return JSON.parse(localStorage.getItem(key) || '') || fallback;
-            } catch(e) {
-                return fallback;
-            }
-        };
-        const savedMpProfile = readLocalJson('zric-mp-profile', {});
-        const savedMpTokens = readLocalJson('zric-mp-tokens', {});
+        const savedMpProfile = readStoredJson('zric-mp-profile', {});
+        const savedMpTokens = readStoredJson('zric-mp-tokens', {});
         const showMultiplayerModal = ref(false);
         const multiplayerRoom = ref(null);
         const multiplayerMembers = ref([]);
@@ -4053,12 +4431,43 @@ createApp({
         const multiplayerStatusMsg = ref('');
         const multiplayerWsConnected = ref(false);
         const multiplayerRoomName = ref('新的跑团房间');
+        const multiplayerMaxPlayers = ref(0);
         const multiplayerJoinCode = ref('');
         const multiplayerProfileName = ref(savedMpProfile.name || 'GM');
         const multiplayerPlayerId = ref(savedMpProfile.id || `gm-${Math.random().toString(36).slice(2, 10)}`);
         const multiplayerRoomTokens = ref(savedMpTokens.roomTokens || {});
         const multiplayerMemberTokens = ref(savedMpTokens.memberTokens || {});
         let multiplayerWs = null;
+        const MULTIPLAYER_MAX_ROOM_PLAYERS = 24;
+
+        const multiplayerPlayableCharacterLimit = computed(() => {
+            const active = characters.value.filter(c => (c.status || 'active') !== 'hidden');
+            return Math.max(1, active.length || characters.value.length || 1);
+        });
+        const multiplayerMaxPlayersUpper = computed(() => {
+            return Math.max(1, Math.min(multiplayerPlayableCharacterLimit.value, MULTIPLAYER_MAX_ROOM_PLAYERS));
+        });
+        const clampMultiplayerMaxPlayers = () => {
+            const upper = multiplayerMaxPlayersUpper.value;
+            let value = Number.parseInt(multiplayerMaxPlayers.value, 10);
+            if (!Number.isFinite(value)) value = upper;
+            multiplayerMaxPlayers.value = Math.max(1, Math.min(value, upper));
+        };
+        watch(multiplayerMaxPlayersUpper, (upper, previousUpper) => {
+            const current = Number.parseInt(multiplayerMaxPlayers.value, 10);
+            if (!Number.isFinite(current) || current < 1 || current > upper || current === previousUpper) {
+                multiplayerMaxPlayers.value = upper;
+            }
+        }, { immediate: true });
+        const multiplayerRoomMaxPlayers = computed(() => {
+            return Number(multiplayerRoom.value?.max_players || multiplayerRoom.value?.settings?.max_players || multiplayerMaxPlayers.value || 1);
+        });
+        const multiplayerClaimedPlayerCount = computed(() => Number(multiplayerRoom.value?.claimed_player_count || 0));
+        const multiplayerRoomSeatsRemaining = computed(() => {
+            const fromRoom = Number(multiplayerRoom.value?.player_slots_remaining);
+            if (Number.isFinite(fromRoom)) return Math.max(0, fromRoom);
+            return Math.max(0, multiplayerRoomMaxPlayers.value - multiplayerClaimedPlayerCount.value);
+        });
 
         const multiplayerInviteUrl = computed(() => {
             if (!multiplayerRoom.value?.code) return '';
@@ -4098,8 +4507,8 @@ createApp({
                 ...options,
                 headers: { ...multiplayerHeaders(path, jsonBody), ...(options.headers || {}) },
             });
-            const data = await r.json();
-            if (!r.ok || data.status === 'error') throw new Error(data.message || '多人房间请求失败');
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || data.status === 'error') throw new Error(data.detail || data.message || '多人房间请求失败');
             return data;
         };
 
@@ -4108,6 +4517,8 @@ createApp({
                 multiplayerRoom.value = data.room;
                 multiplayerJoinCode.value = data.room.code || multiplayerJoinCode.value;
                 multiplayerRoomName.value = data.room.name || multiplayerRoomName.value;
+                const roomMax = Number(data.room.max_players || data.room.settings?.max_players);
+                if (Number.isFinite(roomMax) && roomMax > 0) multiplayerMaxPlayers.value = roomMax;
             }
             multiplayerMembers.value = data.members || multiplayerMembers.value;
             multiplayerMessages.value = data.messages || multiplayerMessages.value;
@@ -4183,7 +4594,7 @@ createApp({
                         kind,
                         content: text,
                         payload,
-                        sender_name: 'AI-KP',
+                        sender_name: options.senderName || 'AI-KP',
                         broadcast_state: options.broadcastState !== false,
                     }),
                 });
@@ -4195,6 +4606,7 @@ createApp({
             multiplayerBusy.value = true;
             multiplayerError.value = '';
             multiplayerStatusMsg.value = '';
+            clampMultiplayerMaxPlayers();
             saveMultiplayerLocalState();
             try {
                 const data = await multiplayerApi('/api/multiplayer/rooms', {
@@ -4203,7 +4615,7 @@ createApp({
                         name: multiplayerRoomName.value || currentSaveFolder.value || '新的跑团房间',
                         gm_name: multiplayerProfileName.value || 'GM',
                         campaign_path: selectedCampaign.value || currentSaveFolder.value || '',
-                        settings: { gm_console: true },
+                        settings: { gm_console: true, max_players: multiplayerMaxPlayers.value },
                     }),
                 });
                 if (data.room?.code && data.room_token) {
@@ -4258,6 +4670,19 @@ createApp({
             multiplayerStatusMsg.value = '';
             showMultiplayerModal.value = true;
             if (multiplayerRoom.value?.code && !multiplayerWsConnected.value) connectMultiplayerWs();
+        };
+        const openMenuMultiplayer = () => {
+            multiplayerRoomName.value = selectedCampaign.value
+                ? `${(campaignFiles.value.find(f => f.path === selectedCampaign.value)?.name || '新的跑团房间')}`
+                : (multiplayerRoomName.value || '新的跑团房间');
+            openMultiplayerModal();
+        };
+        const createMultiplayerRoomForSelectedCampaign = async () => {
+            if (appState.value === 'menu' && selectedCampaign.value) {
+                await loadAndStart('multiplayer');
+                if (campaignLoadSummary.value && campaignLoadSummary.value.includes('失败')) return;
+            }
+            await createMultiplayerRoom();
         };
 
         const copyMultiplayerInvite = async () => {
@@ -4999,6 +5424,10 @@ createApp({
             campaignImportMainFile.value = null;
             campaignImportAssets.value = [];
             campaignImportResult.value = null;
+            campaignImportJobId.value = '';
+            campaignImportProgress.value = 0;
+            campaignImportProgressStep.value = '等待';
+            campaignImportProgressMessage.value = '等待上传剧本文档';
             showCampaignImportModal.value = true;
             fetchCampaignImportFormats();
         };
@@ -5011,31 +5440,60 @@ createApp({
         const campaignImportPickAssets = (e) => {
             campaignImportAssets.value = Array.from(e.target.files || []);
         };
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        const syncCampaignImportJob = (job) => {
+            if (!job) return;
+            campaignImportProgress.value = Number.isFinite(job.progress) ? Math.max(0, Math.min(100, job.progress)) : campaignImportProgress.value;
+            campaignImportProgressStep.value = job.step || campaignImportProgressStep.value;
+            campaignImportProgressMessage.value = job.message || campaignImportProgressMessage.value;
+        };
+        const pollCampaignImportJob = async (jobId) => {
+            while (campaignImportBusy.value && jobId) {
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/import/${encodeURIComponent(jobId)}`);
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok || d.status !== 'success') throw new Error(d.detail || d.message || '读取解析进度失败');
+                const job = d.job || {};
+                syncCampaignImportJob(job);
+                if (job.status === 'success') return job;
+                if (job.status === 'error') throw new Error(job.error || '剧本解析失败');
+                await sleep(700);
+            }
+            throw new Error('剧本解析已中断');
+        };
         const importCampaign = async () => {
             if (!campaignImportMainFile.value || campaignImportBusy.value) return;
             campaignImportBusy.value = true;
             campaignImportResult.value = null;
+            campaignImportJobId.value = '';
+            campaignImportProgress.value = 2;
+            campaignImportProgressStep.value = 'upload';
+            campaignImportProgressMessage.value = '正在上传剧本文档';
             try {
                 const fd = new FormData();
                 fd.append('name', campaignImportName.value.trim());
                 fd.append('main_file', campaignImportMainFile.value);
                 for (const asset of campaignImportAssets.value) fd.append('assets', asset);
                 const r = await fetch(`${API_BASE_URL}/api/campaigns/import`, { method: 'POST', body: fd });
-                const d = await r.json();
-                if (d.status === 'success') {
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(d.detail || d.message || '导入接口返回错误');
+                if (d.status === 'accepted' && d.job_id) {
+                    campaignImportJobId.value = d.job_id;
+                    syncCampaignImportJob(d.job);
+                    const job = await pollCampaignImportJob(d.job_id);
+                    const result = job.result || {};
                     campaignImportResult.value = {
                         ok: true,
-                        title: '转换完成',
-                        message: `已生成「${d.name}」：${d.nodes_count} 个场景，${d.map_rooms_count} 个地图房间，${d.assets_count} 个图片资源。`,
-                        warnings: d.warnings || []
+                        title: '解析完成',
+                        message: `已生成「${result.name || '新剧本'}」：${result.nodes_count || 0} 个场景，${result.map_rooms_count || 0} 个地图房间，${result.assets_count || 0} 个图片资源。`,
+                        warnings: job.warnings || []
                     };
                     await fetchCampaigns();
-                    if (d.campaign_path) selectedCampaign.value = d.campaign_path;
+                    if (result.campaign_path) selectedCampaign.value = result.campaign_path;
                 } else {
-                    campaignImportResult.value = { ok: false, title: '转换失败', message: d.message || '导入接口返回错误', warnings: [] };
+                    campaignImportResult.value = { ok: false, title: '解析失败', message: d.detail || d.message || '导入接口返回错误', warnings: [] };
                 }
             } catch(e) {
-                campaignImportResult.value = { ok: false, title: '转换失败', message: '网络错误或服务器不可用', warnings: [] };
+                campaignImportResult.value = { ok: false, title: '解析失败', message: e?.message || '网络错误或服务器不可用', warnings: [] };
             } finally {
                 campaignImportBusy.value = false;
             }
@@ -5145,8 +5603,9 @@ createApp({
                 fetchRagDocuments(),
             ]);
         };
-        const loadAndStart = async () => {
+        const loadAndStart = async (mode = 'solo') => {
             if (!selectedCampaign.value) return;
+            pendingLaunchMode.value = mode;
             isLoading.value = true;
             isExpandingBranch.value = false;
             expandingBranchText.value = '';
@@ -5164,7 +5623,12 @@ createApp({
                     campaignLoadSummary.value = d.message || '剧本已载入，世界观、地图、百科库与知识库已同步';
                     await refreshLoadedCampaignResources();
                     await syncMultiplayerRoomState();
+                    soloConfirmedCharacterIds.value = [];
+                    soloActionLog.value = [];
+                    playerAction.value = '';
+                    playSurface.value = mode === 'gm' ? 'gm' : 'player';
                     appState.value = 'game';
+                    if (mode !== 'multiplayer') showMultiplayerModal.value = false;
                 } else {
                     campaignLoadSummary.value = d.message || '载入失败';
                 }
@@ -5172,10 +5636,12 @@ createApp({
                 campaignLoadSummary.value = '载入失败，请检查后端是否运行';
             } finally {
                 isLoading.value = false;
+                pendingLaunchMode.value = '';
             }
         };
         const enterCurrentGame = async () => {
             await refreshLoadedCampaignResources();
+            playSurface.value = 'player';
             appState.value = 'game';
         };
         const exportSave = () => { exportShowNameInput.value=false; exportNewName.value=''; showExportModal.value=true; };
@@ -5189,6 +5655,79 @@ createApp({
             imgPromptUsed.value = node?.scene_image ? '导入剧本资源' : '';
             imgLoadError.value = false;
         };
+        const soloPlayableCharacters = computed(() => {
+            const active = characters.value.filter(c => (c.status || 'active') !== 'hidden');
+            return active.length ? active : characters.value;
+        });
+        const soloSelectedCharacters = computed(() => {
+            const selectedIds = new Set(soloSelectedCharacterIds.value.map(id => String(id)));
+            return characters.value.filter(c => selectedIds.has(String(c.id)));
+        });
+        const soloConfirmedCharacters = computed(() => {
+            const confirmedIds = new Set(soloConfirmedCharacterIds.value.map(id => String(id)));
+            return characters.value.filter(c => confirmedIds.has(String(c.id)));
+        });
+        const soloSelectedNames = computed(() => soloSelectedCharacters.value.map(c => c.name));
+        const soloConfirmedNames = computed(() => soloConfirmedCharacters.value.map(c => c.name));
+        const soloHasConfirmedCharacters = computed(() => soloConfirmedCharacterIds.value.length > 0);
+        const soloActorLabel = computed(() => {
+            const names = soloHasConfirmedCharacters.value ? soloConfirmedNames.value : soloSelectedNames.value;
+            return names.join(' / ') || soloPlayerName.value || '玩家';
+        });
+        const soloVisibleCharacters = computed(() => {
+            if (soloHasConfirmedCharacters.value) return soloConfirmedCharacters.value;
+            if (soloSelectedCharacterIds.value.length) return soloSelectedCharacters.value;
+            return soloPlayableCharacters.value;
+        });
+        const saveSoloProfile = () => {
+            localStorage.setItem('zric-solo-profile', JSON.stringify({
+                name: soloPlayerName.value || '玩家',
+                characterIds: normalizeSoloCharacterSelection(soloSelectedCharacterIds.value),
+            }));
+        };
+        const isSoloCharacterSelected = (id) => {
+            const idKey = String(id);
+            return soloSelectedCharacterIds.value.some(selectedId => String(selectedId) === idKey);
+        };
+        const isSoloCharacterLocked = (id) => {
+            const idKey = String(id);
+            return soloConfirmedCharacterIds.value.some(confirmedId => String(confirmedId) === idKey);
+        };
+        const clearSoloCharacters = () => {
+            if (soloHasConfirmedCharacters.value) return;
+            soloSelectedCharacterIds.value = [];
+            saveSoloProfile();
+        };
+        const confirmSoloCharacters = () => {
+            if (soloHasConfirmedCharacters.value || !soloSelectedCharacterIds.value.length) return;
+            soloConfirmedCharacterIds.value = normalizeSoloCharacterSelection(soloSelectedCharacterIds.value);
+            saveSoloProfile();
+        };
+        const toggleSoloCharacter = (id) => {
+            if (soloHasConfirmedCharacters.value) return;
+            const idKey = String(id);
+            soloSelectedCharacterIds.value = isSoloCharacterSelected(id) ? [] : [id];
+            saveSoloProfile();
+        };
+        const addSoloLog = (kind, sender, text) => {
+            const now = new Date();
+            soloActionLog.value.push({
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                kind,
+                sender,
+                text,
+                time: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+            });
+            nextTick(() => {
+                const el = soloLogRef.value;
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        };
+        const summarizeAiOptionsForSolo = () => {
+            const opts = currentNode.value?.options || [];
+            if (!opts.length) return 'AI-GM 已记录行动，等待你继续描述下一步。';
+            return 'AI-GM 给出了新的行动方向：\n' + opts.slice(0, 4).map((opt, idx) => `${idx + 1}. ${opt.text}`).join('\n');
+        };
         const fetchGameState = async () => {
             try { const r=await fetch(`${API_BASE_URL}/api/game/state`); const d=await r.json();
                 if(d.status==='success'){storyNodes.value=d.nodes;characters.value=d.characters;dbConnected.value=true;
@@ -5196,6 +5735,18 @@ createApp({
                     else if(d.nodes.length>0){jumpToNode(d.nodes[0].id);} }
             } catch(e){dbConnected.value=false;}
             try { const sl=await fetch(`${API_BASE_URL}/api/game/stat-labels`); const sld=await sl.json(); if(sld.hp_label)hpLabel.value=sld.hp_label; if(sld.san_label)sanLabel.value=sld.san_label; } catch(e){}
+            const playableIds = new Set(soloPlayableCharacters.value.map(c => String(c.id)));
+            if (soloSelectedCharacterIds.value.some(id => !playableIds.has(String(id)))) {
+                soloSelectedCharacterIds.value = normalizeSoloCharacterSelection(soloSelectedCharacterIds.value.filter(id => playableIds.has(String(id))));
+                saveSoloProfile();
+            } else {
+                soloSelectedCharacterIds.value = normalizeSoloCharacterSelection(soloSelectedCharacterIds.value);
+            }
+            if (soloConfirmedCharacterIds.value.some(id => !playableIds.has(String(id)))) {
+                soloConfirmedCharacterIds.value = [];
+            } else {
+                soloConfirmedCharacterIds.value = normalizeSoloCharacterSelection(soloConfirmedCharacterIds.value);
+            }
             await fetchWorldEntities(); };
 
         // ── 流式展开分支叙事（共享工具函数）──
@@ -5568,11 +6119,11 @@ createApp({
 
         // ── AI ──
         const generateAIText=async()=>{if(!currentNode.value)return;const _nodeId=currentNode.value.id;isGeneratingText.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/expand-text`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_name:currentNode.value.name||'',content:currentNode.value.content||''})});const data=await r.json();if(data.generated_text){aiGeneratedText.value={...aiGeneratedText.value,[_nodeId]:data.generated_text};}if(data.generated_text){fetch(`${API_BASE_URL}/api/player/state`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_scene_id:_nodeId,scene_image:generatedImageUrl.value||'',scene_prompt:imgPromptUsed.value||'',scene_ai_text:data.generated_text||'',bgm_url:currentTrackUrl.value||'',bgm_name:(tracks.value.find(t=>t.id===currentTrackId.value)||{}).name||''})}).catch(()=>{});}}catch(e){}finally{isGeneratingText.value=false;}};
-        const generateDynamicOptions=async(correctionText='')=>{
-            if(!currentNode.value||((!playerAction.value)&&!correctionText&&!lastDynamicContext.value))return;
+        const generateDynamicOptions=async(correctionText='', actionOverride='')=>{
+            if(!currentNode.value||((!playerAction.value)&&!actionOverride&&!correctionText&&!lastDynamicContext.value))return null;
             isGeneratingOptions.value=true;
             // 确定本次推演的行动文本
-            const action = correctionText ? (lastDynamicContext.value?.action || playerAction.value) : playerAction.value;
+            const action = actionOverride || (correctionText ? (lastDynamicContext.value?.action || playerAction.value) : playerAction.value);
             const sceneName = currentNode.value.name;
             const content = currentNode.value.content;
             const nodeId = currentNode.value.id;
@@ -5616,15 +6167,65 @@ createApp({
                         if(statChangesTimer)clearTimeout(statChangesTimer);
                         statChangesTimer=setTimeout(()=>{showStatChanges.value=false;},10000);
                     }
+                    return d;
                 } else {
                     alert(d.message || '推演失败');
+                    return null;
                 }
-            }catch(e){console.error(e);}finally{isGeneratingOptions.value=false;}
+            }catch(e){console.error(e);return null;}finally{isGeneratingOptions.value=false;}
+        };
+        const submitSoloAction = async () => {
+            const raw = playerAction.value.trim();
+            if (!raw || !soloHasConfirmedCharacters.value || isGeneratingOptions.value) return;
+            const actor = soloActorLabel.value;
+            const actionForAi = `${actor}：${raw}`;
+            addSoloLog('player', actor, raw);
+            const result = await generateDynamicOptions('', actionForAi);
+            if (result?.status === 'success') addSoloLog('ai', 'AI-GM', summarizeAiOptionsForSolo());
+            else playerAction.value = raw;
         };
         // GM 干预：用纠正指令重新推演
         const retryWithCorrection=()=>{
             if(!gmCorrection.value.trim()||isGeneratingOptions.value)return;
             generateDynamicOptions(gmCorrection.value.trim());
+        };
+        const publishGmManualEvent = async () => {
+            const text = gmManualEventText.value.trim();
+            if (!text || gmManualEventBusy.value) return;
+            gmManualEventBusy.value = true;
+            gmManualEventMsg.value = '';
+            try {
+                const payload = {
+                    content: text,
+                    kind: gmManualEventKind.value || 'ai',
+                    sender_name: 'GM',
+                    current_scene_id: currentNode.value?.id || 0,
+                    sync_player_state: gmManualSyncPlayer.value,
+                    record_to_memory: gmManualRecordMemory.value,
+                };
+                const response = await fetch(`${API_BASE_URL}/api/game/gm-event`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status === 'error') throw new Error(data.detail || data.message || '发布失败');
+                if (currentNode.value) {
+                    aiGeneratedText.value = { ...aiGeneratedText.value, [currentNode.value.id]: text };
+                }
+                addSoloLog('ai', 'GM', text);
+                await postMultiplayerAiEvent(gmManualEventKind.value || 'ai', text, {
+                    source: 'gm_manual_control',
+                    node_id: currentNode.value?.id || null,
+                }, { senderName: 'GM' });
+                gmManualEventText.value = '';
+                gmManualEventMsg.value = '已发布到当前玩家视图';
+                setTimeout(() => { gmManualEventMsg.value = ''; }, 2500);
+            } catch (err) {
+                gmManualEventMsg.value = err?.message || '发布失败';
+            } finally {
+                gmManualEventBusy.value = false;
+            }
         };
         const openBattleReportModal=()=>{showBattleReportModal.value=true;battleReport.value='';battleReportFilename.value='';};
         const generateBattleReport=async()=>{isGeneratingReport.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/export-battle-report`,{method:'POST'});const d=await r.json();if(d.status==='success'){battleReport.value=d.report;battleReportFilename.value=d.filename;}}catch(e){}finally{isGeneratingReport.value=false;}};
@@ -5900,11 +6501,11 @@ createApp({
         });
 
         watch(isEditMode, v => { if (v) syncEditData(); });
+        watch(soloPlayerName, saveSoloProfile);
         watch(volume, v => { if (audioRef.value) audioRef.value.volume = v; });
         onMounted(async () => {
             await fetchApiKeyStatus();
             fetchCampaigns();
-            fetchAiModels();
             if (audioRef.value) audioRef.value.volume = 0.3;
         });
 
@@ -6368,10 +6969,11 @@ createApp({
         };
 
         return {
-            appState, isLoading, dbConnected, campaignFiles, selectedCampaign, campaignLoadSummary,
+            appState, playSurface, pendingLaunchMode, isLoading, dbConnected, campaignFiles, selectedCampaign, campaignLoadSummary,
             showGameSettingsModal, showAdvancedSettings, openGameSettingsModal, returnToAdvancedSettings,
             showCampaignImportModal, campaignImportName, campaignImportMainFile,
             campaignImportAssets, campaignImportBusy, campaignImportResult,
+            campaignImportProgress, campaignImportProgressStep, campaignImportProgressMessage,
             campaignImportFormatsText, openCampaignImportModal, campaignImportPickMain,
             campaignImportPickAssets, importCampaign,
             // AI 模型
@@ -6379,12 +6981,13 @@ createApp({
             showApiKeyPanel, openApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
-            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            gmManualEventText, gmManualEventKind, gmManualEventBusy, gmManualEventMsg, gmManualSyncPlayer, gmManualRecordMemory, publishGmManualEvent,
             // 多人房间
             showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,
             multiplayerBusy, multiplayerError, multiplayerStatusMsg, multiplayerWsConnected,
             multiplayerRoomName, multiplayerJoinCode, multiplayerProfileName, multiplayerInviteUrl,
-            openMultiplayerModal, createMultiplayerRoom, joinMultiplayerRoom, copyMultiplayerInvite, openMultiplayerTable,
+            openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, copyMultiplayerInvite, openMultiplayerTable,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,
             showTlMemoryModal, tlMemoryTarget, tlMemoryContent,

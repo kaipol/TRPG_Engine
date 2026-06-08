@@ -66,6 +66,7 @@ MAX_SCENARIO_CHARS = int(os.environ.get("ZRIC_MAX_SCENARIO_CHARS", "400000"))
 MAX_SCENARIO_CHUNKS = int(os.environ.get("ZRIC_MAX_SCENARIO_CHUNKS", "800"))
 MAX_SCENARIO_PDF_PAGES = int(os.environ.get("ZRIC_MAX_SCENARIO_PDF_PAGES", "80"))
 MAX_MAP_UPLOAD_BYTES = int(os.environ.get("ZRIC_MAX_MAP_UPLOAD_BYTES", str(12 * 1024 * 1024)))
+MAX_ROOM_PLAYERS = int(os.environ.get("ZRIC_MAX_ROOM_PLAYERS", "24"))
 
 
 def configure_multiplayer(
@@ -201,9 +202,24 @@ def init_multiplayer_tables():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS multiplayer_character_claims (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id      INTEGER NOT NULL,
+                character_id INTEGER NOT NULL,
+                player_id    TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                claimed_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(room_id, character_id),
+                FOREIGN KEY(room_id) REFERENCES multiplayer_rooms(id) ON DELETE CASCADE
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_messages_room ON multiplayer_messages(room_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_tokens_room ON multiplayer_tokens(room_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_docs_room ON multiplayer_room_documents(room_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_claims_room_player ON multiplayer_character_claims(room_id, player_id)")
         for sql in (
             "ALTER TABLE multiplayer_rooms ADD COLUMN current_scene_id INTEGER",
             "ALTER TABLE multiplayer_rooms ADD COLUMN current_room_id INTEGER",
@@ -358,6 +374,15 @@ def _require_member_or_gm(conn, room, player_id: str, member_token: str, room_to
     return member["role"]
 
 
+def _require_player_character_claims(conn, room, player_id: str, role: str) -> list[dict[str, Any]]:
+    if role == "gm":
+        return []
+    claims = _character_claims_for_player(conn, room["id"], player_id)
+    if not claims:
+        raise fastapi.HTTPException(status_code=403, detail="请先确认扮演角色")
+    return claims
+
+
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -410,6 +435,38 @@ def _serialize_member(row) -> dict[str, Any]:
     return data
 
 
+def _serialize_character_claim(row) -> dict[str, Any]:
+    return dict(row)
+
+
+def _character_claims_for_room(conn, room_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT c.id, c.room_id, c.character_id, c.player_id, c.display_name, c.claimed_at,
+               ch.name AS character_name, ch.role AS character_role,
+               m.color AS player_color, m.connected AS player_connected
+        FROM multiplayer_character_claims c
+        LEFT JOIN characters ch ON ch.id=c.character_id
+        LEFT JOIN multiplayer_members m ON m.room_id=c.room_id AND m.player_id=c.player_id
+        WHERE c.room_id=?
+        ORDER BY c.claimed_at, c.id
+        """,
+        (room_id,),
+    ).fetchall()
+    return [_serialize_character_claim(r) for r in rows]
+
+
+def _character_claims_for_player(conn, room_id: int, player_id: str) -> list[dict[str, Any]]:
+    player_id = (player_id or "").strip()
+    if not player_id:
+        return []
+    return [c for c in _character_claims_for_room(conn, room_id) if c.get("player_id") == player_id]
+
+
+def _claim_names(claims: list[dict[str, Any]]) -> list[str]:
+    return [str(c.get("character_name") or f"角色{c.get('character_id')}") for c in claims]
+
+
 def _system_value(conn, key: str) -> str:
     row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
     return row["value"] if row else ""
@@ -422,6 +479,49 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _playable_character_count(conn) -> int:
+    active = conn.execute(
+        "SELECT COUNT(*) AS count FROM characters WHERE COALESCE(status,'active')<>'hidden'"
+    ).fetchone()
+    total = conn.execute("SELECT COUNT(*) AS count FROM characters").fetchone()
+    return int((active and active["count"]) or (total and total["count"]) or 1)
+
+
+def _normalize_room_settings(conn, raw_settings: Any) -> dict[str, Any]:
+    settings = dict(raw_settings) if isinstance(raw_settings, dict) else {}
+    playable_count = _playable_character_count(conn)
+    upper = max(1, min(playable_count, MAX_ROOM_PLAYERS))
+    requested = _int_or_none(settings.get("max_players")) or upper
+    settings["max_players"] = max(1, min(requested, upper))
+    return settings
+
+
+def _claimed_player_count(claims: list[dict[str, Any]]) -> int:
+    return len({str(c.get("player_id") or "").strip() for c in claims if str(c.get("player_id") or "").strip()})
+
+
+def _room_seat_info(conn, room_row, claims: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    claims = claims if claims is not None else _character_claims_for_room(conn, int(room_row["id"]))
+    settings = _normalize_room_settings(conn, _load_json(room_row["settings"], {}))
+    claimed = _claimed_player_count(claims)
+    max_players = int(settings["max_players"])
+    return {
+        "max_players": max_players,
+        "claimed_player_count": claimed,
+        "player_slots_remaining": max(0, max_players - claimed),
+        "playable_character_count": _playable_character_count(conn),
+    }
+
+
+def _serialize_room_with_limits(conn, row, claims: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    data = _serialize_room(row)
+    settings = _normalize_room_settings(conn, data.get("settings", {}))
+    data["settings"] = settings
+    data.update(_room_seat_info(conn, row, claims))
+    data["settings"]["max_players"] = data["max_players"]
+    return data
 
 
 def _serialize_scene_for_players(conn, scene_id: int | None) -> dict[str, Any] | None:
@@ -503,6 +603,7 @@ def _serialize_map_room(conn, room_id: int | None) -> dict[str, Any] | None:
 def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     if room_row:
         room_row = _ensure_room_opening(conn, room_row)
+    room_id = int(room_row["id"]) if room_row else None
     room_scene_id = _int_or_none(room_row["current_scene_id"]) if room_row else None
     room_map_id = _int_or_none(room_row["current_room_id"]) if room_row else None
     player_scene_id = _int_or_none(_system_value(conn, "player_current_scene_id"))
@@ -510,14 +611,34 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     current_scene_id = room_scene_id or player_scene_id
     current_scene = _serialize_scene_for_players(conn, current_scene_id)
 
+    claims = _character_claims_for_room(conn, room_id) if room_id else []
+    room_limits = _room_seat_info(conn, room_row, claims) if room_row else {
+        "max_players": 1,
+        "claimed_player_count": 0,
+        "player_slots_remaining": 1,
+        "playable_character_count": 1,
+    }
+    claims_by_character = {int(c["character_id"]): c for c in claims if c.get("character_id") is not None}
     characters = [
         dict(r)
         for r in conn.execute(
             "SELECT id, name, role, hp, san, inventory, personality, status FROM characters ORDER BY role, name"
         ).fetchall()
     ]
+    for char in characters:
+        claim = claims_by_character.get(int(char["id"]))
+        if claim:
+            char["claim_locked"] = True
+            char["claimed_by_player_id"] = claim.get("player_id", "")
+            char["claimed_by_name"] = claim.get("display_name", "")
+            char["claimed_at"] = claim.get("claimed_at", "")
+        else:
+            char["claim_locked"] = False
+            char["claimed_by_player_id"] = ""
+            char["claimed_by_name"] = ""
+            char["claimed_at"] = ""
     active_characters = [c for c in characters if (c.get("status") or "active") != "hidden"]
-    player_characters = [c for c in active_characters if str(c.get("role") or "").upper() != "NPC"] or active_characters
+    playable_characters = active_characters or characters
     map_room = _serialize_map_room(conn, current_room_id)
     return {
         "current_scene_id": current_scene_id,
@@ -528,8 +649,10 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
         "bgm_url": _system_value(conn, "player_bgm_url"),
         "bgm_name": _system_value(conn, "player_bgm_name"),
         "characters": active_characters,
-        "playable_characters": player_characters,
+        "playable_characters": playable_characters,
         "all_characters": characters,
+        "character_claims": claims,
+        "room_limits": room_limits,
         "current_room_id": current_room_id,
         "current_room": map_room,
         "updated_at": _now(),
@@ -574,14 +697,16 @@ def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
             (room_id,),
         ).fetchall()
     ]
+    claims = _character_claims_for_room(conn, room_id)
     return {
         "type": "snapshot",
-        "room": _serialize_room(room),
+        "room": _serialize_room_with_limits(conn, room, claims),
         "game_state": _build_game_state(conn, room),
         "members": members,
         "messages": messages,
         "tokens": tokens,
         "documents": docs,
+        "character_claims": claims,
     }
 
 
@@ -639,13 +764,30 @@ async def _broadcast_game_state(conn, room):
     await _broadcast(room["id"], {"type": "game.state", "game_state": _build_game_state(conn, room)})
 
 
-def _ensure_member(conn, room_id: int, req: JoinRoomRequest, member_token: str = "") -> tuple[dict[str, Any], str]:
+def _ensure_member(
+    conn,
+    room_id: int,
+    req: JoinRoomRequest,
+    member_token: str = "",
+    room=None,
+    room_token: str = "",
+) -> tuple[dict[str, Any], str]:
     player_id = (req.player_id or secrets.token_hex(8))[:80]
     color = req.color or _pick_color(player_id)
     existing = conn.execute(
         "SELECT * FROM multiplayer_members WHERE room_id=? AND player_id=?",
         (room_id, player_id),
     ).fetchone()
+    requested_role = (req.role or "player")[:20]
+    role = requested_role
+    if requested_role == "gm":
+        has_existing_gm_token = bool(
+            existing
+            and existing["role"] == "gm"
+            and _token_matches(member_token, existing["member_token_hash"])
+        )
+        if not ((_has_gm_access(room, room_token) if room is not None else False) or has_existing_gm_token):
+            role = "player"
     if existing and existing["member_token_hash"]:
         if not _token_matches(member_token, existing["member_token_hash"]):
             raise fastapi.HTTPException(status_code=403, detail="成员令牌无效，请重新以新身份加入")
@@ -670,7 +812,11 @@ def _ensure_member(conn, room_id: int, req: JoinRoomRequest, member_token: str =
             connected=1,
             last_seen=excluded.last_seen
         """,
-        (room_id, player_id, req.display_name[:40], req.role[:20], color[:20], member_token_hash, _now()),
+        (room_id, player_id, req.display_name[:40], role, color[:20], member_token_hash, _now()),
+    )
+    conn.execute(
+        "UPDATE multiplayer_character_claims SET display_name=? WHERE room_id=? AND player_id=?",
+        (req.display_name[:40], room_id, player_id),
     )
     conn.commit()
     row = conn.execute(
@@ -1026,6 +1172,15 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
     action = req.action.strip()
     if not action:
         raise fastapi.HTTPException(status_code=400, detail="行动不能为空")
+    member = conn.execute(
+        "SELECT role FROM multiplayer_members WHERE room_id=? AND player_id=?",
+        (room["id"], req.actor_id),
+    ).fetchone()
+    if not member or member["role"] != "gm":
+        claims = _character_claims_for_player(conn, room["id"], req.actor_id)
+        if not claims:
+            raise fastapi.HTTPException(status_code=403, detail="请先确认扮演角色")
+        req = req.copy(update={"actor_name": " / ".join(_claim_names(claims))[:40]})
     player_msg = _save_message(
         conn,
         room["id"],
@@ -1073,7 +1228,9 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
 def _safe_asset_path(asset_path: str) -> Path:
     root = _assets_dir.resolve()
     target = (root / asset_path).resolve()
-    if not str(target).startswith(str(root)):
+    try:
+        target.relative_to(root)
+    except ValueError:
         raise fastapi.HTTPException(status_code=403, detail="禁止访问")
     return target
 
@@ -1123,7 +1280,7 @@ def multiplayer_health():
 def list_rooms():
     with safe_db() as conn:
         rooms = [
-            _serialize_room(r)
+            _serialize_room_with_limits(conn, r)
             for r in conn.execute("SELECT * FROM multiplayer_rooms ORDER BY updated_at DESC, id DESC").fetchall()
         ]
     return {"status": "success", "rooms": rooms}
@@ -1136,6 +1293,7 @@ def create_room(req: RoomCreateRequest):
         while conn.execute("SELECT id FROM multiplayer_rooms WHERE code=?", (code,)).fetchone():
             code = _room_code()
         room_token = _new_token()
+        settings = _normalize_room_settings(conn, req.settings)
         cur = conn.execute(
             """
             INSERT INTO multiplayer_rooms (code, name, gm_name, campaign_path, settings, gm_token_hash)
@@ -1146,7 +1304,7 @@ def create_room(req: RoomCreateRequest):
                 req.name[:80],
                 req.gm_name[:40],
                 req.campaign_path[:240],
-                _dump_json(req.settings),
+                _dump_json(settings),
                 _hash_token(room_token),
             ),
         )
@@ -1170,6 +1328,7 @@ async def patch_room(room_code: str, req: RoomPatchRequest, request: Request):
         settings = _load_json(room["settings"], {})
         if req.settings:
             settings.update(req.settings)
+        settings = _normalize_room_settings(conn, settings)
         conn.execute(
             """
             UPDATE multiplayer_rooms
@@ -1192,7 +1351,14 @@ async def patch_room(room_code: str, req: RoomPatchRequest, request: Request):
 async def join_room(room_code: str, req: JoinRoomRequest, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
-        member, member_token = _ensure_member(conn, room["id"], req, _member_token_from_request(request))
+        member, member_token = _ensure_member(
+            conn,
+            room["id"],
+            req,
+            _member_token_from_request(request),
+            room,
+            _room_token_from_request(request),
+        )
         snap = _snapshot(conn, room["id"])
     await _broadcast(room["id"], {"type": "member.updated", "member": member})
     return {"status": "success", "member": member, "member_token": member_token, **snap}
@@ -1218,18 +1384,20 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
         raise fastapi.HTTPException(status_code=400, detail="消息不能为空")
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
-        _require_member_or_gm(
+        role = _require_member_or_gm(
             conn,
             room,
             req.sender_id,
             _member_token_from_request(request),
             _room_token_from_request(request),
         )
+        claims = _require_player_character_claims(conn, room, req.sender_id, role)
+        sender_name = " / ".join(_claim_names(claims))[:40] if claims else req.sender_name
         if re.match(r"^[./!！。]\s*r(?:oll)?\b|^[./!！。]\s*r\d", content, re.I):
             dice_req = DiceRollRequest(
                 expression=content,
                 actor_id=req.sender_id,
-                actor_name=req.sender_name,
+                actor_name=sender_name,
                 reason=req.payload.get("reason", ""),
                 skill_name=req.payload.get("skill_name", ""),
                 skill_value=req.payload.get("skill_value"),
@@ -1238,8 +1406,8 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
                 context=req.payload.get("context", ""),
             )
             return await _roll_and_record(conn, room, dice_req)
-        msg = _save_message(conn, room["id"], req.sender_id, req.sender_name, req.kind, content, req.payload)
-        _remember_room_event(conn, room["code"], f"{req.sender_name}: {content[:300]}")
+        msg = _save_message(conn, room["id"], req.sender_id, sender_name, req.kind, content, req.payload)
+        _remember_room_event(conn, room["code"], f"{sender_name}: {content[:300]}")
     await _broadcast(room["id"], {"type": "message.created", "message": msg})
     return {"status": "success", "message": msg}
 
@@ -1248,13 +1416,16 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
 async def roll_dice(room_code: str, req: DiceRollRequest, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
-        _require_member_or_gm(
+        role = _require_member_or_gm(
             conn,
             room,
             req.actor_id,
             _member_token_from_request(request),
             _room_token_from_request(request),
         )
+        claims = _require_player_character_claims(conn, room, req.actor_id, role)
+        if claims:
+            req = req.copy(update={"actor_name": " / ".join(_claim_names(claims))[:40]})
         return await _roll_and_record(conn, room, req)
 
 
@@ -1281,28 +1452,93 @@ def get_room_game_state(room_code: str):
 
 @multiplayer_router.post("/api/multiplayer/rooms/{room_code}/characters/claim")
 async def claim_room_characters(room_code: str, req: CharacterClaimRequest, request: Request):
-    character_ids = [int(cid) for cid in req.character_ids if int(cid) > 0][:6]
+    character_ids: list[int] = []
+    try:
+        for cid in req.character_ids:
+            normalized_id = int(cid)
+            if normalized_id > 0 and normalized_id not in character_ids:
+                character_ids.append(normalized_id)
+            if len(character_ids) >= 6:
+                break
+    except (TypeError, ValueError):
+        raise fastapi.HTTPException(status_code=400, detail="角色 ID 无效") from None
     if not character_ids:
         raise fastapi.HTTPException(status_code=400, detail="请至少选择一个角色")
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
+        player_id = (req.player_id or "").strip()[:80]
+        if not player_id:
+            raise fastapi.HTTPException(status_code=400, detail="缺少玩家身份")
         _require_member_or_gm(
             conn,
             room,
-            req.player_id,
+            player_id,
             _member_token_from_request(request),
             _room_token_from_request(request),
         )
+        member = conn.execute(
+            "SELECT * FROM multiplayer_members WHERE room_id=? AND player_id=?",
+            (room["id"], player_id),
+        ).fetchone()
+        display_name = (member["display_name"] if member else player_id)[:40]
+
         placeholders = ",".join("?" for _ in character_ids)
         rows = conn.execute(
             f"SELECT id, name, role, hp, san, inventory, status FROM characters WHERE id IN ({placeholders})",
             character_ids,
         ).fetchall()
-        if not rows:
-            raise fastapi.HTTPException(status_code=404, detail="角色不存在")
-        names = [r["name"] for r in rows]
-        notes = json.dumps({"character_ids": [r["id"] for r in rows], "character_names": names}, ensure_ascii=False)
-        token_id = f"pc_{req.player_id}"
+        row_by_id = {int(r["id"]): r for r in rows}
+        missing_ids = [cid for cid in character_ids if cid not in row_by_id]
+        if missing_ids:
+            raise fastapi.HTTPException(status_code=404, detail=f"角色不存在：{missing_ids[0]}")
+
+        existing_claims = _character_claims_for_player(conn, room["id"], player_id)
+        existing_ids = [int(c["character_id"]) for c in existing_claims]
+        if existing_ids and set(existing_ids) != set(character_ids):
+            raise fastapi.HTTPException(status_code=409, detail="角色已锁定，不能重新选择")
+        if not existing_ids:
+            seat_info = _room_seat_info(conn, room)
+            if seat_info["claimed_player_count"] >= seat_info["max_players"]:
+                raise fastapi.HTTPException(
+                    status_code=409,
+                    detail=f"房间人数已满（{seat_info['claimed_player_count']}/{seat_info['max_players']}）",
+                )
+
+        conflict_rows = conn.execute(
+            f"""
+            SELECT c.character_id, c.player_id, c.display_name, ch.name AS character_name
+            FROM multiplayer_character_claims c
+            LEFT JOIN characters ch ON ch.id=c.character_id
+            WHERE c.room_id=? AND c.character_id IN ({placeholders}) AND c.player_id<>?
+            """,
+            [room["id"], *character_ids, player_id],
+        ).fetchall()
+        if conflict_rows:
+            conflict_text = "、".join(
+                f"{r['character_name'] or r['character_id']}（{r['display_name'] or r['player_id']}）"
+                for r in conflict_rows
+            )
+            raise fastapi.HTTPException(status_code=409, detail=f"角色已被选择：{conflict_text}")
+
+        rows_in_order = [row_by_id[cid] for cid in character_ids]
+        names = [r["name"] for r in rows_in_order]
+        first_claim = not existing_ids
+        if first_claim:
+            for cid in character_ids:
+                conn.execute(
+                    """
+                    INSERT INTO multiplayer_character_claims
+                    (room_id, character_id, player_id, display_name, claimed_at)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (room["id"], cid, player_id, display_name, _now()),
+                )
+
+        notes = json.dumps(
+            {"character_ids": character_ids, "character_names": names, "locked": True},
+            ensure_ascii=False,
+        )
+        token_id = f"pc_{player_id}"
         conn.execute(
             """
             INSERT INTO multiplayer_tokens
@@ -1322,33 +1558,36 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
                 token_id,
                 "/".join(names)[:80],
                 "pc",
-                req.player_id[:80],
+                player_id,
                 "",
-                "#7dd3fc",
+                (member["color"] if member else "#7dd3fc")[:20],
                 160 + len(names) * 18,
                 160 + len(names) * 12,
                 48,
                 _int_or_none(room["current_room_id"]),
                 None,
-                rows[0]["id"],
+                rows_in_order[0]["id"],
                 notes,
                 _now(),
             ),
         )
-        msg = _save_message(
-            conn,
-            room["id"],
-            req.player_id,
-            "/".join(names)[:40],
-            "system",
-            f"已选择角色：{'、'.join(names)}",
-            {"character_ids": [r["id"] for r in rows]},
-        )
+        msg = None
+        if first_claim:
+            msg = _save_message(
+                conn,
+                room["id"],
+                player_id,
+                "/".join(names)[:40],
+                "system",
+                f"已锁定角色：{'、'.join(names)}",
+                {"character_ids": character_ids, "locked": True},
+            )
         conn.commit()
         token = _serialize_token(conn.execute("SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?", (room["id"], token_id)).fetchone())
         snap = _snapshot(conn, room["id"])
     await _broadcast(room["id"], {"type": "token.updated", "token": token})
-    await _broadcast(room["id"], {"type": "message.created", "message": msg})
+    if msg:
+        await _broadcast(room["id"], {"type": "message.created", "message": msg})
     await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
     return {"status": "success", "message": msg, "token": token, **snap}
 
@@ -1619,11 +1858,17 @@ async def room_websocket(
                 room["id"],
                 JoinRoomRequest(player_id=player_id, display_name=name, role=role),
                 _ws_query_token(member_token),
+                room,
             )
             room_id = room["id"]
             snapshot = _snapshot(conn, room_id)
         _ws_clients_by_room.setdefault(room_id, set()).add(websocket)
-        _ws_meta[websocket] = {"room_id": room_id, "player_id": member["player_id"], "name": member["display_name"]}
+        _ws_meta[websocket] = {
+            "room_id": room_id,
+            "player_id": member["player_id"],
+            "name": member["display_name"],
+            "role": member["role"],
+        }
         await websocket.send_json({**snapshot, "member_token": new_member_token})
         await _broadcast(room_id, {"type": "member.updated", "member": member})
 
@@ -1647,25 +1892,30 @@ async def room_websocket(
                         content=content,
                         payload=incoming.get("payload") or {},
                     )
+                    claims = _require_player_character_claims(conn, room, req.sender_id, meta.get("role", "player"))
+                    sender_name = " / ".join(_claim_names(claims))[:40] if claims else req.sender_name
                     if re.match(r"^[./!！。]\s*r", content, re.I):
                         dice_req = DiceRollRequest(
                             expression=content,
                             actor_id=req.sender_id,
-                            actor_name=req.sender_name,
+                            actor_name=sender_name,
                             ask_ai=bool(req.payload.get("ask_ai", True)),
                             context=req.payload.get("context", ""),
                         )
                         await _roll_and_record(conn, room, dice_req)
                     else:
-                        saved = _save_message(conn, room_id, req.sender_id, req.sender_name, "chat", content, req.payload)
-                        _remember_room_event(conn, room["code"], f"{req.sender_name}: {content[:300]}")
+                        saved = _save_message(conn, room_id, req.sender_id, sender_name, "chat", content, req.payload)
+                        _remember_room_event(conn, room["code"], f"{sender_name}: {content[:300]}")
                         await _broadcast(room_id, {"type": "message.created", "message": saved})
                 elif msg_type == "dice.roll":
                     payload = incoming.get("payload") or {}
+                    actor_id = meta.get("player_id", "")
+                    claims = _require_player_character_claims(conn, room, actor_id, meta.get("role", "player"))
+                    actor_name = " / ".join(_claim_names(claims))[:40] if claims else payload.get("actor_name") or meta.get("name", name)
                     dice_req = DiceRollRequest(
                         expression=payload.get("expression", "1d100"),
-                        actor_id=meta.get("player_id", ""),
-                        actor_name=meta.get("name", name),
+                        actor_id=actor_id,
+                        actor_name=actor_name,
                         reason=payload.get("reason", ""),
                         skill_name=payload.get("skill_name", ""),
                         skill_value=payload.get("skill_value"),
@@ -1678,7 +1928,7 @@ async def room_websocket(
                     payload = incoming.get("payload") or {}
                     action_req = PlayerActionRequest(
                         actor_id=meta.get("player_id", ""),
-                        actor_name=meta.get("name", name),
+                        actor_name=payload.get("actor_name") or meta.get("name", name),
                         action=payload.get("action", ""),
                         action_type=payload.get("action_type", "mixed"),
                         context=payload.get("context", ""),

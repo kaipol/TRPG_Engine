@@ -360,22 +360,27 @@ def chat_completion(
     temperature: float = 0.8,
     max_tokens: int = 2000,
     json_mode: bool = False,
+    response_format: dict | None = None,
     stream: bool = False,
     timeout: float = 120,
 ):
     model_id = (model or get_active_model("chat")).strip()
     if not model_id:
         raise RuntimeError("No OpenAI-compatible chat model is selected.")
+    json_mode = json_mode or (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+    normalized_messages = list(messages or [])
+    if json_mode and not _messages_contain_json(normalized_messages):
+        normalized_messages = _with_json_instruction(normalized_messages)
     kwargs = {
         "model": model_id,
-        "messages": messages,
+        "messages": normalized_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": stream,
         "timeout": timeout,
     }
     if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
+        kwargs["response_format"] = response_format or {"type": "json_object"}
     client = get_client(timeout=timeout)
     try:
         return client.chat.completions.create(**kwargs)
@@ -384,6 +389,37 @@ def chat_completion(
             raise
         kwargs.pop("response_format", None)
         return client.chat.completions.create(**kwargs)
+
+
+def _messages_contain_json(messages: list[dict]) -> bool:
+    for message in messages:
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if isinstance(content, str) and "json" in content.lower():
+            return True
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and "json" in str(part.get("text", "")).lower():
+                    return True
+                if isinstance(part, str) and "json" in part.lower():
+                    return True
+    return False
+
+
+def _with_json_instruction(messages: list[dict]) -> list[dict]:
+    instruction = "\n\nReturn only a valid JSON object. Do not include markdown or explanatory text."
+    if not messages:
+        return [{"role": "system", "content": instruction.strip()}]
+    updated = []
+    inserted = False
+    for message in messages:
+        if not inserted and isinstance(message, dict) and message.get("role") == "system":
+            updated.append({**message, "content": f"{message.get('content', '')}{instruction}"})
+            inserted = True
+        else:
+            updated.append(message)
+    if not inserted:
+        updated.insert(0, {"role": "system", "content": instruction.strip()})
+    return updated
 
 
 def embedding_create(texts: list[str]):

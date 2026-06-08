@@ -5,979 +5,617 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Z.R.I.C 多人跑团桌</title>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
   <style>
     :root {
-      --bg: #111318;
-      --panel: #191d24;
-      --panel-2: #202630;
-      --line: #343c49;
-      --text: #eef2f7;
-      --muted: #9aa4b2;
-      --accent: #6ee7b7;
-      --accent-2: #7dd3fc;
-      --warn: #fbbf24;
-      --bad: #fb7185;
-      --good: #86efac;
+      --bg: #090b10;
+      --panel: #0f1420;
+      --panel-2: #0b0e17;
+      --line: rgba(255,255,255,.07);
+      --line-soft: rgba(255,255,255,.05);
+      --text: #c9cdd6;
+      --muted: #6b7280;
+      --faint: #4b5563;
+      --gold: #e8b44b;
+      --blue: #93c5fd;
+      --cyan: #7dd3fc;
+      --good: #4fc98a;
+      --bad: #e05c5c;
+      --warn: #fde047;
       color-scheme: dark;
-      font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      font-family: "Noto Sans SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     }
-
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      letter-spacing: 0;
-    }
-    button, input, textarea, select {
-      font: inherit;
-      color: inherit;
-    }
-    button {
-      border: 1px solid var(--line);
-      background: #26303c;
-      border-radius: 8px;
-      min-height: 36px;
-      padding: 0 12px;
-      cursor: pointer;
-    }
-    button:hover { border-color: var(--accent-2); }
-    button.primary {
-      background: #0f766e;
-      border-color: #14b8a6;
-      color: white;
-      font-weight: 700;
-    }
-    button.icon {
-      width: 36px;
-      padding: 0;
-      display: inline-grid;
-      place-items: center;
-    }
-    button:disabled {
-      opacity: .55;
-      cursor: not-allowed;
-    }
-    input, textarea, select {
-      width: 100%;
-      border: 1px solid var(--line);
-      background: #10141b;
-      border-radius: 8px;
-      padding: 9px 10px;
-      outline: none;
-    }
-    textarea { resize: vertical; min-height: 72px; }
-    label {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 5px;
-    }
-    .app {
-      min-height: 100vh;
-      display: grid;
-      grid-template-rows: 56px minmax(0, 1fr);
-    }
-    .topbar {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      align-items: center;
-      gap: 16px;
-      padding: 0 16px;
-      border-bottom: 1px solid var(--line);
-      background: #151922;
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-    .brand-mark {
-      width: 28px;
-      height: 28px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #0d9488, #38bdf8);
-      display: grid;
-      place-items: center;
-      color: #071116;
-      font-weight: 900;
-    }
-    .roomline {
-      min-width: 0;
-      color: var(--muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 99px;
-      background: var(--bad);
-    }
-    .dot.on { background: var(--good); }
-    .shell {
-      display: grid;
-      grid-template-columns: 320px minmax(420px, 1fr) 380px;
-      min-height: 0;
-    }
-    .panel {
-      min-width: 0;
-      min-height: 0;
-      background: var(--panel);
-      border-right: 1px solid var(--line);
-      display: flex;
-      flex-direction: column;
-    }
-    .panel.right { border-right: none; border-left: 1px solid var(--line); }
-    .section {
-      padding: 14px;
-      border-bottom: 1px solid var(--line);
-    }
-    .section:last-child { border-bottom: none; }
-    .title {
-      font-size: 13px;
-      font-weight: 800;
-      color: #d9e4ee;
-      margin-bottom: 10px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .stack { display: grid; gap: 10px; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .room-card {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      background: #141922;
-      display: grid;
-      gap: 5px;
-    }
-    .room-card.active { border-color: var(--accent); }
-    .small {
-      color: var(--muted);
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
-    .stage {
-      min-width: 0;
-      min-height: 0;
-      overflow: auto;
-      background: #0c1016;
-      padding: 18px;
-    }
-    .scene-board {
-      min-height: 100%;
-      display: grid;
-      grid-template-rows: auto 1fr;
-      gap: 14px;
-    }
-    .scene-hero {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #141922;
-      overflow: hidden;
-    }
-    .scene-hero img {
-      width: 100%;
-      max-height: 320px;
-      object-fit: cover;
-      display: block;
-      background: #090d13;
-    }
-    .scene-body {
-      padding: 18px;
-      display: grid;
-      gap: 12px;
-    }
-    .scene-title {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .scene-title h1 {
-      margin: 0;
-      font-size: 22px;
-      line-height: 1.3;
-      letter-spacing: 0;
-    }
-    .scene-text {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: #d7dee8;
-      line-height: 1.8;
-      font-size: 15px;
-    }
-    .scene-ai {
-      border: 1px solid rgba(125, 211, 252, .22);
-      background: rgba(14, 116, 144, .1);
-      border-radius: 8px;
-      padding: 12px;
-      color: #bfdbfe;
-      line-height: 1.7;
-      white-space: pre-wrap;
-    }
-    .option-list {
-      display: grid;
-      gap: 8px;
-    }
-    .option-chip {
-      border: 1px solid var(--line);
-      background: #10141b;
-      border-radius: 8px;
-      padding: 9px 10px;
-      color: #b9c3d0;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    .state-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .character-card {
-      border: 1px solid var(--line);
-      background: #141922;
-      border-radius: 8px;
-      padding: 10px;
-      display: grid;
-      gap: 8px;
-    }
-    button.character-card {
-      width: 100%;
-      text-align: left;
-      min-height: 0;
-      padding: 10px;
-    }
-    .pick-card.picked {
-      border-color: var(--accent);
-      background: rgba(20, 184, 166, .1);
-    }
-    .character-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      align-items: center;
-    }
-    .role-pill {
-      border: 1px solid rgba(125, 211, 252, .22);
-      color: #7dd3fc;
-      border-radius: 999px;
-      padding: 2px 7px;
-      font-size: 11px;
-    }
-    .stat-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .status-pill {
-      border-radius: 6px;
-      padding: 3px 6px;
-      font-size: 11px;
-      background: rgba(134, 239, 172, .08);
-      color: var(--good);
-      border: 1px solid rgba(134, 239, 172, .2);
-    }
-    .map-toolbar {
-      position: absolute;
-      z-index: 5;
-      left: 12px;
-      top: 12px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .map-stage {
-      position: absolute;
-      inset: 0;
-      overflow: hidden;
-      user-select: none;
-    }
-    .map-bg {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      opacity: .62;
-      pointer-events: none;
-    }
-    .token {
-      position: absolute;
-      display: grid;
-      place-items: center;
-      border: 2px solid currentColor;
-      background: rgba(12, 16, 22, .82);
-      border-radius: 50%;
-      box-shadow: 0 8px 24px rgba(0,0,0,.35);
-      transform: translate(-50%, -50%);
-      cursor: grab;
-      touch-action: none;
-      overflow: hidden;
-    }
-    .token:active { cursor: grabbing; }
-    .token img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    .token span {
-      font-weight: 900;
-      font-size: 18px;
-    }
-    .token-name {
-      position: absolute;
-      top: calc(100% + 5px);
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(7, 10, 15, .88);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 2px 6px;
-      color: var(--text);
-      font-size: 12px;
-      white-space: nowrap;
-      pointer-events: none;
-    }
-    .messages {
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 9px;
-    }
-    .message {
-      border: 1px solid var(--line);
-      background: #131820;
-      border-radius: 8px;
-      padding: 9px;
-    }
-    .message.dice { border-color: #f59e0b; }
-    .message.ai { border-color: #7dd3fc; }
-    .message.action { border-color: #6ee7b7; }
-    .message.state { border-color: #86efac; }
-    .message.system { border-color: #8b5cf6; }
-    .msg-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 5px;
-    }
-    .msg-text {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      line-height: 1.5;
-    }
-    .composer {
-      border-top: 1px solid var(--line);
-      padding: 12px;
-      display: grid;
-      gap: 8px;
-    }
-    .composer-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-    }
-    .members, .tokens {
-      display: grid;
-      gap: 8px;
-      max-height: 170px;
-      overflow: auto;
-    }
-    .member, .token-row {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 8px;
-      align-items: center;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px;
-      background: #141922;
-    }
-    .swatch {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: currentColor;
-    }
-    .tabs {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 6px;
-    }
-    .tabs button {
-      min-height: 32px;
-      font-size: 12px;
-      padding: 0 6px;
-    }
-    .tabs button.active {
-      border-color: var(--accent);
-      background: #12322d;
-    }
-    .fileline {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      align-items: end;
-    }
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
-    @media (max-width: 1100px) {
-      .shell { grid-template-columns: 280px minmax(360px, 1fr); }
-      .panel.right { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--line); min-height: 420px; }
-    }
-    @media (max-width: 760px) {
-      .app { grid-template-rows: auto minmax(0, 1fr); }
-      .topbar { grid-template-columns: 1fr; padding: 10px 12px; }
-      .shell { display: block; }
-      .panel { min-height: 420px; border-right: none; border-bottom: 1px solid var(--line); }
-      .stage { min-height: 520px; }
-      .state-grid { grid-template-columns: 1fr; }
-    }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); letter-spacing: 0; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { border: 1px solid var(--line); background: #111827; border-radius: 6px; min-height: 34px; padding: 0 11px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    button:hover { border-color: rgba(147,197,253,.35); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input, textarea, select { width: 100%; border: 1px solid var(--line); background: #090b10; border-radius: 6px; padding: 8px 10px; outline: none; }
+    textarea { resize: none; }
+    .app { min-height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    .topbar { min-height: 56px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-mark { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; border: 1px solid rgba(88,166,255,.32); background: rgba(88,166,255,.12); color: #58a6ff; font-family: ui-monospace, Consolas, monospace; font-weight: 800; }
+    .brand-title { font-family: ui-monospace, Consolas, monospace; font-size: 15px; font-weight: 800; color: #58a6ff; letter-spacing: .06em; }
+    .brand-sub { font-size: 11px; color: var(--faint); margin-top: 1px; }
+    .roomline { min-width: 0; flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+    .dot.on { background: var(--good); box-shadow: 0 0 10px rgba(79,201,138,.45); }
+    .btn-primary { background: rgba(232,180,75,.12); border-color: rgba(232,180,75,.34); color: var(--gold); font-weight: 700; }
+    .btn-info { background: rgba(56,189,248,.08); border-color: rgba(56,189,248,.24); color: var(--cyan); }
+    .btn-ghost { background: transparent; color: #9ca3af; }
+    .btn-sm { min-height: 30px; padding: 0 9px; font-size: 12px; }
+    .tag { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .solo-play-shell { flex: 1; display: grid; grid-template-columns: 300px minmax(0,1fr) 340px; min-height: 0; overflow: hidden; }
+    .solo-panel { min-width: 0; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
+    .solo-panel.right { border-right: none; border-left: 1px solid var(--line); }
+    .solo-section { padding: 16px; border-bottom: 1px solid var(--line-soft); flex-shrink: 0; }
+    .solo-scroll { flex: 1; overflow-y: auto; padding: 12px; }
+    .stack { display: flex; flex-direction: column; gap: 10px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .room-card { border: 1px solid rgba(56,189,248,.18); background: #090b10; border-radius: 8px; padding: 10px; }
+    .small { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+    .solo-character-card { width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); padding: 12px; cursor: pointer; transition: all .15s; display: block; }
+    .solo-character-card + .solo-character-card { margin-top: 8px; }
+    .solo-character-card:hover { border-color: rgba(147,197,253,.25); background: rgba(147,197,253,.04); }
+    .solo-character-card.selected { border-color: rgba(147,197,253,.5); background: rgba(147,197,253,.08); box-shadow: 0 0 0 1px rgba(147,197,253,.08) inset; }
+    .solo-character-card.locked { opacity: .56; cursor: not-allowed; }
+    .solo-character-card.own-locked { border-color: rgba(79,201,138,.45); background: rgba(79,201,138,.06); box-shadow: 0 0 0 1px rgba(79,201,138,.08) inset; }
+    .role-pill { font-family: ui-monospace, Consolas, monospace; font-size: 10px; padding: 2px 6px; border-radius: 3px; background: rgba(147,197,253,.1); border: 1px solid rgba(147,197,253,.22); color: var(--blue); white-space: nowrap; }
+    .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; font-family: ui-monospace, Consolas, monospace; font-size: 11px; font-weight: 800; }
+    .solo-scene { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .solo-scene-scroll { flex: 1; overflow-y: auto; padding: 24px 28px; }
+    .solo-scene-card { background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; }
+    .solo-scene-image { width: 100%; max-height: 340px; object-fit: cover; display: block; background: #05070c; border-bottom: 1px solid var(--line-soft); }
+    .scene-content { white-space: pre-wrap; overflow-wrap: anywhere; color: #d6d9e3; line-height: 1.9; font-size: 16px; }
+    .option-btn { width: 100%; min-height: 0; text-align: left; justify-content: flex-start; border: 1px solid var(--line); background: #0f1420; border-radius: 8px; padding: 10px 12px; color: var(--text); margin-bottom: 8px; }
+    .opt-num { width: 24px; height: 24px; border-radius: 5px; display: inline-grid; place-items: center; flex-shrink: 0; background: rgba(232,180,75,.1); color: var(--gold); font-family: ui-monospace, Consolas, monospace; font-size: 11px; font-weight: 800; }
+    .composer { padding: 16px 22px 18px; border-top: 1px solid var(--line-soft); background: var(--panel-2); flex-shrink: 0; }
+    .solo-action-type { display: flex; align-items: center; background: #090b10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .solo-action-type button { border-radius: 0; border: none; font-size: 11px; padding: 0 10px; min-height: 30px; }
+    .solo-message { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); margin-bottom: 8px; }
+    .solo-message.action { border-color: rgba(147,197,253,.2); }
+    .solo-message.ai { border-color: rgba(232,180,75,.2); background: rgba(232,180,75,.04); }
+    .solo-message.dice { border-color: rgba(250,204,21,.25); }
+    .solo-message.state { border-color: rgba(79,201,138,.22); }
+    .member { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #090b10; }
+    .swatch { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @media (max-width: 1180px) { .solo-play-shell { grid-template-columns: 260px minmax(0,1fr); } .solo-panel.right { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--line); min-height: 340px; } }
+    @media (max-width: 760px) { .app { overflow: auto; } .topbar { flex-wrap: wrap; padding: 10px 12px; } .solo-play-shell { display: block; overflow: visible; } .solo-panel, .solo-scene, .solo-panel.right { min-height: 420px; border-left: none; border-right: none; border-bottom: 1px solid var(--line); } .solo-scene-scroll { padding: 16px; } }
   </style>
 </head>
 <body>
   <div id="app" class="app">
     <header class="topbar">
-      <div class="brand"><div class="brand-mark">Z</div><span>Z.R.I.C 多人跑团桌</span></div>
+      <div class="brand">
+        <div class="brand-mark">Z</div>
+        <div style="min-width:0">
+          <div class="brand-title">Z.R.I.C</div>
+          <div class="brand-sub">多人跑团桌</div>
+        </div>
+      </div>
       <div class="roomline">
         <template v-if="room">房间 {{ room.code }} · {{ room.name }}</template>
-        <template v-else>输入房间码后开始联机跑团</template>
+        <template v-else>输入房间码后开始</template>
       </div>
       <div class="status"><span class="dot" :class="{on: wsConnected}"></span>{{ wsConnected ? '实时同步中' : '未连接' }}</div>
     </header>
 
-    <main class="shell">
-      <aside class="panel">
-        <section class="section stack">
-          <div class="title">入场</div>
-          <div>
-            <label>昵称</label>
-            <input v-model.trim="profile.name" placeholder="玩家名">
+    <main class="solo-play-shell">
+      <aside class="solo-panel">
+        <section class="solo-section stack">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--blue)">
+            <i class="ph ph-user-circle"></i> 玩家入场
           </div>
-          <div class="composer-row">
+          <input v-model.trim="profile.name" placeholder="玩家名">
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
             <input v-model.trim="joinCode" @keyup.enter="joinRoomByCode(joinCode)" placeholder="房间码" style="text-transform:uppercase">
-            <button class="primary" @click="joinRoomByCode(joinCode)" :disabled="!joinCode.trim()">进入</button>
-          </div>
-          <div v-if="room" class="room-card active">
-            <strong>{{ room.name }}</strong>
-            <div class="small">房间 {{ room.code }} · {{ wsConnected ? '已同步' : '连接中' }}</div>
-          </div>
-        </section>
-
-        <section class="section stack" v-if="room">
-          <div class="title">选择扮演角色</div>
-          <div v-if="playableCharacters.length" class="rooms stack">
-            <button v-for="char in playableCharacters" :key="char.id"
-                    @click="toggleCharacter(char.id)"
-                    class="character-card pick-card"
-                    :class="{picked: selectedCharacterIds.includes(char.id)}">
-              <div class="character-head">
-                <strong>{{ char.name }}</strong>
-                <span class="role-pill">{{ char.role || '角色' }}</span>
-              </div>
-              <div class="stat-row">
-                <span>HP {{ char.hp }}</span>
-                <span>SAN {{ char.san }}</span>
-              </div>
-              <div class="small">{{ char.inventory || '等待玩家接入' }}</div>
+            <button class="btn-info" @click="joinRoomByCode(joinCode)" :disabled="!joinCode.trim() || joinBusy">
+              <i :class="joinBusy?'ph ph-circle-notch':'ph ph-sign-in'" :style="joinBusy?'animation:spin 1s linear infinite':''"></i> 进入
             </button>
           </div>
-          <div v-else class="small">AI-KP 正在从剧本准备可扮演角色。</div>
-          <button class="primary" @click="claimCharacters" :disabled="!selectedCharacterIds.length || characterClaimBusy">
-            {{ characterClaimBusy ? '记录中...' : selectedCharacterIds.length ? '确认扮演 ' + selectedCharacterNames.join(' / ') : '选择角色后确认' }}
-          </button>
-          <div v-if="characterClaimMsg" class="small">{{ characterClaimMsg }}</div>
-        </section>
-
-        <section class="section stack" v-if="room">
-          <div class="title">同桌成员</div>
-          <div class="members">
-            <div class="member" v-for="m in members" :key="m.player_id">
-              <span class="swatch" :style="{color:m.color}"></span>
-              <span>{{ m.display_name }}<div class="small">{{ m.role === 'gm' ? '主持' : '玩家' }}</div></span>
-              <span class="small">{{ m.connected ? '在线' : '离线' }}</span>
+          <div v-if="room" class="room-card">
+            <strong style="color:#f5edd8">{{ room.name }}</strong>
+            <div class="small">房间 {{ room.code }} · {{ wsConnected ? '已同步' : '连接中' }}</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft)">
+              <span class="small">席位 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
+              <span class="small" :style="{color: roomSeatTone}">{{ roomSeatLabel }}</span>
             </div>
           </div>
         </section>
+
+        <section class="solo-section" v-if="room">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+            <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--blue)">
+              <i class="ph ph-users"></i> 选择扮演角色
+            </div>
+            <button @click="clearCharacters" class="btn-ghost btn-sm" title="清空选择" :disabled="hasLockedCharacters"><i class="ph ph-x"></i></button>
+          </div>
+          <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '选择剧中角色后开始行动。' }}</div>
+          <div v-if="hasLockedCharacters" class="small" style="margin-top:6px;color:var(--good)">角色已确认，开局后不可改选。</div>
+          <div v-else-if="roomFullForNewPlayer" class="small" style="margin-top:6px;color:var(--bad)">席位已满，等待 GM 调整房间人数。</div>
+        </section>
+
+        <div class="solo-scroll" v-if="room">
+          <button v-for="char in playableCharacters" :key="char.id" @click="toggleCharacter(char.id)" class="solo-character-card" :disabled="isCharacterDisabled(char)" :class="{selected: isCharacterSelected(char.id), locked: isClaimedByOther(char), 'own-locked': isOwnClaim(char)}">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+              <strong style="font-size:14px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
+              <span class="role-pill">{{ characterClaimLabel(char) || char.role || '角色' }}</span>
+            </div>
+            <div class="stat-row">
+              <span style="color:#f87171">{{ hpLabel }} {{ char.hp }}</span>
+              <span style="color:#fde047">{{ sanLabel }} {{ char.san }}</span>
+            </div>
+            <div class="small">{{ characterClaimLine(char) || char.inventory || statusLabel(char.status) }}</div>
+          </button>
+          <div v-if="!playableCharacters.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:32px 10px">
+            <i class="ph ph-users" style="font-size:36px;display:block;margin-bottom:10px;opacity:.25"></i>
+            暂无可选角色
+          </div>
+          <button v-if="playableCharacters.length" class="btn-primary" style="width:100%;margin-top:10px" @click="claimCharacters" :disabled="claimButtonDisabled">
+            <i :class="characterClaimBusy?'ph ph-circle-notch':'ph ph-check-circle'" :style="characterClaimBusy?'animation:spin 1s linear infinite':''"></i>
+            {{ claimButtonText }}
+          </button>
+          <div v-if="characterClaimMsg" class="small" style="margin-top:8px;color:var(--good)">{{ characterClaimMsg }}</div>
+
+          <section style="margin-top:18px" v-if="members.length">
+            <div class="tag" style="margin-bottom:8px">同桌成员</div>
+            <div class="stack">
+              <div class="member" v-for="m in members" :key="m.player_id">
+                <span class="swatch" :style="{color:m.color}"></span>
+                <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.display_name }}<div class="small">{{ m.role === 'gm' ? '主持' : '玩家' }}</div></span>
+                <span class="small">{{ m.connected ? '在线' : '离线' }}</span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div v-else class="solo-scroll" style="display:grid;place-items:center;text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:24px">
+          等待加入房间
+        </div>
       </aside>
 
-      <section class="stage">
-        <div class="scene-board" v-if="room">
-          <article class="scene-hero">
-            <img v-if="sceneImage" :src="sceneImage" alt="">
-            <div class="scene-body">
-              <div class="scene-title">
-                <h1>{{ currentScene?.name || '等待 AI-KP 开场' }}</h1>
-                <span class="small" v-if="currentRoom">{{ currentRoom.label }}</span>
-              </div>
-              <div class="scene-text">{{ sceneText || '主持端载入剧本并推进场景后，这里会显示与单人房间一致的当前场景。' }}</div>
-              <div v-if="gameState.scene_ai_text" class="scene-ai">{{ gameState.scene_ai_text }}</div>
-            </div>
-          </article>
-
-          <section class="state-grid">
-            <div class="character-card" v-for="char in visibleCharacters" :key="char.id">
-              <div class="character-head">
-                <strong>{{ char.name }}</strong>
-                <span class="role-pill">{{ char.role || '角色' }}</span>
-              </div>
-              <div class="stat-row">
-                <span>HP {{ char.hp }}</span>
-                <span>SAN {{ char.san }}</span>
-              </div>
-              <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-                <span class="status-pill">{{ statusLabel(char.status) }}</span>
-                <span class="small" style="text-align:right">{{ char.inventory || '无附加状态' }}</span>
-              </div>
-            </div>
-          </section>
-
-          <section v-if="currentScene?.options?.length" class="option-list">
-            <div class="title">可见行动方向</div>
-            <div v-for="opt in currentScene.options" :key="opt.id" class="option-chip">{{ opt.text }}</div>
-          </section>
+      <section class="solo-scene">
+        <div v-if="!room" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:var(--faint)">
+          <i class="ph ph-door-open" style="font-size:56px;opacity:.22"></i>
+          <p style="font-size:14px;margin:0">等待房间连接</p>
         </div>
-        <div v-else style="height:100%;display:grid;place-items:center;color:var(--muted);text-align:center;line-height:1.7;padding:24px">
-          输入房间码后即可看到剧本背景、开场白和可扮演角色。
-        </div>
+        <template v-else>
+          <div class="solo-scene-scroll">
+            <article class="solo-scene-card">
+              <img v-if="sceneImage" :src="sceneImage" alt="场景图" class="solo-scene-image">
+              <div style="padding:24px 26px">
+                <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:var(--gold)">
+                  <i class="ph ph-map-pin"></i> 场景 {{ currentScene?.id ? '#' + currentScene.id : '' }}
+                </div>
+                <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ currentScene?.name || '等待开场' }}</h1>
+                <p class="scene-content">{{ sceneText || '主持端载入场景后会同步到这里。' }}</p>
+                <div v-if="gameState.scene_ai_text && gameState.scene_ai_text !== sceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                  <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-sparkle"></i> 追加细节</div>
+                  <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ gameState.scene_ai_text }}</p>
+                </div>
+              </div>
+            </article>
+
+            <section style="margin-top:18px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                <span class="tag" style="display:flex;align-items:center;gap:6px"><i class="ph ph-signpost"></i> 可见行动方向</span>
+                <span v-if="!currentScene?.options?.length" class="small">等待自由行动</span>
+              </div>
+              <button v-for="(opt,i) in currentScene?.options || []" :key="opt.id || opt.next_node_id || i" class="option-btn" @click="useOptionAsAction(opt.text)">
+                <span class="opt-num">{{ String(i+1).padStart(2,'0') }}</span>
+                <span style="flex:1">{{ opt.text }}</span>
+              </button>
+            </section>
+          </div>
+
+          <form class="composer" @submit.prevent="submitAction">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px">
+              <span class="tag" style="display:flex;align-items:center;gap:6px;color:rgba(232,180,75,.86)"><i class="ph-fill ph-lightning"></i> {{ actorName }} 的行动</span>
+              <div class="solo-action-type">
+                <button type="button" @click="actionType='dialogue'" :style="actionType==='dialogue'?{background:'rgba(192,132,252,.12)',color:'#c084fc'}:{background:'transparent',color:'var(--faint)'}">对话</button>
+                <button type="button" @click="actionType='mixed'" :style="actionType==='mixed'?{background:'rgba(232,180,75,.12)',color:'var(--gold)'}:{background:'transparent',color:'var(--faint)'}">混合</button>
+                <button type="button" @click="actionType='action'" :style="actionType==='action'?{background:'rgba(239,68,68,.12)',color:'#ef4444'}:{background:'transparent',color:'var(--faint)'}">行动</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:10px">
+              <input v-model="chatText" :disabled="!room || !hasLockedCharacters" :placeholder="hasLockedCharacters ? (actorName + '尝试做什么...') : '先确认要扮演的角色'" style="flex:1;font-size:14px">
+              <button class="btn-primary" type="submit" :disabled="!room || !chatText.trim() || !hasLockedCharacters || actionBusy">
+                <i :class="actionBusy?'ph ph-circle-notch':'ph ph-sparkle'" :style="actionBusy?'animation:spin 1s linear infinite':''"></i>
+                {{ actionBusy ? '裁定中' : '交给 AI-GM' }}
+              </button>
+              <button class="btn-ghost" type="button" @click="sendChat" :disabled="!room || !chatText.trim() || !hasLockedCharacters">公屏</button>
+            </div>
+          </form>
+        </template>
       </section>
 
-      <aside class="panel right">
-        <section class="section stack">
-          <div class="title">AI-KP 记录</div>
-          <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '先选择角色，再提交行动。' }}</div>
+      <aside class="solo-panel right">
+        <section class="solo-section">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold);margin-bottom:10px"><i class="ph ph-scroll"></i> AI-GM 记录</div>
+          <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '角色确认后可提交自由行动。' }}</div>
         </section>
-
-        <section class="messages" ref="messagesEl">
-          <div v-for="msg in messages" :key="msg.id" class="message" :class="msg.kind">
-            <div class="msg-head">
-              <span>{{ msg.sender_name || msg.kind }}</span>
-              <span>{{ msg.created_at }}</span>
+        <div class="solo-scroll" ref="messagesEl" style="border-bottom:1px solid var(--line-soft)">
+          <div v-for="msg in messages" :key="msg.id" class="solo-message" :class="msg.kind">
+            <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:var(--muted)">
+              <span style="font-weight:800" :style="{color: msg.kind==='ai' ? 'var(--gold)' : msg.kind==='action' ? 'var(--blue)' : 'var(--muted)'}">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+              <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
             </div>
-            <div class="msg-text">{{ msg.content }}</div>
+            <div style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+          </div>
+          <div v-if="!messages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
+            <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
+            行动与裁定会记录在这里
+          </div>
+        </div>
+        <section class="solo-section" style="border-bottom:none">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-heartbeat"></i> 角色状态</div>
+          <div style="display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto">
+            <div v-for="char in visibleStatusCharacters" :key="char.id" style="background:#090b10;border:1px solid var(--line);border-radius:6px;padding:10px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px">
+                <strong style="font-size:13px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
+                <span style="font-size:10px;color:var(--muted)">{{ char.role || '角色' }}</span>
+              </div>
+              <div class="stat-row" style="margin-bottom:6px">
+                <span style="color:#f87171">{{ hpLabel }} {{ char.hp }}</span>
+                <span style="color:#fde047">{{ sanLabel }} {{ char.san }}</span>
+              </div>
+              <div class="small">{{ char.inventory || statusLabel(char.status) }}</div>
+            </div>
           </div>
         </section>
-
-        <form class="composer" @submit.prevent="sendChat">
-          <div class="composer-row">
-            <input v-model="chatText" :disabled="!room" placeholder="描述你的行动，或 /r 1d20+5">
-            <button type="button" @click="submitAction" :disabled="!room || !chatText.trim() || !selectedCharacterIds.length" class="primary">交给 AI</button>
-          </div>
-          <div class="composer-row">
-            <span class="hint">公开聊天会进入记录；以 /r 开头会自动投骰。</span>
-            <button class="primary" :disabled="!room || !chatText.trim()">公屏</button>
-          </div>
-        </form>
       </aside>
     </main>
   </div>
 
   <script>
     const { createApp, nextTick } = Vue;
+    const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : 'http://localhost:8000';
+    const readStoredJson = (key, fallback) => {
+      try { return JSON.parse(localStorage.getItem(key) || '') || fallback; }
+      catch (_) { return fallback; }
+    };
 
     createApp({
       data() {
-        const saved = JSON.parse(localStorage.getItem("zric-mp-profile") || "{}");
-        const savedTokens = JSON.parse(localStorage.getItem("zric-mp-tokens") || "{}");
+        const saved = readStoredJson('zric-mp-profile', {});
+        const savedTokens = readStoredJson('zric-mp-tokens', {});
         return {
-          rooms: [],
           room: null,
           members: [],
           messages: [],
-          tokens: [],
-          documents: [],
+          characterClaims: [],
           gameState: {},
           ws: null,
           wsConnected: false,
+          joinBusy: false,
+          actionBusy: false,
+          hpLabel: 'HP',
+          sanLabel: 'SAN',
           profile: {
             id: saved.id || crypto.randomUUID(),
-            name: saved.name || "玩家",
-            role: "player",
-            color: saved.color || "#7dd3fc",
+            name: saved.name || '玩家',
+            role: 'player',
+            color: saved.color || '#7dd3fc',
           },
           roomTokens: savedTokens.roomTokens || {},
           memberTokens: savedTokens.memberTokens || {},
-          newRoomName: "新的跑团房间",
-          joinCode: "",
-          chatText: "",
-          actionType: "mixed",
-          selectedCharacterIds: saved.characterIds || [],
+          joinCode: '',
+          chatText: '',
+          actionType: 'mixed',
+          selectedCharacterIds: Array.isArray(saved.characterIds) ? saved.characterIds : [],
           characterClaimBusy: false,
-          characterClaimMsg: "",
-          dice: {
-            expression: "1d100",
-            skill_name: "",
-            skill_value: null,
-            reason: "",
-            ask_ai: true,
-          },
-          scenario: {
-            title: "",
-            file: null,
-            busy: false,
-          },
-          drag: null,
+          characterClaimMsg: '',
         };
       },
       watch: {
-        profile: {
-          deep: true,
-          handler(value) {
-            value.role = "player";
-            value.characterIds = this.selectedCharacterIds;
-            localStorage.setItem("zric-mp-profile", JSON.stringify(value));
-          }
-        }
+        profile: { deep: true, handler() { this.saveProfile(); } },
+        selectedCharacterIds() { this.saveProfile(); }
       },
       computed: {
-        currentScene() {
-          return this.gameState?.current_scene || null;
-        },
-        currentRoom() {
-          return this.gameState?.current_room || null;
-        },
+        currentScene() { return this.gameState?.current_scene || null; },
+        currentRoom() { return this.gameState?.current_room || null; },
         sceneText() {
           const scene = this.currentScene || {};
-          return scene.expanded_content || this.gameState?.scene_ai_text || scene.content || "";
+          return scene.expanded_content || this.gameState?.scene_ai_text || scene.content || '';
         },
         sceneImage() {
           const scene = this.currentScene || {};
-          return this.gameState?.scene_image || scene.scene_image || "";
+          return this.gameState?.scene_image || scene.scene_image || '';
         },
-        visibleCharacters() {
-          return this.gameState?.characters || [];
-        },
+        allCharacters() { return this.gameState?.all_characters || this.gameState?.characters || []; },
+        visibleCharacters() { return this.gameState?.characters || this.allCharacters; },
         playableCharacters() {
-          return this.gameState?.playable_characters || this.visibleCharacters;
+          const listed = this.gameState?.playable_characters;
+          const base = Array.isArray(listed) && listed.length ? listed : this.visibleCharacters;
+          const active = base.filter(char => (char.status || 'active') !== 'hidden');
+          return active.length ? active : base;
         },
+        myClaims() {
+          const playerId = String(this.profile.id || '');
+          return this.characterClaims.filter(claim => String(claim.player_id || '') === playerId);
+        },
+        lockedCharacterIds() { return this.myClaims.map(claim => claim.character_id); },
+        hasLockedCharacters() { return this.lockedCharacterIds.length > 0; },
         selectedCharacters() {
-          return this.playableCharacters.filter(char => this.selectedCharacterIds.includes(char.id));
+          const sourceIds = this.hasLockedCharacters ? this.lockedCharacterIds : this.selectedCharacterIds;
+          const selectedIds = new Set(sourceIds.map(id => String(id)));
+          const sourceCharacters = this.hasLockedCharacters ? this.allCharacters : this.playableCharacters;
+          return sourceCharacters.filter(char => selectedIds.has(String(char.id)));
         },
-        selectedCharacterNames() {
-          return this.selectedCharacters.map(char => char.name);
+        selectedCharacterNames() { return this.selectedCharacters.map(char => char.name); },
+        visibleStatusCharacters() { return this.selectedCharacters.length ? this.selectedCharacters : this.playableCharacters; },
+        actorName() { return this.selectedCharacterNames.join(' / ') || this.profile.name || '玩家'; },
+        maxPlayers() {
+          return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
         },
-        actorName() {
-          return this.selectedCharacterNames.join("/") || this.profile.name;
+        claimedPlayerCount() {
+          return Number(this.room?.claimed_player_count || 0);
+        },
+        playerSlotsRemaining() {
+          const remaining = Number(this.room?.player_slots_remaining);
+          if (Number.isFinite(remaining)) return Math.max(0, remaining);
+          return Math.max(0, this.maxPlayers - this.claimedPlayerCount);
+        },
+        roomFullForNewPlayer() {
+          return !!this.room && !this.hasLockedCharacters && this.playerSlotsRemaining <= 0;
+        },
+        roomSeatLabel() {
+          if (this.hasLockedCharacters) return '你已入座';
+          return this.playerSlotsRemaining > 0 ? `剩余 ${this.playerSlotsRemaining} 席` : '席位已满';
+        },
+        roomSeatTone() {
+          if (this.hasLockedCharacters) return 'var(--good)';
+          return this.playerSlotsRemaining > 0 ? 'var(--good)' : 'var(--bad)';
+        },
+        claimButtonDisabled() {
+          return !this.selectedCharacterIds.length || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer;
+        },
+        claimButtonText() {
+          if (this.hasLockedCharacters) return '角色已锁定';
+          if (this.characterClaimBusy) return '记录中';
+          if (this.roomFullForNewPlayer) return '席位已满';
+          return this.selectedCharacterIds.length ? '确认扮演 ' + this.selectedCharacterNames.join(' / ') : '选择角色后确认';
         }
       },
       async mounted() {
         const params = new URLSearchParams(location.search);
-        const urlRoomCode = (params.get("room") || params.get("code") || "").trim().toUpperCase();
+        const urlRoomCode = (params.get('room') || params.get('code') || '').trim().toUpperCase();
         if (urlRoomCode) this.joinCode = urlRoomCode;
-        await this.refreshRooms();
-        if (urlRoomCode) this.joinRoomByCode(urlRoomCode).catch(err => {
-          alert(err.message || "加入房间失败");
-        });
+        await this.fetchStatLabels();
+        if (urlRoomCode) {
+          this.joinRoomByCode(urlRoomCode).catch(err => { this.characterClaimMsg = err.message || '加入房间失败'; });
+        }
       },
       methods: {
-        async api(path, options = {}) {
-          const headers = options.body instanceof FormData ? {} : {"Content-Type": "application/json"};
-          const roomCode = this.room?.code || this.extractRoomCode(path);
-          if (roomCode && this.roomTokens[roomCode]) headers["X-Room-Token"] = this.roomTokens[roomCode];
-          if (roomCode && this.memberTokens[roomCode]) headers["X-Member-Token"] = this.memberTokens[roomCode];
-          const res = await fetch(path, {
-            headers,
-            ...options,
-          });
-          const data = await res.json();
-          if (!res.ok || data.status === "error") throw new Error(data.message || "请求失败");
-          return data;
-        },
-        extractRoomCode(path) {
-          const match = String(path || "").match(/\/api\/multiplayer\/rooms\/([^/?]+)/);
-          return match ? decodeURIComponent(match[1]) : "";
+        saveProfile() {
+          this.profile.role = 'player';
+          localStorage.setItem('zric-mp-profile', JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
         },
         saveRoomTokens() {
-          localStorage.setItem("zric-mp-tokens", JSON.stringify({
-            roomTokens: this.roomTokens,
-            memberTokens: this.memberTokens,
-          }));
+          localStorage.setItem('zric-mp-tokens', JSON.stringify({ roomTokens: this.roomTokens, memberTokens: this.memberTokens }));
         },
-        async refreshRooms() {
-          const data = await this.api("/api/multiplayer/rooms");
-          this.rooms = data.rooms || [];
+        extractRoomCode(path) {
+          const match = String(path || '').match(/\/api\/multiplayer\/rooms\/([^/?]+)/);
+          return match ? decodeURIComponent(match[1]) : '';
         },
-        async createRoom() {
-          const data = await this.api("/api/multiplayer/rooms", {
-            method: "POST",
-            body: JSON.stringify({ name: this.newRoomName || "新的跑团房间", gm_name: this.profile.name }),
-          });
-          if (data.room?.code && data.room_token) {
-            this.roomTokens[data.room.code] = data.room_token;
-            this.saveRoomTokens();
+        async api(path, options = {}) {
+          const jsonBody = !(options.body instanceof FormData);
+          const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
+          const roomCode = this.room?.code || this.extractRoomCode(path);
+          if (roomCode && this.roomTokens[roomCode]) headers['X-Room-Token'] = this.roomTokens[roomCode];
+          if (roomCode && this.memberTokens[roomCode]) headers['X-Member-Token'] = this.memberTokens[roomCode];
+          const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '请求失败');
+          return data;
+        },
+        async fetchStatLabels() {
+          try {
+            const res = await fetch(`${API_BASE_URL}/api/game/stat-labels`);
+            const data = await res.json();
+            this.hpLabel = data.hp_label || 'HP';
+            this.sanLabel = data.san_label || 'SAN';
+          } catch (_) {}
+        },
+        async joinRoomByCode(code, roleOverride = '') {
+          const roomCode = String(code || '').trim().toUpperCase();
+          if (!roomCode) return;
+          this.joinBusy = true;
+          this.characterClaimMsg = '';
+          this.saveProfile();
+          try {
+            const data = await this.api(`/api/multiplayer/rooms/${encodeURIComponent(roomCode)}/join`, {
+              method: 'POST',
+              body: JSON.stringify({
+                player_id: this.profile.id,
+                display_name: this.profile.name,
+                role: roleOverride || 'player',
+                color: this.profile.color,
+              }),
+            });
+            if (data.room?.code && data.member_token) {
+              this.memberTokens[data.room.code] = data.member_token;
+              this.saveRoomTokens();
+            }
+            this.applySnapshot(data);
+            this.connectWs();
+          } finally {
+            this.joinBusy = false;
           }
-          this.applySnapshot(data);
-          await this.joinRoomByCode(data.room.code, "gm");
-          this.refreshRooms();
-        },
-        async joinRoomByCode(code, roleOverride = "") {
-          if (!code) return;
-          const data = await this.api(`/api/multiplayer/rooms/${encodeURIComponent(code)}/join`, {
-            method: "POST",
-            body: JSON.stringify({
-              player_id: this.profile.id,
-              display_name: this.profile.name,
-              role: roleOverride || this.profile.role,
-              color: this.profile.color,
-            }),
-          });
-          if (data.room?.code && data.member_token) {
-            this.memberTokens[data.room.code] = data.member_token;
-            this.saveRoomTokens();
-          }
-          this.applySnapshot(data);
-          this.connectWs();
         },
         applySnapshot(data) {
           this.room = data.room || this.room;
           this.gameState = data.game_state || this.gameState || {};
           this.members = data.members || this.members;
           this.messages = data.messages || this.messages;
-          this.tokens = data.tokens || this.tokens;
-          this.documents = data.documents || this.documents;
+          this.characterClaims = data.character_claims || this.gameState.character_claims || this.characterClaims || [];
           this.joinCode = this.room ? this.room.code : this.joinCode;
+          if (this.hasLockedCharacters) this.selectedCharacterIds = [...this.lockedCharacterIds];
+          this.pruneSelectedCharacters();
           this.scrollMessages();
         },
+        pruneSelectedCharacters() {
+          const base = this.hasLockedCharacters ? this.allCharacters : this.playableCharacters;
+          if (!base.length) return;
+          const ids = new Set(base.map(char => String(char.id)));
+          this.selectedCharacterIds = this.selectedCharacterIds.filter(id => ids.has(String(id)));
+        },
         connectWs() {
-          if (!this.room) return;
+          if (!this.room || !window.location.protocol.startsWith('http')) return;
           if (this.ws) this.ws.close();
-          const params = new URLSearchParams({
-            player_id: this.profile.id,
-            name: this.profile.name,
-            role: this.profile.role,
-          });
-          if (this.memberTokens[this.room.code]) params.set("member_token", this.memberTokens[this.room.code]);
-          const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/rooms/${this.room.code}?${params}`;
+          const params = new URLSearchParams({ player_id: this.profile.id, name: this.profile.name, role: 'player' });
+          if (this.memberTokens[this.room.code]) params.set('member_token', this.memberTokens[this.room.code]);
+          const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/rooms/${this.room.code}?${params}`;
           this.ws = new WebSocket(wsUrl);
           this.ws.onopen = () => { this.wsConnected = true; };
           this.ws.onclose = () => { this.wsConnected = false; };
           this.ws.onerror = () => { this.wsConnected = false; };
-          this.ws.onmessage = (event) => this.handleEvent(JSON.parse(event.data));
+          this.ws.onmessage = event => this.handleEvent(JSON.parse(event.data));
         },
         handleEvent(evt) {
           if (evt.member_token && evt.room?.code) {
             this.memberTokens[evt.room.code] = evt.member_token;
             this.saveRoomTokens();
           }
-          if (evt.type === "snapshot") {
-            this.applySnapshot(evt);
-          } else if (evt.type === "message.created") {
-            if (!this.messages.some(m => m.id === evt.message.id)) this.messages.push(evt.message);
+          if (evt.type === 'snapshot') this.applySnapshot(evt);
+          else if (evt.type === 'message.created') {
+            if (!this.messages.some(msg => msg.id === evt.message.id)) this.messages.push(evt.message);
             this.scrollMessages();
-          } else if (evt.type === "game.state") {
+          } else if (evt.type === 'game.state') {
             this.gameState = evt.game_state || this.gameState || {};
-          } else if (evt.type === "member.updated") {
+            this.characterClaims = this.gameState.character_claims || this.characterClaims || [];
+            if (this.hasLockedCharacters) this.selectedCharacterIds = [...this.lockedCharacterIds];
+            this.pruneSelectedCharacters();
+          } else if (evt.type === 'member.updated') {
             const index = this.members.findIndex(m => m.player_id === evt.member.player_id);
             if (index >= 0) this.members.splice(index, 1, evt.member);
             else this.members.push(evt.member);
-          } else if (evt.type === "member.left") {
-            const m = this.members.find(x => x.player_id === evt.player_id);
-            if (m) m.connected = 0;
-          } else if (evt.type === "token.updated") {
-            const index = this.tokens.findIndex(t => t.token_id === evt.token.token_id);
-            if (index >= 0) this.tokens.splice(index, 1, evt.token);
-            else this.tokens.push(evt.token);
-          } else if (evt.type === "room.updated") {
+          } else if (evt.type === 'member.left') {
+            const member = this.members.find(m => m.player_id === evt.player_id);
+            if (member) member.connected = 0;
+          } else if (evt.type === 'room.updated') {
             this.applySnapshot(evt.snapshot);
           }
         },
-        statusLabel(status) {
-          return ({ active: "在场", hidden: "未登场", benched: "暂离", dead: "死亡" })[status || "active"] || status || "在场";
-        },
         toggleCharacter(id) {
-          if (this.selectedCharacterIds.includes(id)) {
-            this.selectedCharacterIds = this.selectedCharacterIds.filter(x => x !== id);
-          } else {
-            this.selectedCharacterIds = [...this.selectedCharacterIds, id];
-          }
-          localStorage.setItem("zric-mp-profile", JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
+          const idKey = String(id);
+          const char = this.playableCharacters.find(item => String(item.id) === idKey);
+          if (!char || this.isCharacterDisabled(char)) return;
+          this.selectedCharacterIds = this.isCharacterSelected(id)
+            ? this.selectedCharacterIds.filter(x => String(x) !== idKey)
+            : [...this.selectedCharacterIds, id];
+        },
+        isCharacterSelected(id) {
+          const idKey = String(id);
+          return this.selectedCharacterIds.some(selectedId => String(selectedId) === idKey);
+        },
+        clearCharacters() {
+          if (this.hasLockedCharacters) return;
+          this.selectedCharacterIds = [];
+          this.characterClaimMsg = '';
         },
         async claimCharacters() {
-          if (!this.room || !this.selectedCharacterIds.length) return;
+          if (!this.room || !this.selectedCharacterIds.length || this.hasLockedCharacters || this.roomFullForNewPlayer) return;
           this.characterClaimBusy = true;
-          this.characterClaimMsg = "";
+          this.characterClaimMsg = '';
           try {
             const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/characters/claim`, {
-              method: "POST",
-              body: JSON.stringify({
-                player_id: this.profile.id,
-                character_ids: this.selectedCharacterIds,
-              }),
+              method: 'POST',
+              body: JSON.stringify({ player_id: this.profile.id, character_ids: this.selectedCharacterIds }),
             });
             this.applySnapshot(data);
-            this.characterClaimMsg = "角色已确认，AI-KP 会按你的行动推进剧情。";
+            this.characterClaimMsg = '角色已确认';
           } catch (err) {
-            this.characterClaimMsg = err.message || "角色确认失败";
+            this.characterClaimMsg = err.message || '角色确认失败';
           } finally {
             this.characterClaimBusy = false;
           }
         },
-        sendChat() {
+        claimForCharacter(char) {
+          const charId = String(char?.id ?? '');
+          return this.characterClaims.find(claim => String(claim.character_id) === charId) || null;
+        },
+        isOwnClaim(char) {
+          const claim = this.claimForCharacter(char);
+          return !!claim && String(claim.player_id || '') === String(this.profile.id || '');
+        },
+        isClaimedByOther(char) {
+          const claim = this.claimForCharacter(char);
+          return !!claim && String(claim.player_id || '') !== String(this.profile.id || '');
+        },
+        isCharacterDisabled(char) {
+          return this.isClaimedByOther(char) || this.roomFullForNewPlayer || (this.hasLockedCharacters && !this.isOwnClaim(char));
+        },
+        characterClaimLabel(char) {
+          if (this.isOwnClaim(char)) return '已锁定';
+          const claim = this.claimForCharacter(char);
+          return claim ? '已占用' : '';
+        },
+        characterClaimLine(char) {
+          const claim = this.claimForCharacter(char);
+          if (!claim) return '';
+          return String(claim.player_id || '') === String(this.profile.id || '') ? '你已确认扮演该角色' : `已由 ${claim.display_name || '其他玩家'} 扮演`;
+        },
+        useOptionAsAction(text) { this.chatText = text || this.chatText; },
+        async sendChat() {
           const content = this.chatText.trim();
-          if (!content || !this.room) return;
-          if (this.wsConnected) {
-            this.ws.send(JSON.stringify({ type: "chat.send", content }));
-          } else {
-            this.api(`/api/multiplayer/rooms/${this.room.code}/messages`, {
-              method: "POST",
-              body: JSON.stringify({
-                sender_id: this.profile.id,
-                sender_name: this.actorName,
-                content,
-              }),
-            }).then(data => {
-              if (data.message) this.messages.push(data.message);
-            });
+          if (!content || !this.room || !this.hasLockedCharacters) return;
+          if (/^[./!！。]?r(oll)?\s*\d/i.test(content)) {
+            await this.rollDice(content);
+            this.chatText = '';
+            return;
           }
-          this.chatText = "";
+          if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'chat.send', content }));
+          else {
+            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/messages`, {
+              method: 'POST',
+              body: JSON.stringify({ sender_id: this.profile.id, sender_name: this.actorName, content }),
+            });
+            if (data.message && !this.messages.some(msg => msg.id === data.message.id)) this.messages.push(data.message);
+            this.scrollMessages();
+          }
+          this.chatText = '';
         },
         async submitAction() {
           const action = this.chatText.trim();
-          if (!action || !this.room) return;
-          const payload = {
-            action,
-            action_type: this.actionType || "mixed",
-            context: this.sceneText || "",
-            actor_name: this.actorName,
-          };
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: "player.action", payload }));
-          else {
-            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/action`, {
-              method: "POST",
-              body: JSON.stringify({
-                actor_id: this.profile.id,
-                actor_name: this.actorName,
-                ...payload,
-              }),
-            });
-            if (data.message && !this.messages.some(m => m.id === data.message.id)) this.messages.push(data.message);
-            if (data.ai_message && !this.messages.some(m => m.id === data.ai_message.id)) this.messages.push(data.ai_message);
-            if (data.state_message && !this.messages.some(m => m.id === data.state_message.id)) this.messages.push(data.state_message);
-            if (data.game_state) this.gameState = data.game_state;
-            this.scrollMessages();
-          }
-          this.chatText = "";
-        },
-        async rollDice() {
-          if (!this.room) return;
-          const payload = {
-            ...this.dice,
-            actor_id: this.profile.id,
-            actor_name: this.actorName,
-            skill_value: this.dice.skill_value === "" ? null : this.dice.skill_value,
-            context: this.sceneText || "",
-          };
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: "dice.roll", payload }));
-          else await this.api(`/api/multiplayer/rooms/${this.room.code}/dice`, { method: "POST", body: JSON.stringify(payload) });
-        },
-        async uploadScenario() {
-          if (!this.room || !this.scenario.file) return;
-          this.scenario.busy = true;
+          if (!action || !this.room || !this.hasLockedCharacters || this.actionBusy) return;
+          this.actionBusy = true;
+          const payload = { action, action_type: this.actionType || 'mixed', context: this.sceneText || '', actor_name: this.actorName };
           try {
-            const fd = new FormData();
-            fd.append("file", this.scenario.file);
-            fd.append("title", this.scenario.title || this.scenario.file.name);
-            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/scenario/upload`, { method: "POST", body: fd });
-            if (data.message) this.messages.push(data.message);
-            this.scenario.file = null;
-            this.scenario.title = "";
+            if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'player.action', payload }));
+            else {
+              const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/action`, {
+                method: 'POST',
+                body: JSON.stringify({ actor_id: this.profile.id, actor_name: this.actorName, ...payload }),
+              });
+              [data.message, data.ai_message, data.state_message].filter(Boolean).forEach(message => {
+                if (!this.messages.some(msg => msg.id === message.id)) this.messages.push(message);
+              });
+              if (data.game_state) this.gameState = data.game_state;
+              this.scrollMessages();
+            }
+            this.chatText = '';
           } finally {
-            this.scenario.busy = false;
+            this.actionBusy = false;
           }
         },
-        async uploadMap(event) {
-          const file = event.target.files[0];
-          if (!this.room || !file) return;
-          const fd = new FormData();
-          fd.append("file", file);
-          const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/map/background`, { method: "POST", body: fd });
-          this.applySnapshot(data);
-          event.target.value = "";
+        async rollDice(rawExpression) {
+          if (!this.room || !this.hasLockedCharacters) return;
+          const expression = String(rawExpression || '1d100').replace(/^[./!！。]?r(oll)?\s*/i, '').trim() || '1d100';
+          const payload = { expression, actor_id: this.profile.id, actor_name: this.actorName, context: this.sceneText || '', ask_ai: true };
+          if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'dice.roll', payload }));
+          else await this.api(`/api/multiplayer/rooms/${this.room.code}/dice`, { method: 'POST', body: JSON.stringify(payload) });
         },
-        async addOwnToken() {
-          if (!this.room) return;
-          const payload = {
-            token_id: `token_${this.profile.id}`,
-            name: this.profile.name,
-            kind: this.profile.role === "gm" ? "gm" : "pc",
-            owner_id: this.profile.id,
-            color: this.profile.color || "#7dd3fc",
-            x: 180 + this.tokens.length * 34,
-            y: 180 + this.tokens.length * 22,
-          };
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: "token.upsert", payload }));
-          else {
-            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/tokens`, { method: "POST", body: JSON.stringify(payload) });
-            const index = this.tokens.findIndex(t => t.token_id === data.token.token_id);
-            if (index >= 0) this.tokens.splice(index, 1, data.token);
-            else this.tokens.push(data.token);
-          }
-        },
-        tokenStyle(token) {
-          return {
-            left: `${token.x}px`,
-            top: `${token.y}px`,
-            width: `${token.size}px`,
-            height: `${token.size}px`,
-            color: token.color || "#f59e0b",
-          };
-        },
-        dragStart(token, event) {
-          this.drag = {
-            token,
-            pointerId: event.pointerId,
-            startX: event.clientX,
-            startY: event.clientY,
-            x: token.x,
-            y: token.y,
-          };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        },
-        dragMove(event) {
-          if (!this.drag) return;
-          const token = this.tokens.find(t => t.token_id === this.drag.token.token_id);
-          if (!token) return;
-          token.x = Math.max(20, this.drag.x + event.clientX - this.drag.startX);
-          token.y = Math.max(20, this.drag.y + event.clientY - this.drag.startY);
-        },
-        dragEnd() {
-          if (!this.drag || !this.room) return;
-          const token = this.tokens.find(t => t.token_id === this.drag.token.token_id);
-          this.drag = null;
-          if (!token) return;
-          const payload = { token_id: token.token_id, x: token.x, y: token.y };
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: "token.move", payload }));
-          else this.api(`/api/multiplayer/rooms/${this.room.code}/tokens/${token.token_id}/move`, { method: "PUT", body: JSON.stringify(payload) });
-        },
-        focusToken(token) {
-          token.x = Math.max(80, token.x);
-          token.y = Math.max(80, token.y);
+        statusLabel(status) { return ({ active: '在场', hidden: '未登场', benched: '暂离', dead: '死亡' })[status || 'active'] || status || '在场'; },
+        messageKindLabel(kind) { return ({ action: '行动', ai: 'AI-GM', dice: '骰子', state: '状态', system: '系统', chat: '公屏' })[kind] || kind || '消息'; },
+        shortTime(value) {
+          const text = String(value || '');
+          const match = text.match(/(\d{2}:\d{2})(?::\d{2})?/);
+          return match ? match[1] : text;
         },
         scrollMessages() {
           nextTick(() => {
@@ -986,7 +624,7 @@
           });
         },
       }
-    }).mount("#app");
+    }).mount('#app');
   </script>
 </body>
 </html>

@@ -2,11 +2,19 @@
 setlocal EnableExtensions
 
 cd /d "%~dp0"
+set "ROOT_DIR=%CD%"
+set "RUNTIME_DIR=%ROOT_DIR%\.runtime"
+set "PID_FILE=%RUNTIME_DIR%\trpg_engine.pid"
+set "RUNNER=%ROOT_DIR%\scripts\windows_run_server.ps1"
 
 echo =====================================================
 echo  Z.R.I.C TRPG Engine - one-click launcher
 echo =====================================================
 echo.
+
+if not exist "%RUNTIME_DIR%" (
+    mkdir "%RUNTIME_DIR%"
+)
 
 where py >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -55,7 +63,7 @@ echo      GM console: http://127.0.0.1:8000/
 echo      Press Ctrl+C in this window to stop the server.
 echo.
 
-".venv\Scripts\python.exe" main.py
+powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNNER%" -PythonPath "%ROOT_DIR%\.venv\Scripts\python.exe" -ScriptPath "%ROOT_DIR%\main.py" -WorkingDirectory "%ROOT_DIR%" -PidFile "%PID_FILE%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

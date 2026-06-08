@@ -221,211 +221,19 @@ PERSONA_CONFIG = _load_persona_config()
 # ---------------------------------------------------------
 # 数据库初始化
 # ---------------------------------------------------------
-from contextlib import contextmanager
 from .logger import get_logger
+from .database import (
+    configure_database,
+    get_db_connection,
+    safe_db,
+    init_db as init_core_db,
+)
+from .campaign_import_workflow import CampaignImportWorkflow, ImportAsset
 
 _log = get_logger("main")
 
-def get_db_connection():
-    """
-    创建 SQLite 连接。
-    - WAL 模式：允许并发读不阻塞写，大幅减少 'database is locked' 错误
-    - timeout=10：写锁等待最多 10 秒（默认 5 秒经常在后台线程并发时不够用）
-    """
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    return conn
-
-
-@contextmanager
-def safe_db():
-    """
-    安全的数据库连接 context manager。
-    用法：
-        with safe_db() as conn:
-            conn.execute(...)
-    保证连接在正常退出和异常时都会关闭，且异常时自动回滚。
-    """
-    conn = get_db_connection()
-    try:
-        yield conn
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, summary TEXT, content TEXT, scene_image TEXT DEFAULT '')''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS options (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER, text TEXT, next_node_id INTEGER)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, role TEXT, hp INTEGER, san INTEGER, inventory TEXT DEFAULT '', status TEXT DEFAULT 'active')''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT)''')
-    
-    # 【新增】：百科库数据表
-    cursor.execute('''CREATE TABLE IF NOT EXISTS lorebook (id INTEGER PRIMARY KEY AUTOINCREMENT, keywords TEXT, content TEXT)''')
-
-    # 【关键节点触发器表】
-    cursor.execute('''CREATE TABLE IF NOT EXISTS triggers (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        label       TEXT    NOT NULL DEFAULT '未命名触发器',
-        target_node_id INTEGER NOT NULL,
-        mode        TEXT    NOT NULL DEFAULT 'soft',
-        cond_type   TEXT    NOT NULL DEFAULT '',
-        cond_value  TEXT    NOT NULL DEFAULT '',
-        conditions  TEXT    NOT NULL DEFAULT '[]',
-        fired       INTEGER NOT NULL DEFAULT 0
-    )''')
-    # 兼容旧数据库：若 triggers 表缺少 conditions 列则自动添加
-    try:
-        cursor.execute("SELECT conditions FROM triggers LIMIT 1")
-    except Exception:
-        cursor.execute("ALTER TABLE triggers ADD COLUMN conditions TEXT NOT NULL DEFAULT '[]'")
-
-    # 【多时间线并行】：时间线表
-    cursor.execute('''CREATE TABLE IF NOT EXISTS timelines (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        label           TEXT    NOT NULL DEFAULT '时间线',
-        color           TEXT    NOT NULL DEFAULT '#5b9cf5',
-        current_node_id INTEGER,
-        current_room_id INTEGER,
-        memory          TEXT    NOT NULL DEFAULT '',
-        char_ids        TEXT    NOT NULL DEFAULT '',
-        status          TEXT    NOT NULL DEFAULT 'active',
-        created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-    )''')
-
-    # 【世界实体注册表】：跨时间线共享的可变世界状态
-    # 这是解决"同一NPC在不同时间线重复出现"问题的核心层
-    # entity_type: npc | location | event
-    # status:      active（正常）| dead（死亡）| moved（已离场）| resolved（事件结束）
-    # last_seen_by: 最后接触该实体的时间线标签，供AI理解"谁知道这件事"
-    cursor.execute('''CREATE TABLE IF NOT EXISTS world_entities (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type  TEXT NOT NULL DEFAULT 'npc',
-        name         TEXT NOT NULL UNIQUE,
-        location     TEXT NOT NULL DEFAULT '',
-        status       TEXT NOT NULL DEFAULT 'active',
-        last_seen_by TEXT NOT NULL DEFAULT '',
-        state_desc   TEXT NOT NULL DEFAULT '',
-        updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-        room_id      INTEGER
-    )''')
-
-    # 【本地 RAG 知识库】：由独立模块 rag.py 管理
-    init_rag_tables()
-
-    # 【三级记忆系统 - L1 短期工作区】
-    # 保存最近 N 次推演的完整上下文快照（场景名、玩家动作、AI结果摘要、思考过程）
-    # 每条记录对应一次推演，按时间排序，超限时最旧的记录被淘汰到 L3
-    cursor.execute('''CREATE TABLE IF NOT EXISTS memory_l1 (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        scene_name  TEXT    NOT NULL DEFAULT '',
-        player_action TEXT  NOT NULL DEFAULT '',
-        ai_summary  TEXT    NOT NULL DEFAULT '',
-        thought_process TEXT NOT NULL DEFAULT '',
-        entity_updates TEXT NOT NULL DEFAULT '',
-        created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-    )''')
-    # 迁移：为旧库补充 timeline_id 列（已有列时静默跳过）
-    try:
-        cursor.execute("ALTER TABLE memory_l1 ADD COLUMN timeline_id INTEGER DEFAULT NULL")
-    except Exception:
-        pass
-
-    # 【待执行副作用表】：AI 推演 Phase 1 写入，玩家选择分支后 Phase 2 执行
-    # 替代原来塞在 nodes.summary 中的 __FX__ 机制，避免 GM 手动编辑节点时损坏数据
-    cursor.execute('''CREATE TABLE IF NOT EXISTS pending_effects (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        node_id     INTEGER NOT NULL UNIQUE,
-        payload     TEXT    NOT NULL DEFAULT '{}',
-        created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-        FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
-    )''')
-
-    # 【地图系统】：由独立模块 map.py 管理
-    init_map_tables()
-
-    # 平滑升级：如果旧数据库没有 inventory 字段，尝试加上去
-    try: cursor.execute("ALTER TABLE characters ADD COLUMN inventory TEXT DEFAULT ''")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：characters 加 status 字段
-    try: cursor.execute("ALTER TABLE characters ADD COLUMN status TEXT DEFAULT 'active'")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：characters 加 personality 字段（与 inventory 解耦）
-    try: cursor.execute("ALTER TABLE characters ADD COLUMN personality TEXT DEFAULT ''")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：旧 map_rooms 表加 floor 字段
-    try: cursor.execute("ALTER TABLE map_rooms ADD COLUMN floor INTEGER NOT NULL DEFAULT 1")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：world_entities 加 room_id（实体坐标化）
-    try: cursor.execute("ALTER TABLE world_entities ADD COLUMN room_id INTEGER")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：world_entities 加 aliases（别名/描述词列表，用于同一实体多名称匹配）
-    try: cursor.execute("ALTER TABLE world_entities ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：timelines 加 current_room_id（时间线坐标）
-    try: cursor.execute("ALTER TABLE timelines ADD COLUMN current_room_id INTEGER")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：nodes 加 expanded_content 字段（AI扩写叙事持久化）
-    try: cursor.execute("ALTER TABLE nodes ADD COLUMN expanded_content TEXT DEFAULT ''")
-    except sqlite3.OperationalError: pass
-    # 平滑升级：nodes 加 scene_image 字段（导入剧本或手动资源关联的场景图）
-    try: cursor.execute("ALTER TABLE nodes ADD COLUMN scene_image TEXT DEFAULT ''")
-    except sqlite3.OperationalError: pass
-
-    # 【手机聊天记录】：NPC 私聊消息持久化
-    cursor.execute('''CREATE TABLE IF NOT EXISTS npc_chat_logs (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        npc_name   TEXT    NOT NULL,
-        sender     TEXT    NOT NULL CHECK(sender IN ('player','npc')),
-        message    TEXT    NOT NULL,
-        created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-    )''')
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_npc_chat_npc ON npc_chat_logs(npc_name)")
-    try: cursor.execute("ALTER TABLE npc_chat_logs ADD COLUMN created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))")
-    except sqlite3.OperationalError: pass
-
-    # 【时间回溯】：游戏状态快照表，保留最近10条
-    cursor.execute('''CREATE TABLE IF NOT EXISTS game_checkpoints (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_node_id INTEGER NOT NULL,
-        snapshot     TEXT    NOT NULL,
-        created_at   TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-    )''')
-
-    # 【战报史册】：永久记录玩家经过的每个场景快照（不参与折叠/淘汰）
-    # 用于 export-battle-report 增量式生成：每次只读 id > last_chronicle_position 的新条目
-    cursor.execute('''CREATE TABLE IF NOT EXISTS chronicle_log (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        scene_id          INTEGER NOT NULL DEFAULT 0,
-        scene_name        TEXT    NOT NULL DEFAULT '',
-        scene_content     TEXT    NOT NULL DEFAULT '',
-        expanded_content  TEXT    NOT NULL DEFAULT '',
-        player_action     TEXT    NOT NULL DEFAULT '',
-        created_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-    )''')
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chronicle_scene ON chronicle_log(scene_id)")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('last_chronicle_position', '0')")
-
-    # 初始化本地剧情记忆流字段
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('session_memory', '【跑团记忆日志已初始化】\n')")
-    # 投屏端同步状态
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_current_scene_id', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_image', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_prompt', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_ai_text', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_bgm_url', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_bgm_name', '')")
-
-    conn.commit()
-    conn.close()
-
-init_db()
+configure_database(DB_FILE)
+init_core_db(init_map_tables=init_map_tables, init_rag_tables=init_rag_tables)
 init_multiplayer_tables()
 
 # ---------------------------------------------------------
@@ -518,27 +326,28 @@ class TimelineDynamicRequest(BaseModel):
 #   *.json               ← 兼容旧版单文件存档（平铺在 BASE_DIR 下）
 # ---------------------------------------------------------
 
+def _is_legacy_campaign_file(path: str) -> bool:
+    """Only accept root-level JSON files that look like old campaign saves."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return isinstance(data.get("nodes"), list)
+
+
 @app.get("/api/campaigns")
 def list_campaigns():
     """列出所有可加载的剧本（兼容旧版单文件 + 新版文件夹结构）"""
     results = []
 
-    def is_legacy_campaign_file(path: str) -> bool:
-        """Only expose root-level JSON files that look like old campaign saves."""
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return False
-        if not isinstance(data, dict):
-            return False
-        return isinstance(data.get("nodes"), list)
-
     # 旧版：BASE_DIR 下的 *.json（向后兼容）
     for f in glob.glob(os.path.join(BASE_DIR, "*.json")):
         fname = os.path.basename(f)
         if fname.startswith("persona_mode"): continue
-        if not is_legacy_campaign_file(f): continue
+        if not _is_legacy_campaign_file(f): continue
         results.append({"name": fname, "type": "legacy", "path": fname})
 
     # 新版：campaigns/ 下的子文件夹（含 campaign.json）
@@ -564,6 +373,38 @@ def list_campaigns():
     # 向后兼容：同时返回旧版字符串数组格式（供未升级的前端使用）
     files_legacy = [r["path"] for r in results]
     return {"status": "success", "files": results, "files_legacy": files_legacy}
+
+
+def _resolve_campaign_load_target(filename: str) -> tuple[str, bool, str, str | None, str | None]:
+    requested = (filename or "").strip().replace("\\", "/")
+    if not requested or os.path.isabs(requested) or "\x00" in requested:
+        raise fastapi.HTTPException(status_code=400, detail="非法剧本路径")
+    parts = [part for part in requested.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        raise fastapi.HTTPException(status_code=400, detail="非法剧本路径")
+
+    if parts[:1] == ["campaigns"]:
+        if len(parts) != 2:
+            raise fastapi.HTTPException(status_code=400, detail="仅支持 campaigns/<剧本名> 格式")
+        root = os.path.realpath(CAMPAIGNS_DIR)
+        target = os.path.realpath(os.path.join(root, parts[1]))
+        try:
+            if os.path.commonpath([root, target]) != root:
+                raise ValueError
+        except ValueError:
+            raise fastapi.HTTPException(status_code=400, detail="非法剧本路径") from None
+        campaign_path = os.path.join(target, "campaign.json")
+        return target, True, campaign_path, os.path.join(target, "map.json"), os.path.join(target, "knowledge")
+
+    if len(parts) != 1 or os.path.splitext(parts[0])[1].lower() != ".json":
+        raise fastapi.HTTPException(status_code=400, detail="仅支持根目录旧版 JSON 存档或 campaigns/<剧本名>")
+    root = os.path.realpath(BASE_DIR)
+    target = os.path.realpath(os.path.join(root, parts[0]))
+    if os.path.dirname(target) != root:
+        raise fastapi.HTTPException(status_code=400, detail="非法剧本路径")
+    if os.path.exists(target) and not _is_legacy_campaign_file(target):
+        raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
+    return target, False, target, None, None
 
 def _sanitize_campaign_name(name: str) -> str:
     cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "_", (name or "").strip())
@@ -839,6 +680,21 @@ def _ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[
         return _fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
 
 
+_campaign_import_workflow = CampaignImportWorkflow(
+    campaigns_dir=CAMPAIGNS_DIR,
+    sanitize_campaign_name=_sanitize_campaign_name,
+    sanitize_asset_name=_sanitize_asset_name,
+    unique_path=_unique_path,
+    campaign_asset_url=_campaign_asset_url,
+    decode_text_bytes=_decode_text_bytes,
+    extract_docx_text=_extract_docx_text,
+    extract_docx_images=_extract_docx_images,
+    extract_pdf=_extract_pdf,
+    ai_convert_campaign=_ai_convert_campaign,
+    logger=_log,
+)
+
+
 @app.get("/api/campaigns/import/formats")
 def campaign_import_formats():
     return {
@@ -870,70 +726,26 @@ async def import_campaign_from_document(
     if not raw:
         raise fastapi.HTTPException(status_code=400, detail="文件内容为空")
 
-    campaign_name = _sanitize_campaign_name(name or os.path.splitext(filename)[0])
-    folder_path = os.path.join(CAMPAIGNS_DIR, campaign_name)
-    if os.path.exists(folder_path):
-        campaign_name = f"{campaign_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        folder_path = os.path.join(CAMPAIGNS_DIR, campaign_name)
-    knowledge_dir = os.path.join(folder_path, "knowledge")
-    assets_dir = os.path.join(folder_path, "assets")
-    os.makedirs(knowledge_dir, exist_ok=True)
-    os.makedirs(assets_dir, exist_ok=True)
+    buffered_assets = [
+        ImportAsset(filename=asset.filename or "", data=await asset.read())
+        for asset in (assets or [])
+    ]
+    job = _campaign_import_workflow.create_job(
+        requested_name=name,
+        filename=filename,
+        suffix=suffix,
+        raw=raw,
+        assets=buffered_assets,
+    )
+    return {"status": "accepted", "job_id": job.id, "job": job.to_dict()}
 
-    warnings = []
-    extracted_assets: list[str] = []
-    try:
-        if suffix == ".pdf":
-            text, extracted_assets, pdf_warnings = _extract_pdf(raw, assets_dir)
-            warnings.extend(pdf_warnings)
-        elif suffix == ".docx":
-            text = _extract_docx_text(raw)
-            extracted_assets = _extract_docx_images(raw, assets_dir)
-        else:
-            text = _decode_text_bytes(raw)
-    except Exception:
-        shutil.rmtree(folder_path, ignore_errors=True)
-        raise
 
-    text = (text or "").strip()
-    if not text:
-        warnings.append("主文件未提取到正文，已生成空白保底剧本。")
-
-    for asset in assets or []:
-        asset_name = asset.filename or ""
-        ext = os.path.splitext(asset_name)[1].lower()
-        if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-            warnings.append(f"已跳过不支持的图片资源：{asset_name or '未命名文件'}")
-            continue
-        data = await asset.read()
-        if not data:
-            continue
-        safe = _sanitize_asset_name(asset_name)
-        target = _unique_path(assets_dir, safe)
-        with open(target, "wb") as f:
-            f.write(data)
-        extracted_assets.append(os.path.basename(target))
-
-    asset_urls = [_campaign_asset_url(campaign_name, a) for a in extracted_assets]
-    campaign_data, map_data, ai_warnings = _ai_convert_campaign(campaign_name, text, asset_urls)
-    warnings.extend(ai_warnings)
-
-    with open(os.path.join(knowledge_dir, "原始剧本文档.txt"), "w", encoding="utf-8") as f:
-        f.write(text or "原始文档未提取到文本。")
-    with open(os.path.join(folder_path, "campaign.json"), "w", encoding="utf-8") as f:
-        json.dump(campaign_data, f, ensure_ascii=False, indent=4)
-    with open(os.path.join(folder_path, "map.json"), "w", encoding="utf-8") as f:
-        json.dump(map_data, f, ensure_ascii=False, indent=4)
-
-    return {
-        "status": "success",
-        "campaign_path": f"campaigns/{campaign_name}",
-        "name": campaign_name,
-        "nodes_count": len(campaign_data.get("nodes", [])),
-        "map_rooms_count": len(map_data.get("map_rooms", [])),
-        "assets_count": len(extracted_assets),
-        "warnings": warnings,
-    }
+@app.get("/api/campaigns/import/{job_id}")
+def get_campaign_import_job(job_id: str):
+    job = _campaign_import_workflow.get_job(job_id)
+    if not job:
+        raise fastapi.HTTPException(status_code=404, detail="导入任务不存在或已过期")
+    return {"status": "success", "job": job}
 
 @app.post("/api/game/load")
 def load_campaign(req: LoadCampaignRequest):
@@ -943,18 +755,8 @@ def load_campaign(req: LoadCampaignRequest):
     2. 新版文件夹：req.filename = "campaigns/我的剧本"
        自动加载 campaign.json + map.json + knowledge/*.txt
     """
-    # 判断是文件夹还是单文件
-    target = os.path.join(BASE_DIR, req.filename)
-    is_folder = os.path.isdir(target) and os.path.exists(os.path.join(target, "campaign.json"))
-
-    if is_folder:
-        campaign_path = os.path.join(target, "campaign.json")
-        map_path = os.path.join(target, "map.json")
-        kb_dir = os.path.join(target, "knowledge")
-    else:
-        campaign_path = target
-        map_path = None
-        kb_dir = None
+    # 判断是文件夹还是单文件，并限制到可加载剧本白名单路径形态。
+    target, is_folder, campaign_path, map_path, kb_dir = _resolve_campaign_load_target(req.filename)
 
     if not os.path.exists(campaign_path):
         raise fastapi.HTTPException(status_code=404, detail=f"文件不存在: {campaign_path}")
@@ -962,6 +764,8 @@ def load_campaign(req: LoadCampaignRequest):
     try:
         with open(campaign_path, "r", encoding="utf-8") as f:
             config = json.load(f)
+        if not isinstance(config, dict) or not isinstance(config.get("nodes"), list):
+            raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -976,13 +780,23 @@ def load_campaign(req: LoadCampaignRequest):
                 cursor.execute(f"DELETE FROM {tbl}")
             except sqlite3.OperationalError:
                 pass   # 表不存在时静默跳过（旧存档兼容）
+        for sql in (
+            "DELETE FROM multiplayer_character_claims",
+            "DELETE FROM multiplayer_tokens WHERE kind='pc' OR linked_character_id IS NOT NULL",
+            "UPDATE multiplayer_rooms SET current_scene_id=NULL, current_room_id=NULL",
+        ):
+            try:
+                cursor.execute(sql)
+            except sqlite3.OperationalError:
+                pass   # 多人房间表尚未创建时兼容启动
 
         # 正确重置自增序列：只更新已存在行，不删整张表
         for tbl in ("nodes", "options", "characters", "lorebook",
                     "triggers", "timelines", "world_entities",
                     "map_rooms", "map_edges",
                     "rag_documents", "rag_chunks",
-                    "memory_l1", "pending_effects", "npc_chat_logs"):
+                    "memory_l1", "pending_effects", "npc_chat_logs",
+                    "multiplayer_character_claims"):
             try:
                 cursor.execute(
                     "UPDATE sqlite_sequence SET seq=0 WHERE name=?", (tbl,)
@@ -1456,7 +1270,16 @@ def get_game_state():
         worldview = wv_row["value"] if wv_row else ""
     for node in n:
         node["options"] = [opt for opt in o if opt["node_id"] == node["id"]]
-    return {"status": "success", "nodes": n, "characters": c, "worldview": worldview}
+    active_characters = [char for char in c if (char.get("status") or "active") != "hidden"]
+    playable_characters = active_characters or c
+    return {
+        "status": "success",
+        "nodes": n,
+        "characters": c,
+        "playable_characters": playable_characters,
+        "all_characters": c,
+        "worldview": worldview,
+    }
 
 @app.post("/api/game/character/{char_id}")
 def update_character(char_id: int, req: CharUpdateRequest):
@@ -2689,6 +2512,14 @@ class PlayerStateRequest(BaseModel):
     bgm_url:          str = ""
     bgm_name:         str = ""
 
+class GmControlEventRequest(BaseModel):
+    content: str
+    kind: str = "ai"
+    sender_name: str = "GM"
+    current_scene_id: int = 0
+    sync_player_state: bool = True
+    record_to_memory: bool = True
+
 class CheckpointRequest(BaseModel):
     from_node_id: int
 
@@ -2843,6 +2674,39 @@ async def push_player_state(req: PlayerStateRequest):
     # WebSocket 广播（异步，不阻塞响应）
     await _broadcast_player_state()
     return {"status": "success"}
+
+@app.post("/api/game/gm-event")
+async def publish_gm_control_event(req: GmControlEventRequest):
+    """GM 手动接管：把旁白/裁定同步到当前玩家视图，并写入主线记忆。"""
+    content = (req.content or "").strip()
+    if not content:
+        raise fastapi.HTTPException(status_code=400, detail="GM 事件内容不能为空")
+    kind = req.kind if req.kind in {"ai", "state", "system", "dice"} else "ai"
+    sender = (req.sender_name or "GM").strip()[:40]
+    with safe_db() as conn:
+        def _get(k):
+            row = conn.execute("SELECT value FROM system_state WHERE key=?", (k,)).fetchone()
+            return row["value"] if row else ""
+
+        scene_id = req.current_scene_id or 0
+        if not scene_id:
+            raw_scene_id = _get("player_current_scene_id")
+            scene_id = int(raw_scene_id) if raw_scene_id and raw_scene_id.isdigit() else 0
+        if req.sync_player_state:
+            scene_image = _get("player_scene_image")
+            if scene_id and not scene_image:
+                node = conn.execute("SELECT scene_image FROM nodes WHERE id=?", (scene_id,)).fetchone()
+                scene_image = (node["scene_image"] if node else "") or ""
+            conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_current_scene_id',?)", (str(scene_id),))
+            conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_scene_image',?)", (scene_image,))
+            conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_scene_ai_text',?)", (content,))
+        if req.record_to_memory:
+            append_to_memory(conn, f"[{sender}手动接管/{kind}] {content[:1000]}")
+        else:
+            conn.commit()
+    if req.sync_player_state:
+        await _broadcast_player_state()
+    return {"status": "success", "event": {"kind": kind, "sender_name": sender, "content": content}}
 
 @app.get("/api/campaign-assets/{campaign_name}/{asset_name:path}")
 def serve_campaign_asset(campaign_name: str, asset_name: str):

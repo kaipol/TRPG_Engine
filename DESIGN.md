@@ -3,7 +3,7 @@
 ## Source of truth
 - Status: Active
 - Last refreshed: 2026-06-08
-- Primary product surfaces: GM console, launch/config screen, multiplayer room flow, campaign loader.
+- Primary product surfaces: Player table, GM console, launch/config screen, multiplayer room flow, campaign loader.
 - Evidence reviewed: README.md, web/index.html, web/multiplayer.html, docs/multiplayer_integration.md, server/main.py, server/multiplayer.py.
 
 ## Brand
@@ -12,19 +12,19 @@
 - Avoid: Dense always-visible module bars, decorative controls, and settings exposed during active narration.
 
 ## Product goals
-- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players.
+- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players; keep solo and multiplayer play conceptually consistent as AI-GM plus player-controlled story characters.
 - Non-goals: Marketing landing pages, separate duplicate control surfaces, speech input/output.
-- Success signals: A GM can load a campaign, start a room, choose a model intentionally, and run scenes without scanning a crowded toolbar.
+- Success signals: A player can load a campaign, choose a role, and hand actions to AI-GM; a GM can still open the console, start a room, choose a model intentionally, and manage scenes without scanning a crowded toolbar.
 
 ## Personas and jobs
-- Primary personas: GM/KP running a session; remote players joining by room code.
-- User jobs: Prepare campaign data, narrate and branch scenes, manage entities/map/timeline when needed, share a live room.
-- Key contexts of use: Desktop GM screen during active play, occasionally shared over LAN or a reachable hosted URL.
+- Primary personas: Solo player choosing a script role; GM/KP managing a session; remote players joining by room code.
+- User jobs: Choose a role, submit character actions to AI-GM, prepare campaign data, manage entities/map/timeline when needed, share a live room.
+- Key contexts of use: Desktop player table during active play, GM console for advanced control, occasionally shared over LAN or a reachable hosted URL.
 
 ## Information architecture
-- Primary navigation: Launch screen for campaign/provider setup; game screen for play; settings drawer/modal for advanced management.
-- Core routes/screens: GM console at /, player display, phone display, multiplayer room table.
-- Content hierarchy: Scene content first; party/entity state second; advanced world data and automation behind settings.
+- Primary navigation: Launch screen for campaign/provider/setup and solo/multiplayer entry; player table for play; GM console and settings modal for advanced management.
+- Core routes/screens: Player-first console at /, GM console surface within /, player display, phone display, multiplayer room table.
+- Content hierarchy: Scene content and selected player roles first; party/entity state second; advanced world data and automation behind settings.
 
 ## Design principles
 - Principle 1: The top bar should answer only "where am I, what model is active, is the room live, can I save?"
@@ -41,7 +41,7 @@
 
 ## Components
 - Existing components to reuse: btn, inp, panel, tag, modal overlays, model picker menu.
-- New/changed components: Compact header model picker, game settings modal, multiplayer room strip.
+- New/changed components: Solo player table, role picker, compact header model picker, game settings modal, multiplayer room strip.
 - Variants and states: Connected/disconnected room, loading, empty model list, advanced settings collapsed.
 - Token/component ownership: Keep inline CSS patterns in web/index.html until the app is split into components.
 
@@ -66,8 +66,8 @@
 - Offline/slow network, if applicable: Room status should degrade to disconnected while keeping local play usable.
 
 ## Content voice
-- Tone: Direct operational Chinese labels for live GM use.
-- Terminology: Use "房间码" for multiplayer, "模型" for chat model, "高级设置" for hidden systems.
+- Tone: Direct operational Chinese labels for live play; player-facing surfaces should sound like play, not admin.
+- Terminology: Use "AI-GM" for the host role, "房间码" for multiplayer, "模型" for chat model, "GM 控制台" for advanced systems.
 - Microcopy rules: Avoid explaining obvious shortcuts in the main play surface.
 
 ## Implementation constraints
