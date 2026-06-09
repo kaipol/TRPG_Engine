@@ -154,7 +154,7 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 /* ── 场景卡 ── */
 .scene-content {
     font-family:"Noto Serif SC",serif; font-size:16px; line-height:1.9;
-    color:#d4d8e0; letter-spacing:.03em;
+    color:#d4d8e0; letter-spacing:.03em; white-space:pre-wrap; overflow-wrap:anywhere;
 }
 
 /* ── 角色卡 ── */
@@ -842,14 +842,13 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             </div>
                             <h1 style="font-family:'Noto Serif SC';font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin-bottom:16px">{{ currentNode.name }}</h1>
                             <div v-if="isExpandingBranch" style="position:relative">
-                                <p class="scene-content">{{ expandingBranchText || currentNode.content }}</p>
+                                <p class="scene-content">{{ expandingBranchText || soloSceneText }}</p>
                                 <div style="display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:6px 12px;background:rgba(232,180,75,.08);border:1px solid rgba(232,180,75,.2);border-radius:6px">
                                     <i class="ph ph-circle-notch" style="font-size:14px;animation:spin 1s linear infinite;color:#e8b44b"></i>
                                     <span style="font-size:12px;color:#e8b44b">AI-GM 正在铺陈场景</span>
                                 </div>
                             </div>
-                            <p v-else-if="currentNode.expanded_content" class="scene-content">{{ currentNode.expanded_content }}</p>
-                            <p v-else class="scene-content">{{ currentNode.content }}</p>
+                            <p v-else class="scene-content">{{ soloSceneText }}</p>
                             <div v-if="aiGeneratedText[currentNode.id]" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                                 <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px">
                                     <i class="ph ph-sparkle"></i> 追加细节
@@ -864,13 +863,13 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             <span class="tag" style="display:flex;align-items:center;gap:6px">
                                 <i class="ph ph-signpost" style="font-size:14px"></i> 可见行动方向
                             </span>
-                            <span v-if="!currentNode.options?.length" style="font-size:12px;color:#4b5563">等待自由行动</span>
+                            <span v-if="!soloVisibleOptions.length" style="font-size:12px;color:#4b5563">等待自由行动</span>
                         </div>
-                        <button v-for="(opt,i) in currentNode.options || []" :key="opt.id || opt.next_node_id"
-                                @click="jumpToNode(opt.next_node_id, opt.text)"
+                        <button v-for="(opt,i) in soloVisibleOptions" :key="opt.id || opt.next_node_id || i"
+                                @click="jumpToNode(opt.next_node_id, opt.action_text || opt.text)"
                                 class="option-btn">
                             <span class="opt-num">{{ String(i+1).padStart(2,'0') }}</span>
-                            <span style="flex:1">{{ opt.text }}</span>
+                            <span style="flex:1">{{ opt.visible_text || opt.text }}</span>
                             <span v-if="optionLikelihoods[opt.next_node_id]" style="font-size:10px;color:#6b7280;font-style:italic;font-family:'JetBrains Mono';flex-shrink:0;margin-left:6px">{{ optionLikelihoods[opt.next_node_id] }}</span>
                         </button>
                     </section>
@@ -6009,6 +6008,73 @@ createApp({
             if (soloSelectedCharacterIds.value.length) return soloSelectedCharacters.value;
             return soloPlayableCharacters.value;
         });
+        const compactText = (value, max = 220) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+        const characterSeed = (char, extra = '') => {
+            const source = `${char?.id || ''}|${char?.name || ''}|${char?.role || ''}|${char?.personality || ''}|${char?.inventory || ''}|${extra}`;
+            return Array.from(source).reduce((sum, ch, idx) => sum + ch.charCodeAt(0) * (idx + 1), 0);
+        };
+        const characterAngleLine = (char, extra = '') => {
+            const name = char?.name || '角色';
+            const role = char?.role || '角色';
+            const hooks = [
+                `${name}会先用「${role}」的专业/本能判断眼前风险。`,
+                `${name}更在意哪些细节会影响自己的秘密、目标或安全。`,
+                `${name}会从同伴的反应里寻找可以利用或必须警惕的信号。`,
+                `${name}会优先确认退路、资源，以及自己还能掌控的东西。`,
+                `${name}会把现场异常和自身经历联系起来，而不是只看表面。`,
+            ];
+            return hooks[characterSeed(char, extra) % hooks.length];
+        };
+        const characterPerspectiveOpening = (char, sceneName, publicText) => {
+            const base = compactText(publicText, 520) || '场景细节尚未完全展开，你只能先依靠自己的判断进入局面。';
+            if (!char) return base;
+            const details = [`${char.name || '角色'}，你以「${char.role || '角色'}」的身份进入「${sceneName || '开场'}」。`];
+            if (char.personality) details.push(`你的性格/背景提示：${compactText(char.personality, 160)}。`);
+            if (char.inventory) details.push(`你的随身/状态记录：${compactText(char.inventory, 160)}。`);
+            details.push(characterAngleLine(char, sceneName));
+            details.push(`从你的视角看，眼前的开场是：${base}`);
+            details.push('你可以用这个角色的口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
+            return details.join('\n');
+        };
+        const characterPerspectiveOptions = (char, options, sceneText = '') => {
+            const list = Array.isArray(options) ? options : [];
+            if (!char) return list.map(opt => ({ ...opt, visible_text: opt.text, action_text: opt.text }));
+            return list.map((opt, idx) => {
+                const rawText = compactText(opt?.text, 180) || '自由行动';
+                const role = char.role || '角色';
+                const name = char.name || '角色';
+                const lenses = [
+                    `以${role}的判断，先${rawText}`,
+                    `从${name}自己的处境出发，${rawText}`,
+                    `带着${role}的顾虑，尝试${rawText}`,
+                    `优先确认这对${name}意味着什么，再${rawText}`,
+                    `以${name}的个人目标为准，把现场线索和${role}判断联系起来，${rawText}`,
+                ];
+                const visibleText = lenses[(characterSeed(char, `${idx}|${rawText}|${sceneText}`) + idx) % lenses.length];
+                return {
+                    ...opt,
+                    visible_text: visibleText,
+                    action_text: `${name}（${role}）：${visibleText}`,
+                };
+            });
+        };
+        const soloPerspectiveCharacter = computed(() => {
+            if (soloHasConfirmedCharacters.value) return soloConfirmedCharacters.value[0] || null;
+            return soloSelectedCharacters.value[0] || null;
+        });
+        const soloPublicSceneText = computed(() => {
+            const node = currentNode.value || {};
+            return node.expanded_content || node.content || '';
+        });
+        const soloSceneText = computed(() => {
+            if (!soloHasConfirmedCharacters.value) return compactText(soloPublicSceneText.value, 520);
+            return characterPerspectiveOpening(soloPerspectiveCharacter.value, currentNode.value?.name || '开场', soloPublicSceneText.value);
+        });
+        const soloVisibleOptions = computed(() => characterPerspectiveOptions(
+            soloPerspectiveCharacter.value,
+            currentNode.value?.options || [],
+            soloPublicSceneText.value
+        ));
         const saveSoloProfile = () => {
             localStorage.setItem('zric-solo-profile', JSON.stringify({
                 name: soloPlayerName.value || '玩家',
@@ -7529,7 +7595,7 @@ createApp({
             showApiKeyPanel, openApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
-            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloPerspectiveCharacter, soloPublicSceneText, soloSceneText, soloVisibleOptions, soloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
             gmManualEventText, gmManualEventKind, gmManualEventBusy, gmManualEventMsg, gmManualSyncPlayer, gmManualRecordMemory, publishGmManualEvent,
             // 多人房间
             showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,

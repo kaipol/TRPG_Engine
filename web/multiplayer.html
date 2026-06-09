@@ -236,11 +236,11 @@
             <section style="margin-top:18px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
                 <span class="tag" style="display:flex;align-items:center;gap:6px"><i class="ph ph-signpost"></i> 可见行动方向</span>
-                <span v-if="!currentScene?.options?.length" class="small">等待自由行动</span>
+                <span v-if="!visibleActionOptions.length" class="small">等待自由行动</span>
               </div>
-              <button v-for="(opt,i) in currentScene?.options || []" :key="opt.id || opt.next_node_id || i" class="option-btn" @click="useOptionAsAction(opt.text)">
+              <button v-for="(opt,i) in visibleActionOptions" :key="opt.id || opt.next_node_id || i" class="option-btn" @click="useOptionAsAction(opt)">
                 <span class="opt-num">{{ String(i+1).padStart(2,'0') }}</span>
-                <span style="flex:1">{{ opt.text }}</span>
+                <span style="flex:1">{{ opt.visible_text || opt.text }}</span>
               </button>
             </section>
           </div>
@@ -381,6 +381,13 @@
         },
         sceneText() {
           return this.characterOpeningText || this.publicSceneText;
+        },
+        visibleActionOptions() {
+          return this.characterPerspectiveOptions(
+            this.selectedCharacters[0],
+            this.currentScene?.options || [],
+            this.publicSceneText
+          );
         },
         sceneImage() {
           const scene = this.currentScene || {};
@@ -745,30 +752,65 @@
           if (payload.actor_id || payload.character_id || Array.isArray(payload.character_ids)) return false;
           return ['system', 'state'].includes(msg?.kind);
         },
+        compactText(value, max = 220) {
+          return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+        },
+        characterSeed(char, extra = '') {
+          const source = `${char?.id || ''}|${char?.name || ''}|${char?.role || ''}|${char?.personality || ''}|${char?.inventory || ''}|${extra}`;
+          return Array.from(source).reduce((sum, ch, idx) => sum + ch.charCodeAt(0) * (idx + 1), 0);
+        },
+        characterAngleLine(char, extra = '') {
+          const name = char?.name || '角色';
+          const role = char?.role || '角色';
+          const hooks = [
+            `${name}会先用「${role}」的专业/本能判断眼前风险。`,
+            `${name}更在意哪些细节会影响自己的秘密、目标或安全。`,
+            `${name}会从同伴的反应里寻找可以利用或必须警惕的信号。`,
+            `${name}会优先确认退路、资源，以及自己还能掌控的东西。`,
+            `${name}会把现场异常和自身经历联系起来，而不是只看表面。`,
+          ];
+          return hooks[this.characterSeed(char, extra) % hooks.length];
+        },
         localCharacterOpeningText() {
           const char = this.selectedCharacters[0];
           if (!char) return '';
           const scene = this.currentScene || {};
           const sceneName = scene.name || '开场';
           const publicText = this.publicSceneText || '主持端尚未写下更多场景细节，你先从自己的视角观察当下。';
-          const focusOptions = [
-            '你首先注意到环境里最不合常理的细节。',
-            '你下意识检查随身物与退路，确认自己还能掌控什么。',
-            '你把同伴的动静放在余光里，独自判断这里是否安全。',
-            '你从自己的经历出发，意识到眼前的线索可能并不简单。',
-          ];
-          const focus = focusOptions[Math.abs(Number(char.id || 0)) % focusOptions.length];
-          const details = [`${char.name}，你以「${char.role || '角色'}」的身份进入「${sceneName}」。`];
-          if (char.personality) details.push(`你的性格/背景提示是：${String(char.personality).slice(0, 160)}。`);
-          if (char.inventory) details.push(`你当前随身/状态记录：${String(char.inventory).slice(0, 160)}。`);
-          details.push(focus);
-          details.push(`从你的视角看，开场是这样的：${String(publicText).replace(/\s+/g, ' ').slice(0, 420)}`);
+          const details = [`${char.name || '角色'}，你以「${char.role || '角色'}」的身份进入「${sceneName}」。`];
+          if (char.personality) details.push(`你的性格/背景提示是：${this.compactText(char.personality, 160)}。`);
+          if (char.inventory) details.push(`你当前随身/状态记录：${this.compactText(char.inventory, 160)}。`);
+          details.push(this.characterAngleLine(char, sceneName));
+          details.push(`从你的视角看，开场是这样的：${this.compactText(publicText, 420)}`);
           details.push('你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
           return details.join('\n');
         },
-        useOptionAsAction(text) {
+        characterPerspectiveOptions(char, options, sceneText = '') {
+          const list = Array.isArray(options) ? options : [];
+          if (!char) return list.map(opt => ({ ...opt, visible_text: opt.text, action_text: opt.text }));
+          return list.map((opt, idx) => {
+            const rawText = this.compactText(opt?.text, 180) || '自由行动';
+            const role = char.role || '角色';
+            const name = char.name || '角色';
+            const lenses = [
+              `以${role}的判断，先${rawText}`,
+              `从${name}自己的处境出发，${rawText}`,
+              `带着${role}的顾虑，尝试${rawText}`,
+              `优先确认这对${name}意味着什么，再${rawText}`,
+              `以${name}的个人目标为准，把现场线索和${role}判断联系起来，${rawText}`,
+            ];
+            const visibleText = lenses[(this.characterSeed(char, `${idx}|${rawText}|${sceneText}`) + idx) % lenses.length];
+            return {
+              ...opt,
+              visible_text: visibleText,
+              action_text: `${name}（${role}）：${visibleText}`,
+            };
+          });
+        },
+        useOptionAsAction(option) {
           if (!this.hasLockedCharacters) return;
-          this.chatText = text || this.chatText;
+          if (typeof option === 'string') this.chatText = option || this.chatText;
+          else this.chatText = option?.action_text || option?.visible_text || option?.text || this.chatText;
         },
         async sendChat() {
           const content = this.chatText.trim();
