@@ -326,13 +326,8 @@ def set_active_model(model: str, capability: str = "chat") -> str:
     return model
 
 
-def list_remote_models(search: str = "", provider_id: str | None = None) -> list[dict]:
-    """Fetch /models from the selected compatible endpoint."""
-    cfg = get_config(provider_id)
-    if not cfg.configured:
-        return []
+def _list_models_with_client(client: OpenAI, *, search: str, provider_name: str, provider_id: str) -> list[dict]:
     needle = search.strip().lower()
-    client = get_client(timeout=30, provider_id=cfg.provider_id)
     response = client.models.list()
     models = []
     for item in getattr(response, "data", []) or []:
@@ -346,11 +341,52 @@ def list_remote_models(search: str = "", provider_id: str | None = None) -> list
             "model_id": model_id,
             "label": model_id,
             "available": True,
-            "provider": cfg.provider_name,
-            "provider_id": cfg.provider_id,
+            "provider": provider_name,
+            "provider_id": provider_id,
         })
     models.sort(key=lambda m: m["model_id"].lower())
     return models
+
+
+def list_remote_models(search: str = "", provider_id: str | None = None) -> list[dict]:
+    """Fetch /models from a saved compatible endpoint."""
+    cfg = get_config(provider_id)
+    if not cfg.configured:
+        return []
+    client = get_client(timeout=30, provider_id=cfg.provider_id)
+    return _list_models_with_client(
+        client,
+        search=search,
+        provider_name=cfg.provider_name,
+        provider_id=cfg.provider_id,
+    )
+
+
+def list_remote_models_for_endpoint(
+    *,
+    api_key: str,
+    base_url: str,
+    search: str = "",
+    provider_name: str = "",
+    provider_id: str = "",
+) -> list[dict]:
+    """Fetch /models from a draft endpoint without persisting the credentials."""
+    key = (api_key or "").strip()
+    url = (base_url or "").strip()
+    if not key or not url:
+        return []
+    client = OpenAI(
+        api_key=key,
+        base_url=url,
+        default_headers={"User-Agent": BROWSER_USER_AGENT},
+        timeout=30,
+    )
+    return _list_models_with_client(
+        client,
+        search=search,
+        provider_name=(provider_name or "未保存供应商").strip(),
+        provider_id=(provider_id or "draft").strip(),
+    )
 
 
 def chat_completion(

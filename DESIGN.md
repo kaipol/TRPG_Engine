@@ -2,19 +2,19 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-06-08
-- Primary product surfaces: Player table, GM console, launch/config screen, multiplayer room flow, campaign loader.
-- Evidence reviewed: README.md, web/index.html, web/multiplayer.html, docs/multiplayer_integration.md, server/main.py, server/multiplayer.py.
+- Last refreshed: 2026-06-09
+- Primary product surfaces: Player table, GM console, top-bar dossier viewer, launch/config screen, multiplayer room flow, campaign loader.
+- Evidence reviewed: README.md, web/index.html, web/multiplayer.html, docs/multiplayer_integration.md, server/main.py, server/rag.py, server/multiplayer.py.
 
 ## Brand
 - Personality: Quiet command center for live TRPG play; technical, focused, and a little arcane.
 - Trust signals: Clear engine/provider status, deterministic save/load actions, visible room code for remote play.
-- Avoid: Dense always-visible module bars, decorative controls, and settings exposed during active narration.
+- Avoid: Dense admin-style module grids during active narration, decorative controls, and forcing players into editing forms just to read campaign context.
 
 ## Product goals
-- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players; keep solo and multiplayer play conceptually consistent as AI-GM plus player-controlled story characters.
+- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players; keep solo and multiplayer play conceptually consistent as AI-GM plus player-controlled story characters; make world/map/knowledge references readable from the top bar.
 - Non-goals: Marketing landing pages, separate duplicate control surfaces, speech input/output.
-- Success signals: A player can load a campaign, choose a role, and hand actions to AI-GM; a GM can still open the console, start a room, choose a model intentionally, and manage scenes without scanning a crowded toolbar.
+- Success signals: A player can load a campaign, choose a role, read world/map/knowledge context from the top bar, and hand actions to AI-GM; a GM can still open the console, start a room, choose a model intentionally, and edit campaign systems without confusing those edit forms with player reading surfaces.
 
 ## Personas and jobs
 - Primary personas: Solo player choosing a script role; GM/KP managing a session; remote players joining by room code.
@@ -22,14 +22,14 @@
 - Key contexts of use: Desktop player table during active play, GM console for advanced control, occasionally shared over LAN or a reachable hosted URL.
 
 ## Information architecture
-- Primary navigation: Launch screen for campaign/provider/setup and solo/multiplayer entry; player table for play; GM console and settings modal for advanced management.
+- Primary navigation: Launch screen for campaign/provider/setup and solo/multiplayer entry; player table for play; top-bar dossier viewer for world/map/knowledge/lore/entity/memory reading; GM console and settings modal for advanced management.
 - Core routes/screens: Player-first console at /, GM console surface within /, player display, phone display, multiplayer room table.
-- Content hierarchy: Scene content and selected player roles first; party/entity state second; advanced world data and automation behind settings.
+- Content hierarchy: Scene content and selected player roles first; top-bar read-only dossier for campaign reference second; party/entity state and GM editing tools behind the GM console/settings; automation and destructive management remain in advanced settings.
 
 ## Design principles
-- Principle 1: The top bar should answer only "where am I, what model is active, is the room live, can I save?"
-- Principle 2: Advanced systems remain one click away but do not compete with narration controls.
-- Tradeoffs: Fewer persistent buttons means one extra click for maps/triggers/lore, accepted to reduce live-play clutter.
+- Principle 1: The top bar may expose read-only reference surfaces when they reduce play friction, but it should not expose destructive or admin-heavy controls.
+- Principle 2: Viewing and editing are separate modes: players read dossier panels; GMs edit the underlying systems in script parsing/advanced management panels.
+- Tradeoffs: More top-bar reference buttons add some density, accepted because maps/worldview/knowledge are frequent play aids and the edit controls remain hidden.
 
 ## Visual language
 - Color: Existing dark neutral panels with restrained status accents.
@@ -41,8 +41,8 @@
 
 ## Components
 - Existing components to reuse: btn, inp, panel, tag, modal overlays, model picker menu.
-- New/changed components: Solo player table, role picker, compact header model picker, game settings modal, multiplayer room strip.
-- Variants and states: Connected/disconnected room, loading, empty model list, advanced settings collapsed.
+- New/changed components: Solo player table, role picker, compact header model picker, top-bar dossier viewer, draggable map viewer, game settings modal, multiplayer room strip.
+- Variants and states: Connected/disconnected room, loading, empty model list, public/hidden knowledge documents, map floor switching, advanced settings collapsed.
 - Token/component ownership: Keep inline CSS patterns in web/index.html until the app is split into components.
 
 ## Accessibility
@@ -54,8 +54,8 @@
 
 ## Responsive behavior
 - Supported breakpoints/devices: Desktop-first GM console with guarded overflow on small screens.
-- Layout adaptations: Header controls wrap only through grouped menus; top bar should not require all modules to fit.
-- Touch/hover differences: Main commands remain button-sized; advanced tools live in modal lists.
+- Layout adaptations: Header reference controls wrap as a compact group; dossier panels switch from side navigation to horizontal tabs on small screens.
+- Touch/hover differences: Main commands remain button-sized; dossier maps support drag and wheel/gesture-like zoom; advanced editing tools live in modal lists.
 
 ## Interaction states
 - Loading: Use existing spinners and status text.
@@ -73,7 +73,7 @@
 ## Implementation constraints
 - Framework/styling system: Single inline Vue app in web/index.html; FastAPI backend in server/main.py.
 - Design-token constraints: Reuse existing CSS variables and class names.
-- Performance constraints: Do not block campaign loading on embedding rebuild.
+- Performance constraints: Do not block campaign loading on embedding rebuild; runtime play uses sparse/keyword RAG by default and must not call embedding unless an import, upload, explicit rebuild, or dense management search asks for it; selecting a pre-generated action direction is deterministic and must not call chat models unless the user explicitly asks AI-GM to generate, expand, or judge new content.
 - Compatibility constraints: Room-code play reuses existing /api/multiplayer and /ws/rooms endpoints.
 - Test/screenshot expectations: Run Python compile checks, frontend script syntax check, and browser smoke when the server is available.
 

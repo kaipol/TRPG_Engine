@@ -89,7 +89,7 @@ _append_to_memory = None
 _tl_append_memory = None
 _get_world_entities_text = None
 _rag_retrieve = None
-_get_embeddings = None          # rag.get_embeddings（NPC 记忆→L3 向量化用）
+_get_embeddings = None          # 兼容旧注入；运行时 NPC 记忆归档默认不再调用 embedding
 _refresh_vector_cache = None    # rag.refresh_vector_cache
 
 _active_model: str = ai_provider.get_active_model("chat") or ""
@@ -796,6 +796,7 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
 # ---------------------------------------------------------
 class ApplyBranchEffectsRequest(BaseModel):
     node_id: int  # 玩家选择跳转到的目标节点 ID
+    allow_ai_extraction: bool = False  # 游玩点击默认不跑额外实体抽取模型
 
 @agent_router.post("/api/ai/apply-branch-effects")
 def apply_branch_effects(req: ApplyBranchEffectsRequest):
@@ -932,7 +933,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                     _append_to_memory(conn, mem + "。")
 
         # ── 执行实体提取 ──
-        if _ai_extract_and_upsert_entities and entity_updates_text:
+        if req.allow_ai_extraction and _ai_extract_and_upsert_entities and entity_updates_text:
             _ai_extract_and_upsert_entities(
                 conn, scene_name, node["content"] or "", player_action, entity_updates_text,
                 timeline_label="主线" if not tl_id_for_memory else f"TL{tl_id_for_memory}")
@@ -966,8 +967,8 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                 _applied_emotions.append({"npc_name": npc_name, **emo})
 
         # ── 执行 NPC 记忆写入 (npc_memories) ──
-        # 策略：state_desc.memory 保留最近 12 条（短期工作记忆），
-        # 溢出的旧记忆写入 RAG 向量库（L3 长期记忆），按语义检索召回。
+        # 策略：state_desc.memory 保留最近若干条（短期工作记忆），
+        # 溢出的旧记忆写入 RAG 文本库（L3 长期记忆），运行时不触发 embedding。
         NPC_MEMORY_KEEP = 16  # 短期记忆保留条数（与前端 /16 上限一致）
 
         npc_memories = fx.get("npc_memories", [])
@@ -1002,8 +1003,8 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                              (json.dumps(sd, ensure_ascii=False), entity_row["id"]))
                 _applied_memories.append({"npc_name": npc_name, "memory": memory_text})
 
-        # ── 后台异步：溢出的 NPC 记忆写入 L3 向量库 ──
-        if _l3_evict_batch and _get_embeddings:
+        # ── 后台异步：溢出的 NPC 记忆写入 L3 文本库 ──
+        if _l3_evict_batch:
             import threading
             evict_copy = list(_l3_evict_batch)  # 拷贝，避免跨线程引用问题
             def _async_npc_memory_to_l3(batch):
@@ -1041,17 +1042,10 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                             doc_id = cur.lastrowid
                             chunk_index = 0
 
-                        # Embedding + 写入
-                        try:
-                            vecs = _get_embeddings([chunk_text])
-                            emb_json = json.dumps(vecs[0]) if vecs and vecs[0] else "[]"
-                        except Exception:
-                            emb_json = "[]"
-
                         bg_conn.execute(
                             "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
                             "VALUES (?,?,?,?)",
-                            (doc_id, chunk_index, chunk_text, emb_json)
+                            (doc_id, chunk_index, chunk_text, "[]")
                         )
                         # 更新 chunk_size 计数
                         bg_conn.execute(
@@ -1060,9 +1054,9 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                         )
 
                     bg_conn.commit()
-                    _log.info("NPC 记忆 L3 归档完成：%d 条记忆来自 %d 个 NPC",
+                    _log.info("NPC 记忆 L3 文本归档完成：%d 条记忆来自 %d 个 NPC",
                               len(batch), len(grouped))
-                    # 刷新向量缓存，使新记忆立即可检索
+                    # 空向量文本块由关键词检索召回；刷新缓存保持管理区状态一致。
                     if _refresh_vector_cache:
                         _refresh_vector_cache()
                 except Exception as e:

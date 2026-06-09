@@ -1,10 +1,9 @@
 """
 Z.R.I.C 引擎 — 三级记忆系统模块 (memory.py)
-L1 短期工作区 / 记忆折叠 / L3 淘汰 / REST API。
+L1 短期工作区 / 记忆折叠 / L3 纯文本归档 / REST API。
 由 main.py 通过 app.include_router(memory_router) 挂载。
 """
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -21,7 +20,7 @@ memory_router = APIRouter(tags=["记忆系统"])
 # 依赖注入（由 main.py 启动时设置）
 # ---------------------------------------------------------
 _db_file: str = ""
-_get_embeddings = None  # rag.get_embeddings
+_get_embeddings = None  # 兼容旧注入；运行时记忆归档默认不再调用 embedding
 
 # 记忆参数
 MEMORY_FOLD_THRESHOLD = 4000
@@ -88,7 +87,7 @@ def _l1_append(conn, scene_name: str, player_action: str,
             (timeline_id, count - L1_MAX_ENTRIES,)
         ).fetchall()]
         
-        # 【异步改造】：启动后台线程处理 AI 摘要和 Embedding，主线程直接放行
+        # 【异步改造】：启动后台线程处理 AI 摘要与文本归档，主线程直接放行
         import threading
         def _async_evict_task(rows_to_evict):
             # 后台线程必须获取自己的数据库连接
@@ -105,9 +104,8 @@ def _l1_append(conn, scene_name: str, player_action: str,
 
 def _l1_evict_to_l3(conn, rows):
     """
-    将 L1 溢出的记录批量转化为 L3 长期向量记忆。
-    流程：拼接为摘要文本 → embedding → 写入 rag_chunks → 删除 L1 原记录。
-    如果 embedding 失败，降级为纯文本写入 session_memory。
+    将 L1 溢出的记录批量转化为 L3 长期文本记忆。
+    运行时不调用 embedding；写入 rag_chunks 的空向量仍可被关键词检索召回。
     """
     if not rows:
         return
@@ -126,7 +124,7 @@ def _l1_evict_to_l3(conn, rows):
 
     evict_text = "\n".join(evict_text_parts)
 
-    # ── 所有 IO 操作（AI调用、embedding）先于任何数据库写入完成 ──
+    # ── AI 摘要先于任何数据库写入完成 ──
     # 避免在 AI 调用期间持有 SQLite 写锁，导致其他写操作超时
 
     # 1. AI 压缩摘要
@@ -148,38 +146,18 @@ def _l1_evict_to_l3(conn, rows):
         _log.warning("L1→L3 记忆摘要 AI 调用失败，降级为截断: %s", e)
         summary = evict_text[:MEMORY_SUMMARY_LIMIT]
 
-    # 2. embedding（仍在写库之前）
-    try:
-        vecs = _get_embeddings([summary]) if _get_embeddings else []
-        emb_json = json.dumps(vecs[0]) if vecs and vecs[0] else "[]"
-        use_rag = True
-    except Exception as e:
-        _log.warning("L1→L3 embedding 调用失败，降级到 session_memory: %s", e)
-        emb_json = "[]"
-        use_rag = False
-
-    # 3. 统一写库（写锁仅在此块内持有，耗时 <5ms）
+    # 2. 统一写库（写锁仅在此块内持有，耗时 <5ms）
     doc_title = f"长期记忆_{datetime.now().strftime('%m%d_%H%M')}"
     try:
-        if use_rag:
-            cur = conn.execute(
-                "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
-                (doc_title, "memory_l3_eviction", 1)
-            )
-            conn.execute(
-                "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
-                "VALUES (?,?,?,?)",
-                (cur.lastrowid, 0, summary, emb_json)
-            )
-        else:
-            row = conn.execute(
-                "SELECT value FROM system_state WHERE key='session_memory'"
-            ).fetchone()
-            old_mem = row["value"] if row else ""
-            conn.execute(
-                "INSERT OR REPLACE INTO system_state (key,value) VALUES ('session_memory',?)",
-                (old_mem + f"\n【长期记忆归档】{summary}",)
-            )
+        cur = conn.execute(
+            "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
+            (doc_title, "memory_l3_eviction", 1)
+        )
+        conn.execute(
+            "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
+            "VALUES (?,?,?,?)",
+            (cur.lastrowid, 0, summary, "[]")
+        )
     except Exception as e:
         _log.warning("L1→L3 写库失败: %s", e)
 

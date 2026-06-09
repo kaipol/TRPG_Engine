@@ -140,7 +140,7 @@ app.include_router(dice_router)
 # ---------------------------------------------------------
 # 【模块化】：挂载多人联机融合模块
 # ---------------------------------------------------------
-from .multiplayer import multiplayer_router, configure_multiplayer, init_multiplayer_tables
+from .multiplayer import MAX_ROOM_PLAYERS, multiplayer_router, configure_multiplayer, init_multiplayer_tables
 app.include_router(multiplayer_router)
 
 # ---------------------------------------------------------
@@ -172,6 +172,7 @@ ai_provider.configure_provider_store(os.path.join(BASE_DIR, "openai_providers.js
 DB_FILE = os.path.join(BASE_DIR, "rpg_game.db")
 CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
 os.makedirs(CAMPAIGNS_DIR, exist_ok=True)
+RAG_AUTO_REBUILD_EMBEDDINGS = os.environ.get("ZRIC_AUTO_REBUILD_RAG_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
 
 # 【模块化】：将 DB 路径注入地图模块
 map_set_db_file(DB_FILE)
@@ -179,8 +180,8 @@ map_set_db_file(DB_FILE)
 # 【模块化】：配置 RAG 模块
 configure_rag(DB_FILE)
 
-# 【模块化】：配置记忆系统模块
-configure_memory(DB_FILE, fn_get_embeddings=_get_embeddings)
+# 【模块化】：配置记忆系统模块（运行时记忆归档默认不调用 embedding）
+configure_memory(DB_FILE, fn_get_embeddings=None)
 
 # 【模块化】：配置世界实体模块
 configure_entity(DB_FILE)
@@ -257,7 +258,7 @@ def _startup_wire_agent():
         fn_tl_append_memory=_tl_append_memory,
         fn_get_world_entities_text=_get_world_entities_text,
         fn_rag_retrieve=_rag_retrieve,
-        fn_get_embeddings=_get_embeddings,
+        fn_get_embeddings=None,
         fn_refresh_vector_cache=_refresh_vector_cache,
     )
     # 触发器模块需要 get_system_context（来自 agent），在 agent 配置完成后注入
@@ -326,16 +327,39 @@ class TimelineDynamicRequest(BaseModel):
 #   *.json               ← 兼容旧版单文件存档（平铺在 BASE_DIR 下）
 # ---------------------------------------------------------
 
-def _is_legacy_campaign_file(path: str) -> bool:
-    """Only accept root-level JSON files that look like old campaign saves."""
+def _campaign_player_limits(path: str) -> tuple[bool, dict[str, int]]:
+    """Read lightweight campaign metadata used before a campaign is loaded."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return False
+        return False, {}
     if not isinstance(data, dict):
-        return False
-    return isinstance(data.get("nodes"), list)
+        return False, {}
+    if not isinstance(data.get("nodes"), list):
+        return False, {}
+
+    characters = data.get("characters", [])
+    if not isinstance(characters, list):
+        characters = []
+    active_characters = [
+        char for char in characters
+        if isinstance(char, dict) and (char.get("status") or "active") != "hidden"
+    ]
+    character_count = len(characters)
+    playable_count = len(active_characters) or character_count or 1
+    max_players = max(1, min(playable_count, MAX_ROOM_PLAYERS))
+    return True, {
+        "character_count": character_count,
+        "playable_character_count": playable_count,
+        "max_players": max_players,
+    }
+
+
+def _is_legacy_campaign_file(path: str) -> bool:
+    """Only accept root-level JSON files that look like old campaign saves."""
+    valid, _limits = _campaign_player_limits(path)
+    return valid
 
 
 @app.get("/api/campaigns")
@@ -347,14 +371,17 @@ def list_campaigns():
     for f in glob.glob(os.path.join(BASE_DIR, "*.json")):
         fname = os.path.basename(f)
         if fname.startswith("persona_mode"): continue
-        if not _is_legacy_campaign_file(f): continue
-        results.append({"name": fname, "type": "legacy", "path": fname})
+        valid, limits = _campaign_player_limits(f)
+        if not valid: continue
+        results.append({"name": fname, "type": "legacy", "path": fname, **limits})
 
     # 新版：campaigns/ 下的子文件夹（含 campaign.json）
     if os.path.isdir(CAMPAIGNS_DIR):
         for d in sorted(os.listdir(CAMPAIGNS_DIR)):
             folder = os.path.join(CAMPAIGNS_DIR, d)
-            if os.path.isdir(folder) and os.path.exists(os.path.join(folder, "campaign.json")):
+            campaign_json = os.path.join(folder, "campaign.json")
+            valid, limits = _campaign_player_limits(campaign_json)
+            if os.path.isdir(folder) and valid:
                 has_map = os.path.exists(os.path.join(folder, "map.json"))
                 kb_dir = os.path.join(folder, "knowledge")
                 kb_count = 0
@@ -367,7 +394,8 @@ def list_campaigns():
                     "name": d, "type": "folder",
                     "path": f"campaigns/{d}",
                     "has_map": has_map,
-                    "kb_count": kb_count
+                    "kb_count": kb_count,
+                    **limits,
                 })
 
     # 向后兼容：同时返回旧版字符串数组格式（供未升级的前端使用）
@@ -1026,8 +1054,8 @@ def load_campaign(req: LoadCampaignRequest):
 
         conn.commit()
 
-        # ── 异步重建 RAG embedding（不阻塞加载响应）───────────
-        if raw_library:
+        # ── 可选异步重建 RAG embedding（默认关闭，避免载入剧本后批量请求 embedding）────
+        if raw_library and RAG_AUTO_REBUILD_EMBEDDINGS:
             import threading
             def _rebuild_embeddings():
                 try:
@@ -1063,6 +1091,11 @@ def load_campaign(req: LoadCampaignRequest):
                 except Exception as e:
                     _log.error("后台 RAG embedding 重建线程异常: %s", e, exc_info=True)
             threading.Thread(target=_rebuild_embeddings, daemon=True).start()
+        elif raw_library:
+            _log.info(
+                "跳过后台 RAG embedding 重建；运行时使用关键词检索。"
+                "如需重建，设置 ZRIC_AUTO_REBUILD_RAG_EMBEDDINGS=1 后重新载入剧本。"
+            )
 
         conn.close()
         # 加载完成后立即刷新向量缓存（embedding 为空的 chunks 会在后台线程重建后再次刷新）
@@ -2065,6 +2098,13 @@ class ProviderDeleteRequest(BaseModel):
 class ModelListRequest(BaseModel):
     capability: str = "chat"
     search: str = ""
+    provider_id: str | None = None
+    provider_name: str | None = None
+    openai_compat_api_key: str | None = None
+    openai_compat_base_url: str | None = None
+    chat_model: str | None = None
+    embedding_model: str | None = None
+    image_model: str | None = None
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -2166,7 +2206,7 @@ def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
         fn_tl_append_memory=_tl_append_memory,
         fn_get_world_entities_text=_get_world_entities_text,
         fn_rag_retrieve=_rag_retrieve,
-        fn_get_embeddings=_get_embeddings,
+        fn_get_embeddings=None,
         fn_refresh_vector_cache=_refresh_vector_cache,
     )
 
@@ -2218,9 +2258,9 @@ def delete_provider(req: ProviderDeleteRequest, request: Request):
     }
 
 
-@app.get("/api/config/models")
-def list_config_models(capability: str = "chat", search: str = ""):
-    """为配置面板获取当前供应商的模型列表，并按能力返回当前选中模型。"""
+def _config_model_response(req: ModelListRequest, *, allow_draft_endpoint: bool = False):
+    capability = (req.capability or "chat").strip() or "chat"
+    search = (req.search or "").strip()
     field = ai_provider.MODEL_CAPABILITY_FIELDS.get(capability)
     if not field:
         return {
@@ -2230,33 +2270,99 @@ def list_config_models(capability: str = "chat", search: str = ""):
             "active": "",
             "models": [],
         }
-    try:
-        models = ai_provider.list_remote_models(search)
-        error = ""
-    except Exception as e:
-        models = []
-        error = f"{type(e).__name__}: {e}"
-    cfg = ai_provider.get_config()
-    active = ai_provider.get_active_model(capability) or getattr(cfg, field, "")
+
+    provider_id = (req.provider_id or "").strip()
+    draft_key = (req.openai_compat_api_key or "").strip()
+    draft_base_url = (req.openai_compat_base_url or "").strip()
+    provider_name = (req.provider_name or "").strip()
+    draft_model_values = {
+        "chat": req.chat_model or "",
+        "embedding": req.embedding_model or "",
+        "image": req.image_model or "",
+    }
+
+    if allow_draft_endpoint and (draft_key or not provider_id):
+        if not draft_key or not draft_base_url:
+            return {
+                "status": "error",
+                "message": "请先填写当前供应商的 API Key 和 Base URL，再获取模型。",
+                "capability": capability,
+                "active": draft_model_values.get(capability, ""),
+                "models": [],
+                "provider": {
+                    "id": provider_id or "draft",
+                    "name": provider_name or "未保存供应商",
+                    "base_url": draft_base_url,
+                },
+                "draft": True,
+            }
+        try:
+            models = ai_provider.list_remote_models_for_endpoint(
+                api_key=draft_key,
+                base_url=draft_base_url,
+                search=search,
+                provider_name=provider_name or "未保存供应商",
+                provider_id=provider_id or "draft",
+            )
+            error = ""
+        except Exception as e:
+            models = []
+            error = f"{type(e).__name__}: {e}"
+        active = draft_model_values.get(capability, "")
+        provider = {
+            "id": provider_id or "draft",
+            "name": provider_name or "未保存供应商",
+            "base_url": draft_base_url,
+        }
+        configured = bool(draft_key and draft_base_url)
+        draft = True
+    else:
+        cfg = ai_provider.get_config(provider_id or None)
+        try:
+            models = ai_provider.list_remote_models(search, provider_id or None)
+            error = ""
+        except Exception as e:
+            models = []
+            error = f"{type(e).__name__}: {e}"
+        active_runtime = ai_provider.get_active_model(capability) if cfg.provider_id == ai_provider.get_active_provider_id() else ""
+        active = active_runtime or getattr(cfg, field, "")
+        provider = {"id": cfg.provider_id, "name": cfg.provider_name, "base_url": cfg.base_url}
+        configured = cfg.configured
+        draft = False
+
     if active and not any(m["key"] == active for m in models):
-        needle = search.strip().lower()
+        needle = search.lower()
         if not needle or needle in active.lower():
             models.insert(0, {
                 "key": active,
                 "model_id": active,
                 "label": active,
-                "available": ai_provider.is_configured(),
-                "provider": cfg.provider_name,
-                "provider_id": cfg.provider_id,
+                "available": configured,
+                "provider": provider["name"],
+                "provider_id": provider["id"],
             })
     return {
         "status": "success",
         "capability": capability,
         "active": active,
         "models": models,
-        "provider": {"id": cfg.provider_id, "name": cfg.provider_name, "base_url": cfg.base_url},
+        "provider": provider,
+        "draft": draft,
         "error": error,
     }
+
+
+@app.get("/api/config/models")
+def list_config_models(capability: str = "chat", search: str = ""):
+    """为配置面板获取已保存供应商的模型列表，并按能力返回当前选中模型。"""
+    return _config_model_response(ModelListRequest(capability=capability, search=search))
+
+
+@app.post("/api/config/models")
+def list_config_models_for_current_form(req: ModelListRequest, request: Request):
+    """按配置面板当前表单草稿获取模型，不隐式回退到旧 active 供应商。"""
+    _require_admin_config_access(request)
+    return _config_model_response(req, allow_draft_endpoint=True)
 
 
 # =============================================================

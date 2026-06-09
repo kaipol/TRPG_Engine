@@ -153,6 +153,7 @@ class CheckTriggersRequest(BaseModel):
     scene_id: int
     scene_name: str
     scene_content: str
+    allow_ai: bool = False
 
 
 # ---------------------------------------------------------
@@ -497,7 +498,8 @@ def _generate_node_ai(prompt: str, scene_name: str, conn) -> dict | None:
 # 返回 side_effects dict 供 check_triggers 聚合后下发给前端
 # ---------------------------------------------------------
 def _execute_actions(actions_raw: str, conn, trigger_id: int,
-                     scene_id: int, scene_name: str) -> dict:
+                     scene_id: int, scene_name: str,
+                     allow_ai: bool = False) -> dict:
     """
     动作类型一览：
       set_flag      — {key, value}：写入 game_flags 表
@@ -643,6 +645,9 @@ def _execute_actions(actions_raw: str, conn, trigger_id: int,
                     side_effects["log"].append(f"🔀 新选项已注入：「{opt_text[:20]}」→ 节点#{next_nid}")
 
             elif atype == "gen_node":
+                if not allow_ai:
+                    side_effects["log"].append("AI 即时生成节点已跳过")
+                    continue
                 prompt   = str(act.get("prompt", "")).strip()
                 nav_mode = str(act.get("mode", "soft")).strip()
                 if prompt:
@@ -886,12 +891,20 @@ def _has_gen_node_action(actions) -> bool:
     return any(isinstance(a, dict) and a.get("type") == "gen_node" for a in (actions or []))
 
 
+def _action_types(actions_raw: str) -> set[str]:
+    try:
+        actions = json.loads(actions_raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    return {str(a.get("type", "")).strip() for a in actions if isinstance(a, dict)}
+
+
 # ---------------------------------------------------------
 # 触发器完整检查（含 DAG、前驱、互斥、冷却、次数上限）
 # ---------------------------------------------------------
 def _check_trigger(trigger_row, scene_id: int, scene_name: str,
                    scene_content: str, chars: list, all_inv: str,
-                   ai_cache: dict, conn) -> bool:
+                   ai_cache: dict, conn, allow_ai: bool = False) -> bool:
     t = trigger_row
 
     # ── 前驱：所有前驱触发器必须已 fire ────────────────────────────────────
@@ -941,6 +954,8 @@ def _check_trigger(trigger_row, scene_id: int, scene_name: str,
         return False
     if pre is True:
         return True
+    if not allow_ai:
+        return False
 
     # 只有 _MAYBE（非 AI 条件无法单独确定结果）才收集 AI 条件并批量请求
     ai_leaves = _collect_ai_leaves(tree)
@@ -1097,13 +1112,15 @@ def check_triggers(req: CheckTriggersRequest):
         for t in pending:
             if not _check_trigger(t, req.scene_id, req.scene_name,
                                    req.scene_content, chars, all_inv,
-                                   ai_cache, conn):
+                                   ai_cache, conn, req.allow_ai):
+                continue
+            if not req.allow_ai and _action_types(t["actions"] if "actions" in t.keys() else "[]") == {"gen_node"}:
                 continue
 
             # ── 执行触发器动作副作用，收集前端需感知的副作用 ───────────────────
             side = _execute_actions(
                 t["actions"] if "actions" in t.keys() else "[]",
-                conn, t["id"], req.scene_id, req.scene_name
+                conn, t["id"], req.scene_id, req.scene_name, req.allow_ai
             )
             text_injections.extend(side["text_injections"])
             option_injections.extend(side["option_injections"])

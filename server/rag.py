@@ -7,8 +7,11 @@ Z.R.I.C 引擎 — RAG 知识库模块 (rag.py)
 import math
 import json
 import time
+import hashlib
+import re
 import sqlite3
 import threading
+from collections import OrderedDict
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 from .logger import get_logger
@@ -36,6 +39,15 @@ _db_file: str = ""
 RAG_CHUNK_SIZE    = 600
 RAG_CHUNK_OVERLAP = 80
 RAG_TOP_K         = 6
+RAG_EMBEDDING_BATCH_SIZE = 16
+RAG_EMBEDDING_MIN_INTERVAL = 0.35
+RAG_EMBEDDING_CACHE_TTL = 600
+RAG_EMBEDDING_CACHE_MAX = 512
+
+_embedding_cache_lock = threading.RLock()
+_embedding_api_lock = threading.Lock()
+_embedding_cache: OrderedDict[tuple[str, str, str], tuple[float, list[float]]] = OrderedDict()
+_last_embedding_call_at = 0.0
 
 def configure_rag(db_file: str):
     """由 main.py 启动时调用，注入依赖。"""
@@ -100,12 +112,12 @@ class RagSearchRequest(BaseModel):
     scene_name: str
     content:    str
     top_k:      int = 0  # 0 = 使用默认值 RAG_TOP_K*2
+    use_dense:  bool = False  # 管理区如需语义检索可显式开启；运行时默认不调用 embedding
 
 
 # ---------------------------------------------------------
 # 核心函数：切片、embedding、检索
 # ---------------------------------------------------------
-import re
 
 def chunk_text(text: str, max_size: int = 600, overlap: int = 0) -> list[str]:
     """
@@ -156,25 +168,140 @@ def chunk_text(text: str, max_size: int = 600, overlap: int = 0) -> list[str]:
     return chunks
 
 
+_SPARSE_STOP_TERMS = {
+    "玩家", "行动", "场景", "当前", "选择", "内容", "描述", "结果", "推演",
+    "the", "and", "for", "with", "this", "that", "from", "into", "scene",
+}
+
+
+def _extract_sparse_terms(query_text: str, max_terms: int = 12) -> list[str]:
+    """提取少量可用于 LIKE 检索的关键词，避免运行时为了召回去打 embedding。"""
+    normalized = (query_text or "").lower()
+    terms: list[str] = []
+
+    def add(term: str):
+        term = term.strip().lower()
+        if len(term) < 2 or term in _SPARSE_STOP_TERMS:
+            return
+        if term not in terms:
+            terms.append(term)
+
+    for token in re.findall(r"[a-z0-9_]{3,}", normalized):
+        add(token)
+
+    for token in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        parts = [token] if len(token) <= 8 else [
+            part for part in re.split(r"[，。！？；、\s的了是在和与及对向中]", token)
+            if 2 <= len(part) <= 8
+        ]
+        for part in parts:
+            add(part)
+            # 中文没有天然空格，补充短 n-gram，提升无 embedding 运行时召回。
+            for size in (4, 3, 2):
+                if len(part) <= size:
+                    continue
+                for start in range(0, len(part) - size + 1):
+                    add(part[start:start + size])
+
+    return terms[:max_terms]
+
+
+def _embedding_cache_scope() -> tuple[str, str]:
+    """Cache keys must follow the active provider/model, otherwise vectors may be incompatible."""
+    try:
+        cfg = ai_provider.get_config()
+        provider_id = cfg.provider_id
+    except Exception:
+        provider_id = ""
+    return provider_id, ai_provider.get_active_model("embedding") or ""
+
+
+def _embedding_cache_key(text: str, scope: tuple[str, str]) -> tuple[str, str, str]:
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return scope[0], scope[1], digest
+
+
+def _embedding_cache_get(key: tuple[str, str, str]) -> list[float] | None:
+    now = time.monotonic()
+    with _embedding_cache_lock:
+        item = _embedding_cache.get(key)
+        if not item:
+            return None
+        ts, vec = item
+        if now - ts > RAG_EMBEDDING_CACHE_TTL:
+            _embedding_cache.pop(key, None)
+            return None
+        _embedding_cache.move_to_end(key)
+        return list(vec)
+
+
+def _embedding_cache_put(key: tuple[str, str, str], vec: list[float]):
+    if not vec:
+        return
+    with _embedding_cache_lock:
+        _embedding_cache[key] = (time.monotonic(), list(vec))
+        _embedding_cache.move_to_end(key)
+        while len(_embedding_cache) > RAG_EMBEDDING_CACHE_MAX:
+            _embedding_cache.popitem(last=False)
+
+
+def _wait_for_embedding_slot():
+    """Serialize embedding bursts so live play does not hammer OpenAI-compatible endpoints."""
+    global _last_embedding_call_at
+    now = time.monotonic()
+    wait_sec = max(0.0, RAG_EMBEDDING_MIN_INTERVAL - (now - _last_embedding_call_at))
+    if wait_sec:
+        time.sleep(wait_sec)
+    _last_embedding_call_at = time.monotonic()
+
+
 def get_embeddings(texts: list[str]) -> list[list[float]]:
     """
     调用统一 OpenAI 兼容端点获取 embedding 向量。
-    带 rate-limit 保护：每批之间 sleep 0.3s 防止 429。
+    带缓存、去重和 rate-limit 保护，避免运行中同一查询反复触发 embedding。
     """
     if not texts or not ai_provider.get_active_model("embedding"):
         return []
 
-    all_embeddings: list[list[float]] = []
-    BATCH = 16  # 降低批量大小以减少 429 风险
+    scope = _embedding_cache_scope()
+    all_embeddings: list[list[float]] = [[] for _ in texts]
+    missing: OrderedDict[tuple[str, str, str], dict] = OrderedDict()
 
-    for i in range(0, len(texts), BATCH):
-        batch = texts[i:i + BATCH]
+    for idx, text in enumerate(texts):
+        if not (text or "").strip():
+            continue
+        key = _embedding_cache_key(text, scope)
+        cached = _embedding_cache_get(key)
+        if cached is not None:
+            all_embeddings[idx] = cached
+            continue
+        if key not in missing:
+            missing[key] = {"text": text, "indices": []}
+        missing[key]["indices"].append(idx)
+
+    missing_items = list(missing.items())
+    if not missing_items:
+        return all_embeddings
+
+    for i in range(0, len(missing_items), RAG_EMBEDDING_BATCH_SIZE):
+        batch_items = missing_items[i:i + RAG_EMBEDDING_BATCH_SIZE]
+        batch = [item["text"] for _key, item in batch_items]
         retry = 0
         while retry < 3:
             try:
-                resp = ai_provider.embedding_create(batch)
+                with _embedding_api_lock:
+                    _wait_for_embedding_slot()
+                    resp = ai_provider.embedding_create(batch)
                 items = sorted(resp.data, key=lambda x: x.index)
-                all_embeddings.extend(item.embedding for item in items)
+                batch_embeddings: list[list[float]] = [[] for _ in batch]
+                for item in items:
+                    if 0 <= item.index < len(batch_embeddings):
+                        batch_embeddings[item.index] = item.embedding
+                for (key, meta), emb in zip(batch_items, batch_embeddings):
+                    _embedding_cache_put(key, emb)
+                    for target_idx in meta["indices"]:
+                        all_embeddings[target_idx] = emb
                 break
             except Exception as e:
                 retry += 1
@@ -184,14 +311,13 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
                 elif retry >= 3:
                     # 最终失败：用空向量占位
                     _log.warning("Embedding 批次最终失败（3次重试耗尽）: %s", e)
-                    all_embeddings.extend([] for _ in batch)
                     break
                 else:
                     _log.debug("Embedding 调用异常（第 %d 次重试）: %s", retry, e)
                     time.sleep(0.5)
 
         # 批间冷却：防止并发速率限制
-        if i + BATCH < len(texts):
+        if i + RAG_EMBEDDING_BATCH_SIZE < len(missing_items):
             time.sleep(0.3)
 
     return all_embeddings
@@ -363,22 +489,30 @@ def refresh_vector_cache():
 # 混合检索核心（关键词预匹配 + 向量语义检索）
 # ---------------------------------------------------------
 def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
-                     vec_threshold: float = 0.3) -> list[dict]:
+                     vec_threshold: float = 0.3,
+                     allow_dense: bool = True) -> list[dict]:
     """
-    混合检索：Sparse（关键词精确匹配）+ Dense（向量语义检索）。
+    混合检索：Sparse（关键词匹配）+ 可选 Dense（向量语义检索）。
     返回 [{"score": float, "chunk_text": str, "title": str, ...}, ...]
-    被 rag_retrieve（prompt 注入）和 rag_search（前端测试）共同调用。
+    运行时 prompt 注入默认只走 Sparse，避免每回合触发 embedding。
     """
     seen_texts = set()  # 去重用
     exact_results = []
-    sparse_quota = max(1, top_k // 2)  # 关键词匹配最多占一半名额
+    sparse_quota = top_k  # 玩家运行时优先使用确定命中的设定，避免不必要 embedding
 
     # ── 1. 关键词预匹配（Sparse）──
+    normalized_query = query_text.lower()
+
+    # 从 world_entities 提取实体名。老库/轻量测试库可能没有该表，失败时仍继续文档检索。
     try:
-        # 从 world_entities 提取实体名
         entities = conn.execute(
             "SELECT name FROM world_entities WHERE name IS NOT NULL AND name != ''"
         ).fetchall()
+    except Exception as e:
+        _log.debug("RAG 实体关键词检索跳过: %s", e)
+        entities = []
+
+    try:
         # 从 rag_documents 提取文档标题
         doc_titles = conn.execute(
             "SELECT title FROM rag_documents WHERE title IS NOT NULL AND title != ''"
@@ -388,12 +522,18 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
         hit_keywords = set()
         for row in entities:
             name = row["name"]
-            if len(name) >= 2 and name in query_text:
+            if len(name) >= 2 and name.lower() in normalized_query:
                 hit_keywords.add(name)
         for row in doc_titles:
             title = row["title"]
-            if len(title) >= 2 and title in query_text:
-                hit_keywords.add(title)
+            if len(title) >= 2:
+                title_lower = title.lower()
+                if title_lower in normalized_query:
+                    hit_keywords.add(title)
+                else:
+                    for term in _extract_sparse_terms(title, max_terms=16):
+                        if term in normalized_query:
+                            hit_keywords.add(term)
 
         # 对命中关键词执行精确查找
         if hit_keywords:
@@ -403,8 +543,8 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
                 rows = conn.execute(
                     "SELECT c.chunk_text, c.chunk_index, c.doc_id, d.title "
                     "FROM rag_chunks c JOIN rag_documents d ON c.doc_id = d.id "
-                    "WHERE d.hidden=0 AND c.chunk_text LIKE ? LIMIT 2",
-                    (f"%{kw}%",)
+                    "WHERE d.hidden=0 AND (d.title LIKE ? OR c.chunk_text LIKE ?) LIMIT 2",
+                    (f"%{kw}%", f"%{kw}%")
                 ).fetchall()
                 for r in rows:
                     if r["chunk_text"] not in seen_texts and len(exact_results) < sparse_quota:
@@ -416,8 +556,36 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
                             "chunk_index": r["chunk_index"],
                         })
                         seen_texts.add(r["chunk_text"])
+
+        # 关键词兜底：没有实体/标题精确命中时，也可通过少量查询词召回公开知识。
+        if len(exact_results) < sparse_quota:
+            for term in _extract_sparse_terms(query_text):
+                if len(exact_results) >= sparse_quota:
+                    break
+                rows = conn.execute(
+                    "SELECT c.chunk_text, c.chunk_index, c.doc_id, d.title "
+                    "FROM rag_chunks c JOIN rag_documents d ON c.doc_id = d.id "
+                    "WHERE d.hidden=0 AND (d.title LIKE ? OR c.chunk_text LIKE ?) LIMIT 2",
+                    (f"%{term}%", f"%{term}%")
+                ).fetchall()
+                for r in rows:
+                    if r["chunk_text"] not in seen_texts and len(exact_results) < sparse_quota:
+                        exact_results.append({
+                            "score": 0.72,
+                            "chunk_text": r["chunk_text"],
+                            "title": f"[关键词]{r['title']}",
+                            "doc_id": r["doc_id"],
+                            "chunk_index": r["chunk_index"],
+                        })
+                        seen_texts.add(r["chunk_text"])
     except Exception as e:
         _log.debug("RAG 关键词预匹配异常（已跳过）: %s", e)
+
+    if exact_results and (vec_threshold >= 0.3 or not allow_dense):
+        return exact_results[:top_k]
+
+    if not allow_dense:
+        return exact_results[:top_k]
 
     # ── 2. 向量语义检索（Dense）──
     dense_quota = top_k - len(exact_results)
@@ -472,12 +640,13 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
     return exact_results + vec_results
 
 
-def rag_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K) -> str:
+def rag_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
+                 allow_dense: bool = False) -> str:
     """
     检索最相关的 top_k 个切片，格式化为 prompt 注入文本。
-    使用混合检索：关键词精确匹配置顶 + 向量语义检索补充。
+    运行时默认只使用关键词/实体/标题检索，不调用 embedding。
     """
-    results = _hybrid_retrieve(conn, query_text, top_k=top_k)
+    results = _hybrid_retrieve(conn, query_text, top_k=top_k, allow_dense=allow_dense)
     if not results:
         return ""
     return "\n\n".join(
@@ -500,6 +669,22 @@ def rag_list_documents():
         result.append({**dict(d), "chunk_count": chunk_count})
     conn.close()
     return {"status": "success", "documents": result}
+
+
+@rag_router.get("/api/rag/documents/{doc_id}")
+def rag_get_document(doc_id: int):
+    """读取单个知识库文档及其切片，供玩家友好的资料查看面板使用。"""
+    conn = get_db_connection()
+    doc = conn.execute("SELECT * FROM rag_documents WHERE id=? AND hidden=0", (doc_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return {"status": "error", "message": "文档不存在或未公开", "document": None, "chunks": []}
+    chunks = [dict(r) for r in conn.execute(
+        "SELECT id, chunk_index, chunk_text FROM rag_chunks WHERE doc_id=? ORDER BY chunk_index",
+        (doc_id,)
+    ).fetchall()]
+    conn.close()
+    return {"status": "success", "document": dict(doc), "chunks": chunks}
 
 
 @rag_router.post("/api/rag/ingest")
@@ -645,10 +830,16 @@ def rag_toggle_hidden(doc_id: int, hidden: int):
 
 @rag_router.post("/api/rag/search")
 def rag_search(req: RagSearchRequest):
-    """独立检索接口，供前端测试知识库效果。使用混合检索。"""
+    """独立检索接口，供前端测试知识库效果；默认模拟运行时的无 embedding 检索。"""
     query = f"{req.scene_name} {req.content}"
     conn = get_db_connection()
     effective_top_k = req.top_k if req.top_k > 0 else RAG_TOP_K * 2
-    results = _hybrid_retrieve(conn, query, top_k=effective_top_k, vec_threshold=0.0)
+    results = _hybrid_retrieve(
+        conn,
+        query,
+        top_k=effective_top_k,
+        vec_threshold=0.0 if req.use_dense else 0.3,
+        allow_dense=req.use_dense,
+    )
     conn.close()
     return {"status": "success", "results": results}

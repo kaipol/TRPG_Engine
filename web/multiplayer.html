@@ -121,7 +121,7 @@
             <strong style="color:#f5edd8">{{ room.name }}</strong>
             <div class="small">房间 {{ room.code }} · {{ wsConnected ? '已同步' : '连接中' }}</div>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft)">
-              <span class="small">席位 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
+              <span class="small">角色席位 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
               <span class="small" :style="{color: roomSeatTone}">{{ roomSeatLabel }}</span>
             </div>
           </div>
@@ -137,6 +137,7 @@
           <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '选择剧中角色后开始行动。' }}</div>
           <div v-if="hasLockedCharacters" class="small" style="margin-top:6px;color:var(--good)">角色已确认，开局后不可改选。</div>
           <div v-else-if="roomFullForNewPlayer" class="small" style="margin-top:6px;color:var(--bad)">席位已满，等待 GM 调整房间人数。</div>
+          <div v-else class="small" style="margin-top:6px;color:var(--muted)">本房间还可确认 {{ playerSlotsRemaining }} 个角色席位。</div>
         </section>
 
         <div class="solo-scroll" v-if="room">
@@ -183,6 +184,15 @@
           <i class="ph ph-door-open" style="font-size:56px;opacity:.22"></i>
           <p style="font-size:14px;margin:0">等待房间连接</p>
         </div>
+        <template v-else-if="!hasLockedCharacters">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:var(--faint);text-align:center;padding:30px">
+            <i class="ph ph-user-switch" style="font-size:56px;opacity:.24"></i>
+            <p style="font-size:15px;margin:0;color:var(--text)">先在左侧选择并确认要扮演的角色</p>
+            <p style="font-size:13px;line-height:1.7;margin:0;max-width:460px">
+              GM 创建房间时开放了 {{ maxPlayers }} 个角色席位，当前还剩 {{ playerSlotsRemaining }} 个。确认入座后才会进入场景行动。
+            </p>
+          </div>
+        </template>
         <template v-else>
           <div class="solo-scene-scroll">
             <article class="solo-scene-card">
@@ -353,7 +363,7 @@
           return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
         },
         claimedPlayerCount() {
-          return Number(this.room?.claimed_player_count || 0);
+          return Number(this.room?.claimed_character_count ?? this.room?.claimed_player_count ?? 0);
         },
         playerSlotsRemaining() {
           const remaining = Number(this.room?.player_slots_remaining);
@@ -372,12 +382,13 @@
           return this.playerSlotsRemaining > 0 ? 'var(--good)' : 'var(--bad)';
         },
         claimButtonDisabled() {
-          return !this.selectedCharacterIds.length || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer;
+          return !this.selectedCharacterIds.length || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer || this.selectedCharacterIds.length > this.playerSlotsRemaining;
         },
         claimButtonText() {
           if (this.hasLockedCharacters) return '角色已锁定';
           if (this.characterClaimBusy) return '记录中';
           if (this.roomFullForNewPlayer) return '席位已满';
+          if (this.selectedCharacterIds.length > this.playerSlotsRemaining) return `最多确认 ${this.playerSlotsRemaining} 个角色`;
           return this.selectedCharacterIds.length ? '确认扮演 ' + this.selectedCharacterNames.join(' / ') : '选择角色后确认';
         }
       },
@@ -505,9 +516,17 @@
           const idKey = String(id);
           const char = this.playableCharacters.find(item => String(item.id) === idKey);
           if (!char || this.isCharacterDisabled(char)) return;
-          this.selectedCharacterIds = this.isCharacterSelected(id)
-            ? this.selectedCharacterIds.filter(x => String(x) !== idKey)
-            : [...this.selectedCharacterIds, id];
+          if (this.isCharacterSelected(id)) {
+            this.selectedCharacterIds = this.selectedCharacterIds.filter(x => String(x) !== idKey);
+            this.characterClaimMsg = '';
+            return;
+          }
+          if (this.selectedCharacterIds.length >= this.playerSlotsRemaining) {
+            this.characterClaimMsg = `本房间还可确认 ${this.playerSlotsRemaining} 个角色席位`;
+            return;
+          }
+          this.selectedCharacterIds = [...this.selectedCharacterIds, id];
+          this.characterClaimMsg = '';
         },
         isCharacterSelected(id) {
           const idKey = String(id);
@@ -520,6 +539,10 @@
         },
         async claimCharacters() {
           if (!this.room || !this.selectedCharacterIds.length || this.hasLockedCharacters || this.roomFullForNewPlayer) return;
+          if (this.selectedCharacterIds.length > this.playerSlotsRemaining) {
+            this.characterClaimMsg = `最多确认 ${this.playerSlotsRemaining} 个角色`;
+            return;
+          }
           this.characterClaimBusy = true;
           this.characterClaimMsg = '';
           try {
@@ -548,7 +571,8 @@
           return !!claim && String(claim.player_id || '') !== String(this.profile.id || '');
         },
         isCharacterDisabled(char) {
-          return this.isClaimedByOther(char) || this.roomFullForNewPlayer || (this.hasLockedCharacters && !this.isOwnClaim(char));
+          if (this.isClaimedByOther(char) || this.roomFullForNewPlayer || (this.hasLockedCharacters && !this.isOwnClaim(char))) return true;
+          return !this.isCharacterSelected(char?.id) && this.selectedCharacterIds.length >= this.playerSlotsRemaining;
         },
         characterClaimLabel(char) {
           if (this.isOwnClaim(char)) return '已锁定';
@@ -560,7 +584,10 @@
           if (!claim) return '';
           return String(claim.player_id || '') === String(this.profile.id || '') ? '你已确认扮演该角色' : `已由 ${claim.display_name || '其他玩家'} 扮演`;
         },
-        useOptionAsAction(text) { this.chatText = text || this.chatText; },
+        useOptionAsAction(text) {
+          if (!this.hasLockedCharacters) return;
+          this.chatText = text || this.chatText;
+        },
         async sendChat() {
           const content = this.chatText.trim();
           if (!content || !this.room || !this.hasLockedCharacters) return;

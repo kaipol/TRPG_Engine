@@ -502,15 +502,22 @@ def _claimed_player_count(claims: list[dict[str, Any]]) -> int:
     return len({str(c.get("player_id") or "").strip() for c in claims if str(c.get("player_id") or "").strip()})
 
 
+def _claimed_character_count(claims: list[dict[str, Any]]) -> int:
+    return len({int(c["character_id"]) for c in claims if c.get("character_id") is not None})
+
+
 def _room_seat_info(conn, room_row, claims: list[dict[str, Any]] | None = None) -> dict[str, int]:
     claims = claims if claims is not None else _character_claims_for_room(conn, int(room_row["id"]))
     settings = _normalize_room_settings(conn, _load_json(room_row["settings"], {}))
-    claimed = _claimed_player_count(claims)
+    claimed_players = _claimed_player_count(claims)
+    claimed_characters = _claimed_character_count(claims)
     max_players = int(settings["max_players"])
     return {
         "max_players": max_players,
-        "claimed_player_count": claimed,
-        "player_slots_remaining": max(0, max_players - claimed),
+        "claimed_player_count": claimed_players,
+        "claimed_character_count": claimed_characters,
+        "player_slots_remaining": max(0, max_players - claimed_characters),
+        "character_slots_remaining": max(0, max_players - claimed_characters),
         "playable_character_count": _playable_character_count(conn),
     }
 
@@ -615,7 +622,9 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     room_limits = _room_seat_info(conn, room_row, claims) if room_row else {
         "max_players": 1,
         "claimed_player_count": 0,
+        "claimed_character_count": 0,
         "player_slots_remaining": 1,
+        "character_slots_remaining": 1,
         "playable_character_count": 1,
     }
     claims_by_character = {int(c["character_id"]): c for c in claims if c.get("character_id") is not None}
@@ -1498,10 +1507,10 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
             raise fastapi.HTTPException(status_code=409, detail="角色已锁定，不能重新选择")
         if not existing_ids:
             seat_info = _room_seat_info(conn, room)
-            if seat_info["claimed_player_count"] >= seat_info["max_players"]:
+            if seat_info["claimed_character_count"] + len(character_ids) > seat_info["max_players"]:
                 raise fastapi.HTTPException(
                     status_code=409,
-                    detail=f"房间人数已满（{seat_info['claimed_player_count']}/{seat_info['max_players']}）",
+                    detail=f"角色席位不足（已确认 {seat_info['claimed_character_count']}/{seat_info['max_players']}，本次选择 {len(character_ids)} 个）",
                 )
 
         conflict_rows = conn.execute(

@@ -227,6 +227,28 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 /* ── 模态框 ── */
 .modal-bg { position:fixed; inset:0; background:rgba(5,7,12,.85); z-index:50; display:flex; align-items:center; justify-content:center; padding:24px; backdrop-filter:blur(4px); }
 .modal-box { background:#0f1420; border:1px solid rgba(255,255,255,.08); border-radius:10px; box-shadow:0 24px 80px rgba(0,0,0,.6); display:flex; flex-direction:column; overflow:hidden; }
+.top-lore-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.top-lore-btn { border-color:rgba(255,255,255,.08); background:rgba(255,255,255,.025); }
+.top-lore-btn:hover { border-color:rgba(232,180,75,.22); color:#f5edd8; }
+.dossier-modal { width:min(1180px,96vw); height:min(820px,90vh); }
+.dossier-shell { flex:1; min-height:0; display:grid; grid-template-columns:220px minmax(0,1fr); background:#090b10; }
+.dossier-nav { border-right:1px solid rgba(255,255,255,.06); background:#0b0e17; padding:14px; display:flex; flex-direction:column; gap:8px; overflow-y:auto; }
+.dossier-tab-btn { width:100%; justify-content:space-between; padding:10px 12px; border-radius:8px; }
+.dossier-tab-btn.active { background:rgba(232,180,75,.08); border-color:rgba(232,180,75,.28); color:#f5edd8; }
+.dossier-content { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.dossier-scroll { flex:1; overflow-y:auto; padding:22px 26px; }
+.dossier-prose { white-space:pre-wrap; line-height:1.95; font-family:"Noto Serif SC","Noto Sans SC",serif; font-size:15px; color:#d9d2c4; }
+.dossier-empty { border:1px dashed rgba(255,255,255,.12); border-radius:10px; padding:36px; text-align:center; color:#6b7280; line-height:1.8; background:rgba(255,255,255,.02); }
+.dossier-map-layout { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 260px; }
+.dossier-map-canvas-wrap { min-width:0; min-height:360px; position:relative; overflow:hidden; background:#05070c; }
+.dossier-map-svg { width:100%; height:100%; display:block; cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none; background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px); background-size:40px 40px; }
+.dossier-map-svg:active { cursor:grabbing; }
+.dossier-map-room { cursor:pointer; pointer-events:all; }
+.dossier-side-list { border-left:1px solid rgba(255,255,255,.06); background:#0b0e17; display:flex; flex-direction:column; min-height:0; }
+.dossier-card { border:1px solid rgba(255,255,255,.07); border-radius:8px; background:#0b0e17; padding:12px 14px; }
+.dossier-card + .dossier-card { margin-top:10px; }
+.dossier-list-scroll { flex:1; overflow-y:auto; padding:12px; }
+@media (max-width: 900px) { .dossier-shell { grid-template-columns:1fr; } .dossier-nav { flex-direction:row; overflow-x:auto; border-right:none; border-bottom:1px solid rgba(255,255,255,.06); } .dossier-tab-btn { min-width:140px; } .dossier-map-layout { grid-template-columns:1fr; } .dossier-side-list { min-height:220px; border-left:none; border-top:1px solid rgba(255,255,255,.06); } }
 
 /* ── Toast ── */
 .toast-box {
@@ -269,6 +291,7 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 
 /* 单人玩家桌 */
 .solo-play-shell { flex:1; display:grid; grid-template-columns:300px minmax(0,1fr) 340px; overflow:hidden; background:#090b10; }
+.solo-play-shell.confirmed { grid-template-columns:minmax(0,1fr) 340px; }
 .solo-panel { background:#0f1420; border-right:1px solid rgba(255,255,255,.06); display:flex; flex-direction:column; min-width:0; overflow:hidden; }
 .solo-panel.right { border-right:none; border-left:1px solid rgba(255,255,255,.06); }
 .solo-section { padding:16px; border-bottom:1px solid rgba(255,255,255,.06); }
@@ -290,7 +313,7 @@ body { font-family: "Noto Sans SC", sans-serif; background:#090b10; color:#c9cdd
 .solo-message.ai { border-color:rgba(232,180,75,.18); background:rgba(232,180,75,.04); }
 .solo-action-type { display:flex; align-items:center; background:#090b10; border:1px solid rgba(255,255,255,.07); border-radius:6px; overflow:hidden; }
 .solo-action-type .btn { border-radius:0; border:none; font-size:11px; padding:6px 10px; }
-@media (max-width: 1180px) { .solo-play-shell { grid-template-columns:260px minmax(0,1fr); } .solo-panel.right { grid-column:1 / -1; border-left:none; border-top:1px solid rgba(255,255,255,.06); min-height:340px; } }
+@media (max-width: 1180px) { .solo-play-shell { grid-template-columns:260px minmax(0,1fr); } .solo-play-shell.confirmed { grid-template-columns:minmax(0,1fr); } .solo-panel.right { grid-column:1 / -1; border-left:none; border-top:1px solid rgba(255,255,255,.06); min-height:340px; } }
 @media (max-width: 760px) { .solo-play-shell { display:block; overflow:auto; } .solo-panel, .solo-scene, .solo-panel.right { min-height:420px; border-left:none; border-right:none; border-bottom:1px solid rgba(255,255,255,.06); } }
 
 /* ── 检定结果卡 ── */
@@ -618,7 +641,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                             <span v-else style="margin-left:auto;font-size:10px;color:#e05c5c">未配置</span>
                         </label>
                         <input v-model="apiKeyInputs.openaiApiKey" type="password" class="inp inp-mono"
-                               :placeholder="apiKeyStatus.openai ? '已配置，输入新值以覆盖' : 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+                               :placeholder="apiKeyStatus.openai ? '已配置，输入新值以覆盖' : '在此输入 API Key'"
                                style="font-size:12px">
                     </div>
                 </div>
@@ -710,10 +733,26 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
             </div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
-            <button @click="openMultiplayerModal" class="btn btn-sm" style="background:rgba(56,189,248,.06);border-color:rgba(56,189,248,.18);color:#7dd3fc">
-                <i class="ph ph-users-three" style="font-size:15px"></i>
-                <span>{{ multiplayerRoom ? '房间 ' + multiplayerRoom.code : '多人房间' }}</span>
-            </button>
+            <div class="top-lore-actions">
+                <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
+                    <i class="ph ph-globe" style="font-size:15px"></i> 世界观
+                </button>
+                <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
+                    <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+                </button>
+                <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
+                    <i class="ph ph-database" style="font-size:15px"></i> 知识库
+                </button>
+                <button @click="openDossierPanel('lore')" class="btn btn-ghost btn-sm top-lore-btn" title="查看百科库">
+                    <i class="ph ph-books" style="font-size:15px"></i> 百科
+                </button>
+                <button @click="openDossierPanel('entities')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界实体">
+                    <i class="ph ph-graph" style="font-size:15px"></i> 实体
+                </button>
+                <button @click="openDossierPanel('memory')" class="btn btn-ghost btn-sm top-lore-btn" title="查看记忆流">
+                    <i class="ph ph-brain" style="font-size:15px"></i> 记忆
+                </button>
+            </div>
             <button @click="playSurface='gm'" class="btn btn-ghost btn-sm" data-testid="gm-surface-switch">
                 <i class="ph ph-game-controller" style="font-size:15px"></i> GM 控制台
             </button>
@@ -723,8 +762,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
         </div>
     </header>
 
-    <div class="solo-play-shell">
-        <aside class="solo-panel">
+    <div class="solo-play-shell" :class="{confirmed: soloHasConfirmedCharacters}">
+        <aside v-if="!soloHasConfirmedCharacters" class="solo-panel">
             <section class="solo-section">
                 <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:#93c5fd">
                     <i class="ph ph-user-circle" style="font-size:14px"></i> 玩家入场
@@ -935,35 +974,32 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                 <span style="font-family:'JetBrains Mono';font-size:12px;color:#374151;margin-left:8px">#{{ currentNode.id }}</span>
             </div>
 
-            <!-- AI 模型选择：输入后回车或从下拉选择才会切换 -->
-            <div class="model-picker" style="width:260px;margin-left:20px;flex-shrink:0">
-                <input v-model.trim="aiModelDraft" @focus="openAiModelDropdown" @keydown.enter.prevent="applyAiModelDraft" class="inp inp-mono"
-                       placeholder="Chat Model" title="输入模型 ID 后按回车生效，或从下拉列表选择"
-                       style="height:34px;font-size:12px;border-color:rgba(79,201,138,.22);color:#9ee6bf">
-                <button @click="toggleAiModelDropdown" class="btn btn-ghost btn-icon" title="选择 AI 推演模型" style="width:34px;height:34px;padding:0;flex:0 0 34px">
-                    <i :class="openAiModelDropdownState?'ph ph-caret-up':'ph ph-caret-down'" style="font-size:14px"></i>
-                </button>
-                <div v-if="openAiModelDropdownState" class="model-picker-menu">
-                    <input v-model.trim="aiModelSearch" class="inp inp-mono model-picker-search" placeholder="在已获取模型中搜索 Chat Model" @keydown.enter.prevent="selectFirstFilteredAiModel">
-                    <div class="model-picker-list">
-                        <button v-for="m in filteredAiModels()" :key="'header-ai-drop-'+m.key" @click="selectAiModel(m.key)" :disabled="!m.available" class="model-picker-option" :class="{active: activeAiModel===m.key}" :title="m.label || m.key">
-                            {{ m.label || m.key }}{{ m.provider ? ' @ ' + m.provider : '' }}{{ m.available ? '' : '（未配置）' }}
-                        </button>
-                        <div v-if="!filteredAiModels().length" class="model-picker-empty">没有匹配的模型</div>
-                    </div>
-                </div>
-            </div>
         </div>
 
         <!-- 右侧工具栏 -->
-        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+            <div class="top-lore-actions">
+                <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
+                    <i class="ph ph-globe" style="font-size:15px"></i> 世界观
+                </button>
+                <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
+                    <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+                </button>
+                <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
+                    <i class="ph ph-database" style="font-size:15px"></i> 知识库
+                </button>
+                <button @click="openDossierPanel('lore')" class="btn btn-ghost btn-sm top-lore-btn" title="查看百科库">
+                    <i class="ph ph-books" style="font-size:15px"></i> 百科
+                </button>
+                <button @click="openDossierPanel('entities')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界实体">
+                    <i class="ph ph-graph" style="font-size:15px"></i> 实体
+                </button>
+                <button @click="openDossierPanel('memory')" class="btn btn-ghost btn-sm top-lore-btn" title="查看记忆流">
+                    <i class="ph ph-brain" style="font-size:15px"></i> 记忆
+                </button>
+            </div>
             <button @click="playSurface='player'" class="btn btn-sm" style="background:rgba(232,180,75,.08);border-color:rgba(232,180,75,.22);color:#e8b44b" data-testid="player-surface-switch">
                 <i class="ph ph-user-circle" style="font-size:15px"></i> 玩家桌
-            </button>
-            <button @click="openMultiplayerModal" class="btn btn-sm" style="background:rgba(56,189,248,.06);border-color:rgba(56,189,248,.18);color:#7dd3fc">
-                <i class="ph ph-users-three" style="font-size:15px"></i>
-                <span>{{ multiplayerRoom ? '房间 ' + multiplayerRoom.code : '多人房间' }}</span>
-                <span v-if="multiplayerMembers.length" style="background:rgba(56,189,248,.14);border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono';font-size:10px;font-weight:700">{{ multiplayerMembers.length }}</span>
             </button>
             <button @click="exportSave" class="btn btn-ghost btn-sm">
                 <i class="ph ph-floppy-disk" style="font-size:15px"></i> 存档
@@ -1695,10 +1731,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                         <i class="ph ph-arrow-left" style="font-size:15px"></i>
                     </button>
                     <i v-else class="ph ph-sliders-horizontal" style="font-size:16px"></i>
-                    {{ showAdvancedSettings ? '高级系统' : '游戏设置' }}
+                    {{ showAdvancedSettings ? '剧本解析与管理' : '游戏设置' }}
                 </div>
                 <div style="font-size:12px;color:#4b5563;margin-top:4px">
-                    {{ showAdvancedSettings ? '返回基础设置或进入对应系统面板。' : '基础操作保留在这里，高级系统按需进入。' }}
+                    {{ showAdvancedSettings ? '编辑世界观、地图、百科、知识库与触发器；玩家查看入口已放在上栏资料册。' : '基础操作保留在这里，剧本解析与管理按需进入。' }}
                 </div>
             </div>
             <button @click="showGameSettingsModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
@@ -1729,10 +1765,10 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
             <section v-if="!showAdvancedSettings">
                 <button @click="showAdvancedSettings=true" class="btn btn-ghost" style="width:100%;justify-content:space-between">
                     <span style="display:flex;align-items:center;gap:7px">
-                        <i class="ph ph-wrench"></i> 高级系统
+                        <i class="ph ph-wrench"></i> 剧本解析与管理
                     </span>
                     <span style="display:flex;align-items:center;gap:8px;color:#6b7280;font-size:12px">
-                        世界观 / 地图 / 百科 / 触发器
+                        编辑世界观 / 地图 / 百科 / 触发器
                         <i class="ph ph-arrow-right"></i>
                     </span>
                 </button>
@@ -1847,7 +1883,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
                     {{ multiplayerWsConnected ? '实时同步中' : '房间已创建，完整联机桌会建立实时连接' }}
                 </div>
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#6b7280;border-top:1px solid rgba(255,255,255,.06);padding-top:10px">
-                    <span>玩家席位 {{ multiplayerClaimedPlayerCount }} / {{ multiplayerRoomMaxPlayers }}</span>
+                    <span>角色席位 {{ multiplayerClaimedPlayerCount }} / {{ multiplayerRoomMaxPlayers }}</span>
                     <span :style="{color: multiplayerRoomSeatsRemaining > 0 ? '#4fc98a' : '#e05c5c'}">
                         {{ multiplayerRoomSeatsRemaining > 0 ? '剩余 ' + multiplayerRoomSeatsRemaining + ' 席' : '席位已满' }}
                     </span>
@@ -3327,6 +3363,271 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════
+     顶栏资料册：玩家友好查看层
+══════════════════════════════════════════════════════════════ -->
+<div v-if="showDossierModal && appState==='game'" class="modal-bg" @click.self="showDossierModal=false">
+    <div class="modal-box dossier-modal">
+        <div style="padding:18px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0">
+            <div style="min-width:0">
+                <div class="tag" style="color:#e8b44b;font-size:13px;display:flex;align-items:center;gap:7px">
+                    <i :class="['ph', dossierActiveTab.icon]" style="font-size:16px"></i>
+                    跑团资料册 / {{ dossierActiveTab.label }}
+                </div>
+                <div style="font-size:12px;color:#4b5563;margin-top:4px">
+                    世界观、地图、百科与公开知识库在这里阅读；编辑与解析仍保留在剧本管理区。
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                <button @click="showDossierModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
+                    <i class="ph ph-x" style="font-size:15px"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="dossier-shell">
+            <nav class="dossier-nav">
+                <button v-for="tab in dossierTabs" :key="tab.id"
+                        @click="switchDossierTab(tab.id)"
+                        class="btn btn-ghost dossier-tab-btn"
+                        :class="{active:dossierTab===tab.id}">
+                    <span style="display:flex;align-items:center;gap:8px">
+                        <i :class="['ph', tab.icon]"></i> {{ tab.label }}
+                    </span>
+                    <span v-if="dossierTabCount(tab.id)" style="font-family:'JetBrains Mono';font-size:10px;color:#6b7280">{{ dossierTabCount(tab.id) }}</span>
+                </button>
+            </nav>
+
+            <main class="dossier-content">
+                <template v-if="dossierTab==='worldview'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">世界观</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">剧本的全局规则、氛围、背景与禁忌。</div>
+                        </div>
+                    </div>
+                    <div class="dossier-scroll">
+                        <div v-if="worldviewContent" class="dossier-prose">{{ worldviewContent }}</div>
+                        <div v-else class="dossier-empty">暂无世界观内容。GM 可在“设置 → 剧本解析与管理”中补充剧本背景。</div>
+                    </div>
+                </template>
+
+                <template v-else-if="dossierTab==='map'">
+                    <div style="padding:12px 18px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span class="tag" style="color:#38bdf8"><i class="ph ph-stack"></i> 楼层</span>
+                            <button v-for="fl in mapFloors" :key="'dossier-floor-'+fl"
+                                    @click="selectDossierFloor(fl)"
+                                    class="btn btn-ghost btn-sm"
+                                    :style="mapActiveFloor===fl?{background:'rgba(56,189,248,.12)',borderColor:'rgba(56,189,248,.35)',color:'#38bdf8'}:{color:'#6b7280'}">
+                                {{ fl === 1 ? '1F' : fl > 0 ? fl + 'F' : 'B' + Math.abs(fl) }}
+                                <span style="font-family:'JetBrains Mono';font-size:10px">{{ mapRooms.filter(r=>(r.floor??1)===fl).length }}</span>
+                            </button>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <button @click.stop="dossierFitMapToFloor()" class="btn btn-ghost btn-sm"><i class="ph ph-arrows-out"></i> 适配全图</button>
+                        </div>
+                    </div>
+                    <div class="dossier-map-layout">
+                        <div ref="dossierMapCanvasRef" class="dossier-map-canvas-wrap">
+                            <svg class="dossier-map-svg"
+                                 :width="dossierMapSvgW"
+                                 :height="dossierMapSvgH"
+                                 :view-box.camel="dossierMapViewBox"
+                                 @mousedown="dossierMapOnMouseDown"
+                                 @mousemove="dossierMapOnMouseMove"
+                                 @mouseup="dossierMapOnMouseUp"
+                                 @mouseleave="dossierMapOnMouseUp"
+                                 @touchstart.prevent="dossierMapOnTouchStart"
+                                 @touchmove.prevent="dossierMapOnTouchMove"
+                                 @touchend.prevent="dossierMapOnTouchEnd"
+                                 @wheel.prevent="dossierMapOnWheel">
+                                <defs>
+                                    <pattern id="dossierGrid" :width="MAP_GRID" :height="MAP_GRID" patternUnits="userSpaceOnUse">
+                                        <path :d="`M ${MAP_GRID} 0 L 0 0 0 ${MAP_GRID}`" fill="none" stroke="rgba(255,255,255,.035)" stroke-width="1"/>
+                                    </pattern>
+                                </defs>
+                                <rect :x="dossierMapViewX" :y="dossierMapViewY" :width="dossierMapSvgW/dossierMapScale" :height="dossierMapSvgH/dossierMapScale" fill="url(#dossierGrid)"/>
+
+                                <g v-for="edge in mapVisibleEdges" :key="'dossier-edge-'+edge.id">
+                                    <template v-if="mapRoomById(edge.from_id) && mapRoomById(edge.to_id)">
+                                        <line v-if="(mapRoomById(edge.from_id).floor??1)===(mapRoomById(edge.to_id).floor??1)"
+                                              :x1="mapRoomById(edge.from_id).x + mapRoomById(edge.from_id).w/2"
+                                              :y1="mapRoomById(edge.from_id).y + mapRoomById(edge.from_id).h/2"
+                                              :x2="mapRoomById(edge.to_id).x + mapRoomById(edge.to_id).w/2"
+                                              :y2="mapRoomById(edge.to_id).y + mapRoomById(edge.to_id).h/2"
+                                              :stroke="edge.locked?'#e05c5c':'#475569'"
+                                              stroke-width="2" :stroke-dasharray="edge.locked?'6 3':'none'"/>
+                                        <text v-if="edge.label && (mapRoomById(edge.from_id).floor??1)===(mapRoomById(edge.to_id).floor??1)"
+                                              :x="(mapRoomById(edge.from_id).x+mapRoomById(edge.from_id).w/2+mapRoomById(edge.to_id).x+mapRoomById(edge.to_id).w/2)/2"
+                                              :y="(mapRoomById(edge.from_id).y+mapRoomById(edge.from_id).h/2+mapRoomById(edge.to_id).y+mapRoomById(edge.to_id).h/2)/2 - 5"
+                                              text-anchor="middle" font-size="11" fill="#64748b">{{ edge.label }}</text>
+                                    </template>
+                                </g>
+
+                                <g v-for="room in mapVisibleRooms" :key="'dossier-room-'+room.id" class="dossier-map-room" @click.stop="dossierSelectMapRoom(room)">
+                                    <rect :x="room.x" :y="room.y" :width="room.w" :height="room.h" rx="8"
+                                          :fill="room.state==='unknown'?'rgba(255,255,255,.035)':room.color"
+                                          :stroke="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?'#e8b44b':room.state==='active'?'#4fc98a':room.state==='locked'?'#e05c5c':'rgba(255,255,255,.14)'"
+                                          :stroke-width="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?3:1.4"
+                                          :stroke-dasharray="room.state==='unknown'?'4 3':'none'"/>
+                                    <text :x="room.x + room.w/2" :y="room.y + room.h/2 - 5"
+                                          text-anchor="middle" font-size="14" font-family="'Noto Serif SC'" font-weight="700"
+                                          pointer-events="none"
+                                          :fill="room.state==='unknown'?'#64748b':'#f8ead0'">{{ room.label.length>10 ? room.label.slice(0,10)+'…' : room.label }}</text>
+                                    <text :x="room.x + room.w/2" :y="room.y + room.h/2 + 14"
+                                          text-anchor="middle" font-size="11" fill="#94a3b8" pointer-events="none">
+                                        {{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[room.state] || room.state }}
+                                    </text>
+                                </g>
+
+                                <g v-for="(tl, tlIdx) in timelines.filter(t => t.status==='active' && t.current_room_id && mapRoomById(t.current_room_id) && (mapRoomById(t.current_room_id).floor??1)===mapActiveFloor)"
+                                   :key="'dossier-tl-'+tl.id">
+                                    <rect :x="mapRoomById(tl.current_room_id).x + 5 + tlIdx * 20"
+                                          :y="mapRoomById(tl.current_room_id).y + 5"
+                                          width="17" height="21" rx="4" :fill="tl.color + '33'" :stroke="tl.color" stroke-width="1.5"/>
+                                    <text :x="mapRoomById(tl.current_room_id).x + 13.5 + tlIdx * 20"
+                                          :y="mapRoomById(tl.current_room_id).y + 19"
+                                          text-anchor="middle" font-size="10" font-family="'JetBrains Mono'" :fill="tl.color">{{ tl.label.slice(0,1) }}</text>
+                                </g>
+
+                                <g v-for="entity in worldEntities.filter(e => e.room_id && mapRoomById(e.room_id) && (mapRoomById(e.room_id).floor??1)===mapActiveFloor && e.status!=='dead' && e.status!=='pending')"
+                                   :key="'dossier-entity-'+entity.id" @click.stop="dossierSelectedEntity=entity" style="cursor:pointer">
+                                    <circle :cx="mapRoomById(entity.room_id).x + mapRoomById(entity.room_id).w - 12"
+                                            :cy="mapRoomById(entity.room_id).y + mapRoomById(entity.room_id).h - 12 - worldEntities.filter(e2=>e2.room_id===entity.room_id&&e2.status!=='dead'&&e2.status!=='pending').indexOf(entity)*14"
+                                            r="6" :fill="entity.entity_type==='npc'?'#f97316':entity.entity_type==='location'?'#38bdf8':'#a78bfa'" stroke="rgba(0,0,0,.45)" stroke-width="1"/>
+                                </g>
+                            </svg>
+                            <div v-if="!mapVisibleRooms.length" class="dossier-empty" style="position:absolute;inset:24px;display:flex;align-items:center;justify-content:center">
+                                当前楼层暂无地点。GM 可在“设置 → 剧本解析与管理 → 地图”中补充地点。
+                            </div>
+                        </div>
+                        <aside class="dossier-side-list">
+                            <div style="padding:14px;border-bottom:1px solid rgba(255,255,255,.06)">
+                                <div class="tag" style="color:#38bdf8;margin-bottom:8px"><i class="ph ph-map-pin"></i> 本层地点</div>
+                                <div style="font-size:12px;color:#6b7280;line-height:1.6">拖动画布可查看所有地点，滚轮缩放，点击地点查看描述。</div>
+                            </div>
+                            <div class="dossier-list-scroll">
+                                <div v-if="dossierSelectedRoom" class="dossier-card" style="border-color:rgba(232,180,75,.24);background:rgba(232,180,75,.04)">
+                                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                                        <strong style="color:#f5edd8">{{ dossierSelectedRoom.label }}</strong>
+                                        <span class="tag">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[dossierSelectedRoom.state] || dossierSelectedRoom.state }}</span>
+                                    </div>
+                                    <div style="font-size:12px;color:#9ca3af;line-height:1.7;white-space:pre-wrap">{{ dossierSelectedRoom.description || '暂无地点描述。' }}</div>
+                                </div>
+                                <button v-for="room in mapVisibleRooms" :key="'dossier-room-list-'+room.id"
+                                        @click="dossierSelectMapRoom(room, true)"
+                                        class="dossier-card"
+                                        style="width:100%;text-align:left;cursor:pointer"
+                                        :style="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?{borderColor:'rgba(232,180,75,.35)'}:{}">
+                                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                                        <span style="font-size:13px;font-weight:700;color:#d9d2c4">{{ room.label }}</span>
+                                        <span style="font-size:11px;color:#6b7280">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前'}[room.state] || room.state }}</span>
+                                    </div>
+                                </button>
+                            </div>
+                        </aside>
+                    </div>
+                </template>
+
+                <template v-else-if="dossierTab==='knowledge'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">公开知识库</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">这里展示非隐藏 RAG 文档；隐藏文档留给触发器或 GM 管理区。</div>
+                        </div>
+                    </div>
+                    <div style="flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr)">
+                        <aside class="dossier-side-list" style="border-left:none;border-right:1px solid rgba(255,255,255,.06)">
+                            <div style="padding:12px;border-bottom:1px solid rgba(255,255,255,.06)">
+                                <input v-model.trim="dossierSearch" class="inp" placeholder="搜索文档标题或来源…" style="font-size:12px">
+                            </div>
+                            <div class="dossier-list-scroll">
+                                <div v-if="!dossierVisibleRagDocuments.length" class="dossier-empty" style="padding:24px 14px">暂无公开知识库文档。</div>
+                                <button v-for="doc in dossierVisibleRagDocuments" :key="'dossier-doc-'+doc.id"
+                                        @click="selectDossierDoc(doc.id)"
+                                        class="dossier-card"
+                                        style="width:100%;text-align:left;cursor:pointer"
+                                        :style="dossierSelectedDocId===doc.id?{borderColor:'rgba(129,140,248,.35)',background:'rgba(129,140,248,.05)'}:{}">
+                                    <div style="font-size:13px;font-weight:700;color:#d9d2c4;margin-bottom:5px">{{ doc.title }}</div>
+                                    <div style="font-size:11px;color:#6b7280;line-height:1.5">{{ doc.chunk_count }} 段 · {{ doc.source || '无来源' }}</div>
+                                </button>
+                            </div>
+                        </aside>
+                        <section class="dossier-scroll">
+                            <div v-if="dossierLoadingDoc" class="dossier-empty"><i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i> 正在读取文档…</div>
+                            <div v-else-if="!dossierSelectedDoc" class="dossier-empty">从左侧选择一份公开文档。</div>
+                            <template v-else>
+                                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px">
+                                    <div>
+                                        <div style="font-size:18px;font-weight:800;color:#f5edd8">{{ dossierSelectedDoc.title }}</div>
+                                        <div style="font-size:12px;color:#4b5563;margin-top:4px">{{ dossierSelectedDoc.source || '无来源标注' }} · {{ dossierDocChunks.length }} 个切片</div>
+                                    </div>
+                                </div>
+                                <div v-if="dossierDocChunks.length" class="dossier-prose">{{ dossierDocText }}</div>
+                                <div v-else class="dossier-empty">此文档暂无可读切片。</div>
+                            </template>
+                        </section>
+                    </div>
+                </template>
+
+                <template v-else-if="dossierTab==='lore'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">百科库</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">关键词词条、设定说明和剧本解析得到的资料。</div>
+                        </div>
+                    </div>
+                    <div class="dossier-scroll">
+                        <input v-model.trim="dossierSearch" class="inp" placeholder="搜索关键词或内容…" style="margin-bottom:14px">
+                        <div v-if="!dossierFilteredLore.length" class="dossier-empty">暂无匹配百科词条。</div>
+                        <div v-for="item in dossierFilteredLore" :key="'dossier-lore-'+item.id" class="dossier-card">
+                            <div style="font-size:13px;font-weight:800;color:#a78bfa;margin-bottom:8px">{{ item.keywords }}</div>
+                            <div style="font-size:13px;color:#c9cdd6;line-height:1.8;white-space:pre-wrap">{{ item.content }}</div>
+                        </div>
+                    </div>
+                </template>
+
+                <template v-else-if="dossierTab==='entities'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">世界实体</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">NPC、地点与事件的当前状态。</div>
+                        </div>
+                    </div>
+                    <div class="dossier-scroll">
+                        <input v-model.trim="dossierSearch" class="inp" placeholder="搜索名称、地点或状态…" style="margin-bottom:14px">
+                        <div v-if="!dossierFilteredEntities.length" class="dossier-empty">暂无匹配实体。</div>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px">
+                            <div v-for="entity in dossierFilteredEntities" :key="'dossier-entity-card-'+entity.id" class="dossier-card">
+                                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                                    <strong style="color:#f5edd8">{{ entity.name }}</strong>
+                                    <span class="tag" :style="{color:entity.entity_type==='npc'?'#f97316':entity.entity_type==='location'?'#38bdf8':'#a78bfa'}">{{ {npc:'人物',location:'地点',event:'事件'}[entity.entity_type] || entity.entity_type }}</span>
+                                </div>
+                                <div style="font-size:12px;color:#6b7280;margin-bottom:8px">{{ entity.location || (entity.room_id && mapRoomById(entity.room_id) ? mapRoomById(entity.room_id).label : '未知位置') }} · {{ entity.status || 'active' }}</div>
+                                <div style="font-size:12px;color:#c9cdd6;line-height:1.7;white-space:pre-wrap">{{ entity.state_desc || '暂无状态描述。' }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <template v-else-if="dossierTab==='memory'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">记忆流</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">当前会话已经发生的剧情记录。</div>
+                        </div>
+                    </div>
+                    <div class="dossier-scroll">
+                        <div v-if="memoryContent" class="dossier-prose">{{ memoryContent }}</div>
+                        <div v-else class="dossier-empty">暂无会话记忆。</div>
+                    </div>
+                </template>
+            </main>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
      地图编辑器 模态框
 ══════════════════════════════════════════════════════════════ -->
 <div v-if="showMapModal && appState==='game'" class="modal-bg" @click.self="showMapModal=false">
@@ -3410,7 +3711,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; h
          @wheel.prevent="mapOnWheel">
 
       <svg :width="mapSvgW" :height="mapSvgH"
-           :viewBox="`${mapViewX} ${mapViewY} ${mapSvgW/mapScale} ${mapSvgH/mapScale}`"
+           :view-box.camel="`${mapViewX} ${mapViewY} ${mapSvgW/mapScale} ${mapSvgH/mapScale}`"
            style="width:100%;height:100%;user-select:none">
 
         <!-- 网格背景 -->
@@ -4054,6 +4355,22 @@ createApp({
             return merged;
         };
 
+        const syncConfigModelOptions = (models, { provider = null, capabilities = null } = {}) => {
+            const baseModels = mergeModelOptions(models || []);
+            const allowed = capabilities ? new Set(capabilities) : null;
+            const providerInfo = provider || activeAiProvider.value || {
+                id: activeProviderId.value,
+                name: activeProviderName.value,
+            };
+            const nextOptions = { ...modelOptions.value };
+            modelConfigFields.forEach(field => {
+                if (allowed && !allowed.has(field.capability)) return;
+                const currentModel = (apiKeyInputs.value[field.key] || '').trim();
+                nextOptions[field.capability] = ensureModelOption(baseModels, currentModel, providerInfo);
+            });
+            modelOptions.value = nextOptions;
+        };
+
         const openModelDropdown = (capability) => {
             if ((modelOptions.value[capability] || []).length) {
                 openModelDropdownCapability.value = capability;
@@ -4076,30 +4393,47 @@ createApp({
             if (first) selectConfigModel(field.key, first.key, field.capability);
         };
 
+        const configModelRequestBody = (capability) => ({
+            capability,
+            provider_id: apiKeyInputs.value.providerId || '',
+            provider_name: apiKeyInputs.value.providerName || '',
+            openai_compat_api_key: apiKeyInputs.value.openaiApiKey || '',
+            openai_compat_base_url: apiKeyInputs.value.baseUrl || '',
+            chat_model: apiKeyInputs.value.chatModel || '',
+            embedding_model: apiKeyInputs.value.embeddingModel || '',
+            image_model: apiKeyInputs.value.imageModel || '',
+        });
+
+        const requestConfigModels = async (capability) => {
+            const r = await fetch(`${API_BASE_URL}/api/config/models`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(configModelRequestBody(capability)),
+            });
+            return await r.json();
+        };
+
         const fetchConfigModels = async (capability = 'chat') => {
             if (isFetchingConfigModels.value) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = capability;
+            apiKeySaveMsg.value = '';
             try {
-                const params = new URLSearchParams({ capability });
-                const r = await fetch(`${API_BASE_URL}/api/config/models?${params.toString()}`);
-                const d = await r.json();
+                const d = await requestConfigModels(capability);
                 if (d.status === 'success') {
                     const field = modelConfigFields.find(f => f.capability === capability);
-                    const currentModel = field ? (apiKeyInputs.value[field.key] || d.active || '') : (d.active || '');
+                    const currentModel = field ? (apiKeyInputs.value[field.key] || '') : '';
                     const models = ensureModelOption(d.models || [], currentModel, d.provider);
                     modelOptions.value = {
                         ...modelOptions.value,
                         [capability]: models
                     };
+                    syncConfigModelOptions(models, { provider: d.provider, capabilities: [capability] });
                     dropdownModelSearches.value = { ...dropdownModelSearches.value, [capability]: '' };
-                    if (field && d.active && !apiKeyInputs.value[field.key]) {
-                        apiKeyInputs.value[field.key] = d.active;
+                    if (field?.key === 'chatModel' && apiKeyInputs.value.chatModel) {
+                        syncChatModelSelection(apiKeyInputs.value.chatModel, { models, provider: d.provider });
                     }
-                    if (field?.key === 'chatModel') {
-                        syncChatModelSelection(apiKeyInputs.value.chatModel || d.active || '', { models, provider: d.provider });
-                    }
-                    if (d.provider) {
+                    if (d.provider && !d.draft) {
                         activeAiProvider.value = {
                             id: d.provider.id,
                             name: d.provider.name,
@@ -4127,11 +4461,10 @@ createApp({
             if (isFetchingConfigModels.value) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = 'all';
+            apiKeySaveMsg.value = '';
             try {
                 const results = await Promise.all(modelConfigFields.map(async field => {
-                    const params = new URLSearchParams({ capability: field.capability });
-                    const r = await fetch(`${API_BASE_URL}/api/config/models?${params.toString()}`);
-                    const d = await r.json();
+                    const d = await requestConfigModels(field.capability);
                     if (d.status !== 'success') {
                         apiKeySaveOk.value = false;
                         apiKeySaveMsg.value = d.message || '获取模型失败';
@@ -4143,19 +4476,16 @@ createApp({
                 const nextDropdownSearches = { ...dropdownModelSearches.value };
                 results.forEach(({ field, data }) => {
                     if (data?.status !== 'success') return;
-                    const currentModel = apiKeyInputs.value[field.key] || data.active || '';
+                    const currentModel = apiKeyInputs.value[field.key] || '';
                     nextOptions[field.capability] = ensureModelOption(allModels, currentModel, data.provider);
                     nextDropdownSearches[field.capability] = '';
-                    if (data.active && !apiKeyInputs.value[field.key]) {
-                        apiKeyInputs.value[field.key] = data.active;
-                    }
-                    if (field.key === 'chatModel') {
-                        syncChatModelSelection(apiKeyInputs.value.chatModel || data.active || '', {
+                    if (field.key === 'chatModel' && apiKeyInputs.value.chatModel) {
+                        syncChatModelSelection(apiKeyInputs.value.chatModel, {
                             models: nextOptions[field.capability],
                             provider: data.provider
                         });
                     }
-                    if (data.provider) {
+                    if (data.provider && !data.draft) {
                         activeAiProvider.value = {
                             id: data.provider.id,
                             name: data.provider.name,
@@ -4164,6 +4494,7 @@ createApp({
                     }
                 });
                 modelOptions.value = nextOptions;
+                syncConfigModelOptions(allModels, { provider: activeAiProvider.value });
                 dropdownModelSearches.value = nextDropdownSearches;
                 if (!apiKeySaveMsg.value) {
                     apiKeySaveOk.value = true;
@@ -4230,6 +4561,9 @@ createApp({
             }
         };
         const selectedCampaign = ref('');
+        const selectedCampaignInfo = computed(() => {
+            return campaignFiles.value.find(f => f.path === selectedCampaign.value) || null;
+        });
         // AI 模型选择
         const aiModels = ref([]);
         const aiModelSearch = ref('');
@@ -4441,11 +4775,19 @@ createApp({
         const MULTIPLAYER_MAX_ROOM_PLAYERS = 24;
 
         const multiplayerPlayableCharacterLimit = computed(() => {
+            const selectedLimit = Number(selectedCampaignInfo.value?.playable_character_count || selectedCampaignInfo.value?.character_count || 0);
+            if (Number.isFinite(selectedLimit) && selectedLimit > 0) {
+                return Math.max(1, selectedLimit);
+            }
             const active = characters.value.filter(c => (c.status || 'active') !== 'hidden');
             return Math.max(1, active.length || characters.value.length || 1);
         });
         const multiplayerMaxPlayersUpper = computed(() => {
-            return Math.max(1, Math.min(multiplayerPlayableCharacterLimit.value, MULTIPLAYER_MAX_ROOM_PLAYERS));
+            const selectedMax = Number(selectedCampaignInfo.value?.max_players || 0);
+            const upper = Number.isFinite(selectedMax) && selectedMax > 0
+                ? selectedMax
+                : multiplayerPlayableCharacterLimit.value;
+            return Math.max(1, Math.min(upper, MULTIPLAYER_MAX_ROOM_PLAYERS));
         });
         const clampMultiplayerMaxPlayers = () => {
             const upper = multiplayerMaxPlayersUpper.value;
@@ -4462,7 +4804,7 @@ createApp({
         const multiplayerRoomMaxPlayers = computed(() => {
             return Number(multiplayerRoom.value?.max_players || multiplayerRoom.value?.settings?.max_players || multiplayerMaxPlayers.value || 1);
         });
-        const multiplayerClaimedPlayerCount = computed(() => Number(multiplayerRoom.value?.claimed_player_count || 0));
+        const multiplayerClaimedPlayerCount = computed(() => Number(multiplayerRoom.value?.claimed_character_count ?? multiplayerRoom.value?.claimed_player_count ?? 0));
         const multiplayerRoomSeatsRemaining = computed(() => {
             const fromRoom = Number(multiplayerRoom.value?.player_slots_remaining);
             if (Number.isFinite(fromRoom)) return Math.max(0, fromRoom);
@@ -4672,13 +5014,15 @@ createApp({
             if (multiplayerRoom.value?.code && !multiplayerWsConnected.value) connectMultiplayerWs();
         };
         const openMenuMultiplayer = () => {
-            multiplayerRoomName.value = selectedCampaign.value
-                ? `${(campaignFiles.value.find(f => f.path === selectedCampaign.value)?.name || '新的跑团房间')}`
+            multiplayerRoomName.value = selectedCampaignInfo.value
+                ? `${(selectedCampaignInfo.value.name || '新的跑团房间')}`
                 : (multiplayerRoomName.value || '新的跑团房间');
+            clampMultiplayerMaxPlayers();
             openMultiplayerModal();
         };
         const createMultiplayerRoomForSelectedCampaign = async () => {
             if (appState.value === 'menu' && selectedCampaign.value) {
+                clampMultiplayerMaxPlayers();
                 await loadAndStart('multiplayer');
                 if (campaignLoadSummary.value && campaignLoadSummary.value.includes('失败')) return;
             }
@@ -5051,29 +5395,14 @@ createApp({
         // 分屏内点击分支选项：更新时间线节点并刷新
         const tlJumpAndBind = async (tlId, nodeId, optionText = '') => {
             const targetNode = storyNodes.value.find(n => n.id === nodeId);
-            // 获取当前时间线节点作为父场景
             const tl = timelines.value.find(t => t.id === tlId);
-            const parentNode = tl?.current_node_id ? storyNodes.value.find(n => n.id === tl.current_node_id) : null;
 
             if (targetNode) {
                 try {
-                    // Phase 2：执行副作用（先于 expand，状态立即更新）
-                    const needExpand = !targetNode.expanded_content;
-                    const { fxContext, actionType } = await applyBranchEffects(nodeId);
+                    // 执行已生成的确定性副作用；时间线预设行动也不自动调用聊天模型扩写。
+                    await applyBranchEffects(nodeId);
 
-                    // Phase 3：流式展开场景叙事（读到最新 session_memory/party_status）
-                    if (needExpand) {
-                        await streamExpandBranch(
-                            nodeId,
-                            parentNode ? parentNode.name : '',
-                            parentNode ? parentNode.content : '',
-                            optionText,
-                            fxContext,
-                            actionType
-                        );
-                    }
-
-                    // Phase 4：只有通过选项正常推进时才同步时间线地图位置
+                    // 只有通过选项正常推进时才同步时间线地图位置
                     if (optionText) {
                         try {
                             const roomRes = await fetch(`${API_BASE_URL}/api/map/room-by-node/${nodeId}`);
@@ -5509,6 +5838,7 @@ createApp({
                 if (d.status === 'success') {
                     const currentModel = d.active || apiKeyInputs.value.chatModel || '';
                     aiModels.value = ensureModelOption(d.models || [], currentModel, d.provider);
+                    syncConfigModelOptions(d.models || [], { provider: d.provider });
                     syncChatModelSelection(currentModel, { models: aiModels.value, provider: d.provider });
                     aiModelSearch.value = '';
                     openAiModelDropdownState.value = openOnSuccess && !!aiModels.value.length;
@@ -5806,7 +6136,7 @@ createApp({
                 const fxResp = await fetch(`${API_BASE_URL}/api/ai/apply-branch-effects`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ node_id: nodeId })
+                    body: JSON.stringify({ node_id: nodeId, allow_ai_extraction: false })
                 });
                 const fxData = await fxResp.json();
                 if (fxData.status === 'success') {
@@ -5847,28 +6177,15 @@ createApp({
             optionLikelihoods.value = {}; // 跳转后清空概率（只对当前推演结果有效）
             if(!isNew||isEditMode.value)return;
 
-            // 【新调用顺序 Phase 2→3】：先执行副作用，再用最新状态扩写叙事
-            // 仅通过选项跳转时执行，手动点击场景节点不触发任何推演副作用
+            // 预设行动只执行已生成的确定性副作用；新叙事生成留给显式 AI-GM 操作。
+            // 手动点击场景节点不触发任何推演副作用。
             try {
                 if (optionText) {
-                // Phase 2：执行副作用（状态、记忆、情绪立即写入数据库）
-                const needExpand = !next.expanded_content;
-                const { fxContext, actionType } = await applyBranchEffects(next.id);
-
-                // Phase 3：流式展开场景叙事（此时 session_memory/party_status 已是最新）
-                if (needExpand) {
-                    await streamExpandBranch(
-                        next.id,
-                        prevNode ? prevNode.name : '',
-                        prevNode ? prevNode.content : '',
-                        optionText,
-                        fxContext,
-                        actionType
-                    );
-                }
+                // 执行已生成的确定性副作用；点击预设行动不再自动调用聊天模型扩写。
+                await applyBranchEffects(next.id);
                 } // end if (optionText)
 
-                // Phase 4：只有通过选项正常推进时才同步地图位置
+                // 只有通过选项正常推进时才同步地图位置
                 // GM 从节点树手动跳转（optionText 为空）不同步，避免地图瞬移破坏叙事逻辑
                 if (optionText) {
                     try {
@@ -5885,12 +6202,7 @@ createApp({
             // 只有通过预设选项跳转才记录到记忆流
             if(optionText) {
                 fetch(`${API_BASE_URL}/api/game/log-scene-visit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node_id:next.id,node_name:next.name,option_text:optionText})}).catch(()=>{});
-                // GM 手动跳转不触发 NPC 生成和触发器，避免调试时污染游戏状态
-                if(next.content&&next.content.length>10) {
-                    fetch(`${API_BASE_URL}/api/ai/check-npc`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_name:next.name,scene_content:next.content})})
-                    .then(r=>r.json()).then(d=>{if(d.spawned_npc){fetchGameState();showNpcToast(d.spawned_npc);}}).catch(()=>{});
-                }
-                fetch(`${API_BASE_URL}/api/game/check-triggers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_id:next.id,scene_name:next.name,scene_content:next.content||''})})
+                fetch(`${API_BASE_URL}/api/game/check-triggers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_id:next.id,scene_name:next.name,scene_content:next.content||'',allow_ai:false})})
                 .then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();}).then(d=>{
                     console.log('[check-triggers]', d);
                     if(d.fired&&d.fired.length>0){
@@ -6968,8 +7280,244 @@ createApp({
             if (r && r.state === 'unknown') r.state = 'explored';
         };
 
+        // ══════════════════════════════════════════════════════
+        // 【顶栏资料册】：玩家友好的查看层
+        // ══════════════════════════════════════════════════════
+        const showDossierModal = ref(false);
+        const dossierTab = ref('worldview');
+        const dossierSearch = ref('');
+        const dossierSelectedDocId = ref(null);
+        const dossierSelectedDoc = ref(null);
+        const dossierDocChunks = ref([]);
+        const dossierLoadingDoc = ref(false);
+        const dossierSelectedRoom = ref(null);
+        const dossierSelectedEntity = ref(null);
+        const dossierMapCanvasRef = ref(null);
+        const dossierMapScale = ref(1);
+        const dossierMapViewX = ref(0);
+        const dossierMapViewY = ref(0);
+        const dossierMapSvgW = ref(900);
+        const dossierMapSvgH = ref(620);
+        const dossierMapViewBox = computed(() =>
+            `${dossierMapViewX.value} ${dossierMapViewY.value} ${dossierMapSvgW.value / dossierMapScale.value} ${dossierMapSvgH.value / dossierMapScale.value}`
+        );
+        let dossierMapPanning = false;
+        let dossierMapPanStart = { x: 0, y: 0, vx: 0, vy: 0 };
+        let dossierMapSuppressClick = false;
+
+        const dossierTabs = [
+            { id: 'worldview', label: '世界观', icon: 'ph-globe' },
+            { id: 'map', label: '地图', icon: 'ph-map-trifold' },
+            { id: 'knowledge', label: '知识库', icon: 'ph-database' },
+            { id: 'lore', label: '百科', icon: 'ph-books' },
+            { id: 'entities', label: '实体', icon: 'ph-graph' },
+            { id: 'memory', label: '记忆流', icon: 'ph-brain' },
+        ];
+        const dossierActiveTab = computed(() =>
+            dossierTabs.find(tab => tab.id === dossierTab.value) || dossierTabs[0]
+        );
+        const dossierTabCount = (tabId) => {
+            if (tabId === 'map') return mapRooms.value.length || '';
+            if (tabId === 'knowledge') return ragDocuments.value.filter(d => !d.hidden).length || '';
+            if (tabId === 'lore') return lorebook.value.length || '';
+            if (tabId === 'entities') return worldEntities.value.length || '';
+            return '';
+        };
+        const dossierVisibleRagDocuments = computed(() => {
+            const q = dossierSearch.value.toLowerCase();
+            return ragDocuments.value
+                .filter(doc => !doc.hidden)
+                .filter(doc => !q || `${doc.title || ''} ${doc.source || ''}`.toLowerCase().includes(q));
+        });
+        const dossierFilteredLore = computed(() => {
+            const q = dossierSearch.value.toLowerCase();
+            return lorebook.value.filter(item =>
+                !q || `${item.keywords || ''} ${item.content || ''}`.toLowerCase().includes(q)
+            );
+        });
+        const dossierFilteredEntities = computed(() => {
+            const q = dossierSearch.value.toLowerCase();
+            return worldEntities.value.filter(entity =>
+                !q || `${entity.name || ''} ${entity.location || ''} ${entity.status || ''} ${entity.state_desc || ''}`.toLowerCase().includes(q)
+            );
+        });
+        const dossierDocText = computed(() =>
+            dossierDocChunks.value.map(chunk => chunk.chunk_text).filter(Boolean).join('\n\n')
+        );
+
+        const selectDossierDoc = async (docId) => {
+            dossierSelectedDocId.value = docId;
+            dossierSelectedDoc.value = null;
+            dossierDocChunks.value = [];
+            if (!docId) return;
+            dossierLoadingDoc.value = true;
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/rag/documents/${docId}`);
+                const d = await r.json();
+                if (d.status === 'success') {
+                    dossierSelectedDoc.value = d.document;
+                    dossierDocChunks.value = d.chunks || [];
+                }
+            } catch(e) {}
+            finally { dossierLoadingDoc.value = false; }
+        };
+
+        const refreshDossierTabData = async (tab = dossierTab.value) => {
+            if (tab === 'worldview') await fetchWorldview();
+            if (tab === 'map') {
+                await Promise.all([fetchMapData(), fetchWorldEntities(), fetchTimelines()]);
+                scheduleDossierMapFit();
+            }
+            if (tab === 'knowledge') {
+                await fetchRagDocuments();
+                const firstDoc = dossierVisibleRagDocuments.value[0];
+                if (!dossierSelectedDocId.value && firstDoc) await selectDossierDoc(firstDoc.id);
+            }
+            if (tab === 'lore') await fetchLorebook();
+            if (tab === 'entities') {
+                await Promise.all([fetchWorldEntities(), fetchMapData()]);
+            }
+            if (tab === 'memory') await fetchMemory();
+        };
+
+        const switchDossierTab = async (tab) => {
+            dossierTab.value = tab;
+            dossierSearch.value = '';
+            await refreshDossierTabData(tab);
+        };
+
+        const openDossierPanel = async (tab = 'worldview') => {
+            closeAdvancedSystemPanels();
+            showGameSettingsModal.value = false;
+            dossierTab.value = tab;
+            dossierSearch.value = '';
+            showDossierModal.value = true;
+            await refreshDossierTabData(tab);
+        };
+
+        const updateDossierMapSize = () => {
+            const rect = dossierMapCanvasRef.value?.getBoundingClientRect();
+            dossierMapSvgW.value = Math.max(320, rect?.width || dossierMapCanvasRef.value?.clientWidth || dossierMapSvgW.value || 900);
+            dossierMapSvgH.value = Math.max(320, rect?.height || dossierMapCanvasRef.value?.clientHeight || dossierMapSvgH.value || 620);
+            return Boolean(rect && rect.width > 8 && rect.height > 8);
+        };
+
+        const scheduleDossierMapFit = () => {
+            nextTick(() => {
+                requestAnimationFrame(() => {
+                    if (!updateDossierMapSize()) {
+                        setTimeout(() => dossierFitMapToFloor(), 60);
+                        return;
+                    }
+                    dossierFitMapToFloor();
+                });
+            });
+        };
+
+        const dossierFitMapToFloor = () => {
+            if (!updateDossierMapSize()) {
+                setTimeout(() => dossierFitMapToFloor(), 60);
+                return;
+            }
+            const rooms = mapVisibleRooms.value;
+            if (!rooms.length) {
+                dossierMapScale.value = 1;
+                dossierMapViewX.value = 0;
+                dossierMapViewY.value = 0;
+                dossierSelectedRoom.value = null;
+                return;
+            }
+            const minX = Math.min(...rooms.map(r => r.x));
+            const minY = Math.min(...rooms.map(r => r.y));
+            const maxX = Math.max(...rooms.map(r => r.x + r.w));
+            const maxY = Math.max(...rooms.map(r => r.y + r.h));
+            const pad = 90;
+            const boundsW = Math.max(1, maxX - minX);
+            const boundsH = Math.max(1, maxY - minY);
+            const scale = Math.min(
+                dossierMapSvgW.value / (boundsW + pad * 2),
+                dossierMapSvgH.value / (boundsH + pad * 2)
+            );
+            dossierMapScale.value = Math.min(2.2, Math.max(0.25, scale));
+            const viewW = dossierMapSvgW.value / dossierMapScale.value;
+            const viewH = dossierMapSvgH.value / dossierMapScale.value;
+            dossierMapViewX.value = minX + boundsW / 2 - viewW / 2;
+            dossierMapViewY.value = minY + boundsH / 2 - viewH / 2;
+        };
+
+        const selectDossierFloor = (floor) => {
+            mapActiveFloor.value = floor;
+            dossierSelectedRoom.value = null;
+            scheduleDossierMapFit();
+        };
+
+        const dossierSelectMapRoom = (room, fromList = false) => {
+            if (!fromList && dossierMapSuppressClick) return;
+            dossierSelectedRoom.value = { ...room };
+            dossierSelectedEntity.value = null;
+        };
+
+        const dossierMapEventPoint = (e) => {
+            if (e?.touches?.length) return e.touches[0];
+            if (e?.changedTouches?.length) return e.changedTouches[0];
+            return e || { clientX: 0, clientY: 0 };
+        };
+
+        const dossierMapClientToSvg = (e) => {
+            const p = dossierMapEventPoint(e);
+            const rect = dossierMapCanvasRef.value?.getBoundingClientRect();
+            if (!rect) return { x: 0, y: 0 };
+            return {
+                x: (p.clientX - rect.left) / dossierMapScale.value + dossierMapViewX.value,
+                y: (p.clientY - rect.top) / dossierMapScale.value + dossierMapViewY.value,
+            };
+        };
+
+        const dossierMapOnWheel = (e) => {
+            updateDossierMapSize();
+            const before = dossierMapClientToSvg(e);
+            const nextScale = Math.min(3, Math.max(0.2, dossierMapScale.value * (e.deltaY > 0 ? 0.9 : 1.1)));
+            dossierMapScale.value = nextScale;
+            const rect = dossierMapCanvasRef.value?.getBoundingClientRect();
+            if (rect) {
+                dossierMapViewX.value = before.x - (e.clientX - rect.left) / nextScale;
+                dossierMapViewY.value = before.y - (e.clientY - rect.top) / nextScale;
+            }
+        };
+
+        const dossierMapStartPan = (e) => {
+            if (e.button !== undefined && e.button !== 0) return;
+            const p = dossierMapEventPoint(e);
+            updateDossierMapSize();
+            dossierMapPanning = true;
+            dossierMapSuppressClick = false;
+            dossierMapPanStart = { x: p.clientX, y: p.clientY, vx: dossierMapViewX.value, vy: dossierMapViewY.value, dragged: false };
+        };
+        const dossierMapMovePan = (e) => {
+            if (!dossierMapPanning) return;
+            const p = dossierMapEventPoint(e);
+            const dx = p.clientX - dossierMapPanStart.x;
+            const dy = p.clientY - dossierMapPanStart.y;
+            dossierMapPanStart.dragged = dossierMapPanStart.dragged || Math.hypot(dx, dy) > 4;
+            dossierMapViewX.value = dossierMapPanStart.vx - dx / dossierMapScale.value;
+            dossierMapViewY.value = dossierMapPanStart.vy - dy / dossierMapScale.value;
+        };
+        const dossierMapEndPan = () => {
+            if (dossierMapPanStart.dragged) {
+                dossierMapSuppressClick = true;
+                setTimeout(() => { dossierMapSuppressClick = false; }, 80);
+            }
+            dossierMapPanning = false;
+        };
+        const dossierMapOnMouseDown = (e) => dossierMapStartPan(e);
+        const dossierMapOnMouseMove = (e) => dossierMapMovePan(e);
+        const dossierMapOnMouseUp = () => dossierMapEndPan();
+        const dossierMapOnTouchStart = (e) => dossierMapStartPan(e);
+        const dossierMapOnTouchMove = (e) => dossierMapMovePan(e);
+        const dossierMapOnTouchEnd = () => dossierMapEndPan();
+
         return {
-            appState, playSurface, pendingLaunchMode, isLoading, dbConnected, campaignFiles, selectedCampaign, campaignLoadSummary,
+            appState, playSurface, pendingLaunchMode, isLoading, dbConnected, campaignFiles, selectedCampaign, selectedCampaignInfo, campaignLoadSummary,
             showGameSettingsModal, showAdvancedSettings, openGameSettingsModal, returnToAdvancedSettings,
             showCampaignImportModal, campaignImportName, campaignImportMainFile,
             campaignImportAssets, campaignImportBusy, campaignImportResult,
@@ -6987,6 +7535,8 @@ createApp({
             showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,
             multiplayerBusy, multiplayerError, multiplayerStatusMsg, multiplayerWsConnected,
             multiplayerRoomName, multiplayerJoinCode, multiplayerProfileName, multiplayerInviteUrl,
+            multiplayerMaxPlayers, multiplayerPlayableCharacterLimit, multiplayerMaxPlayersUpper, multiplayerRoomMaxPlayers,
+            multiplayerClaimedPlayerCount, multiplayerRoomSeatsRemaining, clampMultiplayerMaxPlayers,
             openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, copyMultiplayerInvite, openMultiplayerTable,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,
@@ -7016,6 +7566,16 @@ createApp({
             showTlRoomModal, tlRoomTarget, tlRoomSelected, openTlRoomModal, saveTlRoom,
             // 世界实体方法
             openWorldEntitiesPanel, openNewEntityForm, saveEntity, deleteEntity,
+            // 顶栏资料册
+            showDossierModal, dossierTab, dossierTabs, dossierActiveTab, dossierSearch,
+            dossierSelectedDocId, dossierSelectedDoc, dossierDocChunks, dossierLoadingDoc,
+            dossierVisibleRagDocuments, dossierFilteredLore, dossierFilteredEntities, dossierDocText,
+            dossierSelectedRoom, dossierSelectedEntity, dossierMapCanvasRef,
+            dossierMapScale, dossierMapViewX, dossierMapViewY, dossierMapSvgW, dossierMapSvgH, dossierMapViewBox,
+            dossierTabCount, openDossierPanel, switchDossierTab,
+            selectDossierDoc, selectDossierFloor, dossierFitMapToFloor, dossierSelectMapRoom,
+            dossierMapOnWheel, dossierMapOnMouseDown, dossierMapOnMouseMove, dossierMapOnMouseUp,
+            dossierMapOnTouchStart, dossierMapOnTouchMove, dossierMapOnTouchEnd,
             // 地图系统
             MAP_GRID, showMapModal, mapRooms, mapEdges, mapFloors, mapActiveFloor,
             mapVisibleRooms, mapVisibleEdges,
