@@ -111,6 +111,9 @@
             <i class="ph ph-user-circle"></i> 玩家入场
           </div>
           <input v-model.trim="profile.name" placeholder="玩家名">
+          <button v-if="room" class="btn-ghost btn-sm" @click="resetPlayerIdentity" :disabled="joinBusy" title="同一浏览器要模拟另一名玩家时使用">
+            <i class="ph ph-identification-card"></i> 新玩家身份
+          </button>
           <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
             <input v-model.trim="joinCode" @keyup.enter="joinRoomByCode(joinCode)" placeholder="房间码" style="text-transform:uppercase">
             <button class="btn-info" @click="joinRoomByCode(joinCode)" :disabled="!joinCode.trim() || joinBusy">
@@ -127,7 +130,7 @@
           </div>
         </section>
 
-        <section class="solo-section" v-if="room">
+        <section class="solo-section" v-if="room && !hasLockedCharacters">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
             <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--blue)">
               <i class="ph ph-users"></i> 选择扮演角色
@@ -137,10 +140,21 @@
           <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '选择剧中角色后开始行动。' }}</div>
           <div v-if="hasLockedCharacters" class="small" style="margin-top:6px;color:var(--good)">角色已确认，开局后不可改选。</div>
           <div v-else-if="roomFullForNewPlayer" class="small" style="margin-top:6px;color:var(--bad)">席位已满，等待 GM 调整房间人数。</div>
-          <div v-else class="small" style="margin-top:6px;color:var(--muted)">本房间还可确认 {{ playerSlotsRemaining }} 个角色席位。</div>
+          <div v-else class="small" style="margin-top:6px;color:var(--muted)">每位玩家只能选择 1 个角色。本房间还剩 {{ playerSlotsRemaining }} 个角色席位。</div>
         </section>
 
-        <div class="solo-scroll" v-if="room">
+        <section class="solo-section" v-if="room && hasLockedCharacters">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--good);margin-bottom:10px">
+            <i class="ph ph-check-circle"></i> 我的角色
+          </div>
+          <div v-for="char in selectedCharacters" :key="char.id" class="room-card" style="border-color:rgba(79,201,138,.22)">
+            <strong style="color:#f5edd8">{{ char.name }}</strong>
+            <div class="small">{{ char.role || '角色' }} · {{ hpLabel }} {{ char.hp }} · {{ sanLabel }} {{ char.san }}</div>
+            <div class="small" style="margin-top:6px;color:var(--good)">你只能以该角色提交行动与掷骰。</div>
+          </div>
+        </section>
+
+        <div class="solo-scroll" v-if="room && !hasLockedCharacters">
           <button v-for="char in playableCharacters" :key="char.id" @click="toggleCharacter(char.id)" class="solo-character-card" :disabled="isCharacterDisabled(char)" :class="{selected: isCharacterSelected(char.id), locked: isClaimedByOther(char), 'own-locked': isOwnClaim(char)}">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
               <strong style="font-size:14px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
@@ -161,13 +175,18 @@
             {{ claimButtonText }}
           </button>
           <div v-if="characterClaimMsg" class="small" style="margin-top:8px;color:var(--good)">{{ characterClaimMsg }}</div>
+        </div>
 
-          <section style="margin-top:18px" v-if="members.length">
+        <div class="solo-scroll" v-else-if="room">
+          <section v-if="members.length">
             <div class="tag" style="margin-bottom:8px">同桌成员</div>
             <div class="stack">
               <div class="member" v-for="m in members" :key="m.player_id">
                 <span class="swatch" :style="{color:m.color}"></span>
-                <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.display_name }}<div class="small">{{ m.role === 'gm' ? '主持' : '玩家' }}</div></span>
+                <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                  {{ m.display_name }}
+                  <div class="small">{{ memberClaimName(m.player_id) || (m.role === 'gm' ? '主持' : '未选角') }}</div>
+                </span>
                 <span class="small">{{ m.connected ? '在线' : '离线' }}</span>
               </div>
             </div>
@@ -201,9 +220,13 @@
                 <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:var(--gold)">
                   <i class="ph ph-map-pin"></i> 场景 {{ currentScene?.id ? '#' + currentScene.id : '' }}
                 </div>
-                <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ currentScene?.name || '等待开场' }}</h1>
+                <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ characterOpeningText ? actorName + ' 的开场' : (currentScene?.name || '等待开场') }}</h1>
                 <p class="scene-content">{{ sceneText || '主持端载入场景后会同步到这里。' }}</p>
-                <div v-if="gameState.scene_ai_text && gameState.scene_ai_text !== sceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                <div v-if="characterOpeningText && publicSceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                  <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-map-pin"></i> 公共场景</div>
+                  <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ publicSceneText }}</p>
+                </div>
+                <div v-else-if="gameState.scene_ai_text && gameState.scene_ai_text !== sceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-sparkle"></i> 追加细节</div>
                   <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ gameState.scene_ai_text }}</p>
                 </div>
@@ -245,23 +268,34 @@
 
       <aside class="solo-panel right">
         <section class="solo-section">
-          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold);margin-bottom:10px"><i class="ph ph-scroll"></i> AI-GM 记录</div>
+          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold);margin-bottom:10px"><i class="ph ph-scroll"></i> 我的行动与裁决</div>
           <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '角色确认后可提交自由行动。' }}</div>
         </section>
         <div class="solo-scroll" ref="messagesEl" style="border-bottom:1px solid var(--line-soft)">
-          <div v-for="msg in messages" :key="msg.id" class="solo-message" :class="msg.kind">
+          <div v-for="msg in myThreadMessages" :key="msg.id" class="solo-message" :class="msg.kind">
             <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:var(--muted)">
               <span style="font-weight:800" :style="{color: msg.kind==='ai' ? 'var(--gold)' : msg.kind==='action' ? 'var(--blue)' : 'var(--muted)'}">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
               <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
             </div>
             <div style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
           </div>
-          <div v-if="!messages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
+          <div v-if="!myThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
             <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
-            行动与裁定会记录在这里
+            你的行动、骰子与 AI 裁决会记录在这里
           </div>
         </div>
         <section class="solo-section" style="border-bottom:none">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
+          <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto;margin-bottom:14px">
+            <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
+              <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
+                <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+                <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
+              </div>
+              <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+            </div>
+            <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
+          </div>
           <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-heartbeat"></i> 角色状态</div>
           <div style="display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto">
             <div v-for="char in visibleStatusCharacters" :key="char.id" style="background:#090b10;border:1px solid var(--line);border-radius:6px;padding:10px">
@@ -284,15 +318,16 @@
   <script>
     const { createApp, nextTick } = Vue;
     const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : 'http://localhost:8000';
-    const readStoredJson = (key, fallback) => {
-      try { return JSON.parse(localStorage.getItem(key) || '') || fallback; }
+    const readStoredJson = (storage, key, fallback) => {
+      try { return JSON.parse(storage.getItem(key) || '') || fallback; }
       catch (_) { return fallback; }
     };
 
     createApp({
       data() {
-        const saved = readStoredJson('zric-mp-profile', {});
-        const savedTokens = readStoredJson('zric-mp-tokens', {});
+        const saved = readStoredJson(localStorage, 'zric-mp-profile', {});
+        const tabSaved = readStoredJson(sessionStorage, 'zric-mp-tab-profile', {});
+        const tabTokens = readStoredJson(sessionStorage, 'zric-mp-tab-tokens', {});
         return {
           room: null,
           members: [],
@@ -306,17 +341,18 @@
           hpLabel: 'HP',
           sanLabel: 'SAN',
           profile: {
-            id: saved.id || crypto.randomUUID(),
-            name: saved.name || '玩家',
+            id: tabSaved.id || crypto.randomUUID(),
+            name: tabSaved.name || saved.name || '玩家',
             role: 'player',
-            color: saved.color || '#7dd3fc',
+            color: tabSaved.color || saved.color || '#7dd3fc',
           },
-          roomTokens: savedTokens.roomTokens || {},
-          memberTokens: savedTokens.memberTokens || {},
+          memberTokens: tabTokens.memberTokens || {},
+          tabInstanceId: crypto.randomUUID(),
+          presenceTimer: null,
           joinCode: '',
           chatText: '',
           actionType: 'mixed',
-          selectedCharacterIds: Array.isArray(saved.characterIds) ? saved.characterIds : [],
+          selectedCharacterIds: Array.isArray(tabSaved.characterIds) ? tabSaved.characterIds : [],
           characterClaimBusy: false,
           characterClaimMsg: '',
         };
@@ -328,9 +364,23 @@
       computed: {
         currentScene() { return this.gameState?.current_scene || null; },
         currentRoom() { return this.gameState?.current_room || null; },
-        sceneText() {
+        publicSceneText() {
           const scene = this.currentScene || {};
           return scene.expanded_content || this.gameState?.scene_ai_text || scene.content || '';
+        },
+        characterOpeningMessage() {
+          return [...this.messages].reverse().find(msg => {
+            const payload = msg?.payload || {};
+            return payload.source === 'character_opening' && this.messageBelongsToMe(msg);
+          }) || null;
+        },
+        characterOpeningText() {
+          const message = this.characterOpeningMessage;
+          if (message) return message.payload?.opening || message.content || '';
+          return this.localCharacterOpeningText();
+        },
+        sceneText() {
+          return this.characterOpeningText || this.publicSceneText;
         },
         sceneImage() {
           const scene = this.currentScene || {};
@@ -359,6 +409,13 @@
         selectedCharacterNames() { return this.selectedCharacters.map(char => char.name); },
         visibleStatusCharacters() { return this.selectedCharacters.length ? this.selectedCharacters : this.playableCharacters; },
         actorName() { return this.selectedCharacterNames.join(' / ') || this.profile.name || '玩家'; },
+        myThreadMessages() {
+          if (!this.hasLockedCharacters) return [];
+          return this.messages.filter(msg => this.messageBelongsToMe(msg) && ['action', 'ai', 'dice', 'state', 'system'].includes(msg.kind));
+        },
+        tableMessages() {
+          return this.messages.filter(msg => msg.kind === 'chat' || this.isPublicTableMessage(msg)).slice(-50);
+        },
         maxPlayers() {
           return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
         },
@@ -382,12 +439,13 @@
           return this.playerSlotsRemaining > 0 ? 'var(--good)' : 'var(--bad)';
         },
         claimButtonDisabled() {
-          return !this.selectedCharacterIds.length || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer || this.selectedCharacterIds.length > this.playerSlotsRemaining;
+          return this.selectedCharacterIds.length !== 1 || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer || this.selectedCharacterIds.length > this.playerSlotsRemaining;
         },
         claimButtonText() {
           if (this.hasLockedCharacters) return '角色已锁定';
           if (this.characterClaimBusy) return '记录中';
           if (this.roomFullForNewPlayer) return '席位已满';
+          if (this.selectedCharacterIds.length > 1) return '每位玩家只能确认 1 个角色';
           if (this.selectedCharacterIds.length > this.playerSlotsRemaining) return `最多确认 ${this.playerSlotsRemaining} 个角色`;
           return this.selectedCharacterIds.length ? '确认扮演 ' + this.selectedCharacterNames.join(' / ') : '选择角色后确认';
         }
@@ -396,18 +454,73 @@
         const params = new URLSearchParams(location.search);
         const urlRoomCode = (params.get('room') || params.get('code') || '').trim().toUpperCase();
         if (urlRoomCode) this.joinCode = urlRoomCode;
+        this.ensureUniqueTabIdentity();
+        window.addEventListener('beforeunload', this.clearCurrentPresence);
         await this.fetchStatLabels();
         if (urlRoomCode) {
           this.joinRoomByCode(urlRoomCode).catch(err => { this.characterClaimMsg = err.message || '加入房间失败'; });
         }
       },
+      beforeUnmount() {
+        window.removeEventListener('beforeunload', this.clearCurrentPresence);
+        this.stopPresence();
+      },
       methods: {
         saveProfile() {
           this.profile.role = 'player';
-          localStorage.setItem('zric-mp-profile', JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
+          sessionStorage.setItem('zric-mp-tab-profile', JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
+          localStorage.setItem('zric-mp-profile', JSON.stringify({ name: this.profile.name, color: this.profile.color }));
         },
         saveRoomTokens() {
-          localStorage.setItem('zric-mp-tokens', JSON.stringify({ roomTokens: this.roomTokens, memberTokens: this.memberTokens }));
+          sessionStorage.setItem('zric-mp-tab-tokens', JSON.stringify({ memberTokens: this.memberTokens }));
+        },
+        presenceKey(playerId = this.profile.id) {
+          return `zric-mp-presence:${playerId}`;
+        },
+        readPresence(playerId = this.profile.id) {
+          return readStoredJson(localStorage, this.presenceKey(playerId), null);
+        },
+        isReloadNavigation() {
+          const nav = performance.getEntriesByType?.('navigation')?.[0];
+          return nav?.type === 'reload';
+        },
+        clearCurrentPresence() {
+          const current = this.readPresence();
+          if (!current || current.tabInstanceId === this.tabInstanceId) {
+            localStorage.removeItem(this.presenceKey());
+          }
+        },
+        stopPresence() {
+          if (this.presenceTimer) clearInterval(this.presenceTimer);
+          this.presenceTimer = null;
+          this.clearCurrentPresence();
+        },
+        startPresence() {
+          if (this.presenceTimer) clearInterval(this.presenceTimer);
+          const writePresence = () => {
+            localStorage.setItem(this.presenceKey(), JSON.stringify({
+              tabInstanceId: this.tabInstanceId,
+              updatedAt: Date.now(),
+            }));
+          };
+          writePresence();
+          this.presenceTimer = setInterval(writePresence, 3000);
+        },
+        ensureUniqueTabIdentity() {
+          const current = this.readPresence();
+          const activeElsewhere = current
+            && current.tabInstanceId !== this.tabInstanceId
+            && Date.now() - Number(current.updatedAt || 0) < 10000;
+          if (activeElsewhere && !this.isReloadNavigation()) {
+            this.profile.id = crypto.randomUUID();
+            this.selectedCharacterIds = [];
+            this.memberTokens = {};
+            sessionStorage.removeItem('zric-mp-tab-tokens');
+            this.characterClaimMsg = '检测到同浏览器已有活跃玩家，已为本标签页生成新身份';
+          }
+          this.saveProfile();
+          this.saveRoomTokens();
+          this.startPresence();
         },
         extractRoomCode(path) {
           const match = String(path || '').match(/\/api\/multiplayer\/rooms\/([^/?]+)/);
@@ -417,7 +530,6 @@
           const jsonBody = !(options.body instanceof FormData);
           const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
           const roomCode = this.room?.code || this.extractRoomCode(path);
-          if (roomCode && this.roomTokens[roomCode]) headers['X-Room-Token'] = this.roomTokens[roomCode];
           if (roomCode && this.memberTokens[roomCode]) headers['X-Member-Token'] = this.memberTokens[roomCode];
           const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } });
           const data = await res.json().catch(() => ({}));
@@ -458,6 +570,28 @@
             this.joinBusy = false;
           }
         },
+        async resetPlayerIdentity() {
+          const code = (this.room?.code || this.joinCode || '').trim().toUpperCase();
+          this.stopPresence();
+          if (this.ws) this.ws.close();
+          this.ws = null;
+          this.wsConnected = false;
+          this.profile.id = crypto.randomUUID();
+          this.selectedCharacterIds = [];
+          this.memberTokens = {};
+          sessionStorage.removeItem('zric-mp-tab-tokens');
+          this.saveProfile();
+          this.saveRoomTokens();
+          this.startPresence();
+          this.characterClaimMsg = '已切换为新的玩家身份，请重新选角';
+          if (code) {
+            try {
+              await this.joinRoomByCode(code);
+            } catch (err) {
+              this.characterClaimMsg = err.message || '切换身份后重新加入失败';
+            }
+          }
+        },
         applySnapshot(data) {
           this.room = data.room || this.room;
           this.gameState = data.game_state || this.gameState || {};
@@ -474,6 +608,9 @@
           if (!base.length) return;
           const ids = new Set(base.map(char => String(char.id)));
           this.selectedCharacterIds = this.selectedCharacterIds.filter(id => ids.has(String(id)));
+          if (!this.hasLockedCharacters && this.selectedCharacterIds.length > 1) {
+            this.selectedCharacterIds = this.selectedCharacterIds.slice(0, 1);
+          }
         },
         connectWs() {
           if (!this.room || !window.location.protocol.startsWith('http')) return;
@@ -525,7 +662,7 @@
             this.characterClaimMsg = `本房间还可确认 ${this.playerSlotsRemaining} 个角色席位`;
             return;
           }
-          this.selectedCharacterIds = [...this.selectedCharacterIds, id];
+          this.selectedCharacterIds = [id];
           this.characterClaimMsg = '';
         },
         isCharacterSelected(id) {
@@ -539,6 +676,10 @@
         },
         async claimCharacters() {
           if (!this.room || !this.selectedCharacterIds.length || this.hasLockedCharacters || this.roomFullForNewPlayer) return;
+          if (this.selectedCharacterIds.length !== 1) {
+            this.characterClaimMsg = '每位玩家只能确认 1 个角色';
+            return;
+          }
           if (this.selectedCharacterIds.length > this.playerSlotsRemaining) {
             this.characterClaimMsg = `最多确认 ${this.playerSlotsRemaining} 个角色`;
             return;
@@ -583,6 +724,47 @@
           const claim = this.claimForCharacter(char);
           if (!claim) return '';
           return String(claim.player_id || '') === String(this.profile.id || '') ? '你已确认扮演该角色' : `已由 ${claim.display_name || '其他玩家'} 扮演`;
+        },
+        memberClaimName(playerId) {
+          const claim = this.characterClaims.find(item => String(item.player_id || '') === String(playerId || ''));
+          return claim ? (claim.character_name || claim.display_name || '') : '';
+        },
+        messageBelongsToMe(msg) {
+          const payload = msg?.payload || {};
+          const playerId = String(this.profile.id || '');
+          const ownCharacterIds = new Set(this.lockedCharacterIds.map(id => String(id)));
+          const actorId = String(payload.actor_id || msg?.sender_id || '');
+          const characterId = String(payload.character_id || '');
+          if (actorId && actorId === playerId) return true;
+          if (characterId && ownCharacterIds.has(characterId)) return true;
+          if (Array.isArray(payload.character_ids) && payload.character_ids.some(id => ownCharacterIds.has(String(id)))) return true;
+          return false;
+        },
+        isPublicTableMessage(msg) {
+          const payload = msg?.payload || {};
+          if (payload.actor_id || payload.character_id || Array.isArray(payload.character_ids)) return false;
+          return ['system', 'state'].includes(msg?.kind);
+        },
+        localCharacterOpeningText() {
+          const char = this.selectedCharacters[0];
+          if (!char) return '';
+          const scene = this.currentScene || {};
+          const sceneName = scene.name || '开场';
+          const publicText = this.publicSceneText || '主持端尚未写下更多场景细节，你先从自己的视角观察当下。';
+          const focusOptions = [
+            '你首先注意到环境里最不合常理的细节。',
+            '你下意识检查随身物与退路，确认自己还能掌控什么。',
+            '你把同伴的动静放在余光里，独自判断这里是否安全。',
+            '你从自己的经历出发，意识到眼前的线索可能并不简单。',
+          ];
+          const focus = focusOptions[Math.abs(Number(char.id || 0)) % focusOptions.length];
+          const details = [`${char.name}，你以「${char.role || '角色'}」的身份进入「${sceneName}」。`];
+          if (char.personality) details.push(`你的性格/背景提示是：${String(char.personality).slice(0, 160)}。`);
+          if (char.inventory) details.push(`你当前随身/状态记录：${String(char.inventory).slice(0, 160)}。`);
+          details.push(focus);
+          details.push(`从你的视角看，开场是这样的：${String(publicText).replace(/\s+/g, ' ').slice(0, 420)}`);
+          details.push('你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
+          return details.join('\n');
         },
         useOptionAsAction(text) {
           if (!this.hasLockedCharacters) return;

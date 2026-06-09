@@ -69,6 +69,24 @@ MAX_MAP_UPLOAD_BYTES = int(os.environ.get("ZRIC_MAX_MAP_UPLOAD_BYTES", str(12 * 
 MAX_ROOM_PLAYERS = int(os.environ.get("ZRIC_MAX_ROOM_PLAYERS", "24"))
 
 
+def _trim_token_text(text: str, field: str, *, keep_tail: bool = False) -> str:
+    value = str(text or "")
+    get_policy = getattr(ai_provider, "get_token_policy", None)
+    policy = get_policy() if callable(get_policy) else {}
+    max_chars = int(policy.get(field) or 0)
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    marker = "\n...[已按省 token 策略省略部分内容]...\n"
+    marker_len = len(marker)
+    if max_chars <= marker_len + 40:
+        return value[-max_chars:] if keep_tail else value[:max_chars]
+    if keep_tail:
+        return marker + value[-(max_chars - marker_len):]
+    head = max(1, (max_chars - marker_len) // 2)
+    tail = max_chars - marker_len - head
+    return value[:head] + marker + value[-tail:]
+
+
 def configure_multiplayer(
     db_file: str,
     chat_client=None,
@@ -220,6 +238,12 @@ def init_multiplayer_tables():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_tokens_room ON multiplayer_tokens(room_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_docs_room ON multiplayer_room_documents(room_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_claims_room_player ON multiplayer_character_claims(room_id, player_id)")
+        for row in conn.execute("SELECT id FROM multiplayer_rooms").fetchall():
+            _normalize_single_character_claims(conn, int(row["id"]))
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mp_claims_one_character_per_player "
+            "ON multiplayer_character_claims(room_id, player_id)"
+        )
         for sql in (
             "ALTER TABLE multiplayer_rooms ADD COLUMN current_scene_id INTEGER",
             "ALTER TABLE multiplayer_rooms ADD COLUMN current_room_id INTEGER",
@@ -272,6 +296,8 @@ class DiceRollRequest(BaseModel):
     expression: str = Field(default="1d100", max_length=120)
     actor_id: str = Field(default="", max_length=80)
     actor_name: str = Field(default="玩家", max_length=40)
+    character_id: int | None = None
+    character_name: str = Field(default="", max_length=80)
     reason: str = Field(default="", max_length=200)
     skill_name: str = Field(default="", max_length=80)
     skill_value: int | None = Field(default=None, ge=0, le=999)
@@ -283,6 +309,8 @@ class DiceRollRequest(BaseModel):
 class PlayerActionRequest(BaseModel):
     actor_id: str = Field(default="", max_length=80)
     actor_name: str = Field(default="玩家", max_length=40)
+    character_id: int | None = None
+    character_name: str = Field(default="", max_length=80)
     action: str = Field(default="", max_length=1200)
     action_type: str = Field(default="mixed", max_length=20)
     context: str = Field(default="", max_length=1200)
@@ -439,6 +467,32 @@ def _serialize_character_claim(row) -> dict[str, Any]:
     return dict(row)
 
 
+def _normalize_single_character_claims(conn, room_id: int) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, player_id
+        FROM multiplayer_character_claims
+        WHERE room_id=?
+        ORDER BY player_id, claimed_at, id
+        """,
+        (room_id,),
+    ).fetchall()
+    seen: set[str] = set()
+    duplicate_ids: list[int] = []
+    for row in rows:
+        player_id = str(row["player_id"] or "").strip()
+        if not player_id:
+            duplicate_ids.append(int(row["id"]))
+            continue
+        if player_id in seen:
+            duplicate_ids.append(int(row["id"]))
+        else:
+            seen.add(player_id)
+    if duplicate_ids:
+        placeholders = ",".join("?" for _ in duplicate_ids)
+        conn.execute(f"DELETE FROM multiplayer_character_claims WHERE id IN ({placeholders})", duplicate_ids)
+
+
 def _character_claims_for_room(conn, room_id: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -465,6 +519,56 @@ def _character_claims_for_player(conn, room_id: int, player_id: str) -> list[dic
 
 def _claim_names(claims: list[dict[str, Any]]) -> list[str]:
     return [str(c.get("character_name") or f"角色{c.get('character_id')}") for c in claims]
+
+
+def _single_character_claim_for_player(conn, room, player_id: str, role: str) -> dict[str, Any] | None:
+    claims = _require_player_character_claims(conn, room, player_id, role)
+    if len(claims) <= 1:
+        return claims[0] if claims else None
+    _normalize_single_character_claims(conn, int(room["id"]))
+    conn.commit()
+    claims = _require_player_character_claims(conn, room, player_id, role)
+    if len(claims) > 1:
+        raise fastapi.HTTPException(status_code=409, detail="每位玩家只能扮演一个角色")
+    return claims[0] if claims else None
+
+
+def _claim_actor_name(claim: dict[str, Any] | None, fallback: str = "玩家") -> str:
+    if not claim:
+        return (fallback or "玩家")[:40]
+    return str(claim.get("character_name") or fallback or "玩家")[:40]
+
+
+def _claim_actor_payload(
+    actor_id: str,
+    actor_name: str,
+    claim: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "actor_id": (actor_id or "")[:80],
+        "actor_name": (actor_name or "玩家")[:40],
+    }
+    if claim:
+        payload.update(
+            {
+                "character_id": _int_or_none(claim.get("character_id")),
+                "character_name": str(claim.get("character_name") or actor_name or "")[:80],
+                "character_role": str(claim.get("character_role") or "")[:80],
+            }
+        )
+    return payload
+
+
+def _request_with_claim_actor(req: DiceRollRequest | PlayerActionRequest, claim: dict[str, Any] | None):
+    if not claim:
+        return req
+    return req.copy(
+        update={
+            "actor_name": _claim_actor_name(claim, req.actor_name),
+            "character_id": _int_or_none(claim.get("character_id")),
+            "character_name": str(claim.get("character_name") or "")[:80],
+        }
+    )
 
 
 def _system_value(conn, key: str) -> str:
@@ -552,6 +656,43 @@ def _serialize_scene_for_players(conn, scene_id: int | None) -> dict[str, Any] |
 def _first_scene_id(conn) -> int | None:
     row = conn.execute("SELECT id FROM nodes ORDER BY id LIMIT 1").fetchone()
     return int(row["id"]) if row else None
+
+
+def _current_scene_for_room(conn, room) -> dict[str, Any] | None:
+    scene_id = _int_or_none(room["current_scene_id"]) or _int_or_none(_system_value(conn, "player_current_scene_id")) or _first_scene_id(conn)
+    return _serialize_scene_for_players(conn, scene_id)
+
+
+def _character_opening_text(conn, room, character: sqlite3.Row | dict[str, Any]) -> str:
+    char = dict(character)
+    scene = _current_scene_for_room(conn, room) or {}
+    scene_name = str(scene.get("name") or "开场").strip()
+    scene_text = str(scene.get("expanded_content") or scene.get("content") or "").strip()
+    scene_excerpt = _single_line(scene_text)[:420] or "主持端尚未写下更多场景细节，你先从自己的视角观察当下。"
+    name = str(char.get("name") or "角色").strip()
+    role = str(char.get("role") or "调查员").strip()
+    inventory = str(char.get("inventory") or "").strip()
+    personality = str(char.get("personality") or "").strip()
+    status = str(char.get("status") or "active").strip()
+    seed = hashlib.sha256(f"{room['code']}|{char.get('id')}|{name}".encode("utf-8")).hexdigest()
+    focus_options = [
+        "你首先注意到环境里最不合常理的细节。",
+        "你下意识检查随身物与退路，确认自己还能掌控什么。",
+        "你把同伴的动静放在余光里，独自判断这里是否安全。",
+        "你从自己的经历出发，意识到眼前的线索可能并不简单。",
+    ]
+    focus = focus_options[int(seed[:2], 16) % len(focus_options)]
+    details = [f"{name}，你以「{role}」的身份进入「{scene_name}」。"]
+    if personality:
+        details.append(f"你的性格/背景提示是：{_single_line(personality)[:160]}。")
+    if inventory:
+        details.append(f"你当前随身/状态记录：{_single_line(inventory)[:160]}。")
+    elif status and status != "active":
+        details.append(f"你当前状态为：{status}。")
+    details.append(focus)
+    details.append(f"从你的视角看，开场是这样的：{scene_excerpt}")
+    details.append("你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。")
+    return "\n".join(details)[:1800]
 
 
 def _stable_stat_seed(name: str) -> random.Random:
@@ -895,6 +1036,8 @@ def _roll_structured(req: DiceRollRequest, room_code: str) -> dict[str, Any]:
         "detail": _single_line(detail),
         "actor_id": req.actor_id,
         "actor_name": actor,
+        "character_id": req.character_id,
+        "character_name": req.character_name or actor,
         "reason": reason,
         "skill_name": skill,
         "skill_value": req.skill_value,
@@ -1058,11 +1201,17 @@ def _ai_roll_adjudication(conn, room, roll: dict[str, Any], context: str) -> dic
         "\"character_updates\":[{\"id\":角色ID或省略,\"name\":\"角色名\","
         "\"hp\":新的HP可省略,\"san\":新的SAN可省略,\"status\":\"active|hidden|benched|dead\"可省略,"
         "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}]}。"
+        "默认只裁定 roll.character_id 对应角色的直接后果；只有行动明确影响其他角色时才写入其他角色。"
         "只能改已有角色；没有明确后果时 character_updates 返回空数组；不要替玩家继续行动。"
     )
     return _ai_adjudicate_json(
         system_prompt,
-        {"room": room_name, "roll": roll, "context": context[:1200], "game_state": state},
+        {
+            "room": room_name,
+            "roll": roll,
+            "context": _trim_token_text(context, "multiplayer_context_chars", keep_tail=True),
+            "game_state": state,
+        },
         fallback,
     )
 
@@ -1080,16 +1229,22 @@ def _ai_player_action_adjudication(conn, room, req: PlayerActionRequest) -> dict
         "\"character_updates\":[{\"id\":角色ID或省略,\"name\":\"角色名\",\"hp\":新的HP可省略,"
         "\"san\":新的SAN可省略,\"status\":\"active|hidden|benched|dead\"可省略,"
         "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}]}。"
+        "默认只裁定 actor.character_id 对应角色的即时后果，不要把其他玩家的开场、行动或剧情推进混在一起。"
         "没有明确规则后果时不要改角色；需要检定时提出检定而不是代替玩家宣告成功。"
     )
     return _ai_adjudicate_json(
         system_prompt,
         {
             "room": room_name,
-            "actor": {"id": req.actor_id, "name": req.actor_name},
+            "actor": {
+                "id": req.actor_id,
+                "name": req.actor_name,
+                "character_id": req.character_id,
+                "character_name": req.character_name,
+            },
             "action_type": req.action_type,
             "action": action,
-            "context": req.context[:1200],
+            "context": _trim_token_text(req.context, "multiplayer_context_chars", keep_tail=True),
             "game_state": state,
         },
         fallback,
@@ -1106,7 +1261,7 @@ def _ai_dice_feedback(room_name: str, roll: dict[str, Any], context: str) -> str
     user = {
         "room": room_name,
         "roll": roll,
-        "context": (context or "")[:1200],
+        "context": _trim_token_text(context, "multiplayer_context_chars", keep_tail=True),
     }
     try:
         resp = ai_provider.chat_completion(
@@ -1125,6 +1280,12 @@ def _ai_dice_feedback(room_name: str, roll: dict[str, Any], context: str) -> str
 
 async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
     roll = _roll_structured(req, room["code"])
+    actor_payload = {
+        "actor_id": roll.get("actor_id", ""),
+        "actor_name": roll.get("actor_name", ""),
+        "character_id": roll.get("character_id"),
+        "character_name": roll.get("character_name", ""),
+    }
     dice_msg = _save_message(
         conn,
         room["id"],
@@ -1132,7 +1293,7 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
         roll["actor_name"],
         "dice",
         roll["summary"],
-        roll,
+        {"source": "dice", **actor_payload, **roll},
     )
     adjudication = _ai_roll_adjudication(conn, room, roll, req.context) if req.ask_ai else {
         "narration": _deterministic_dice_feedback(room["name"], roll),
@@ -1147,7 +1308,7 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
         "AI-KP",
         "ai",
         feedback,
-        {"source": "dice", "roll": roll, "character_updates": changes},
+        {"source": "dice", **actor_payload, "roll": roll, "character_updates": changes},
     )
     change_msg = None
     if changes:
@@ -1158,7 +1319,7 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
             "AI-KP",
             "state",
             _format_character_changes(changes),
-            {"source": "character_updates", "changes": changes},
+            {"source": "character_updates", **actor_payload, "changes": changes},
         )
     _remember_room_event(conn, room["code"], f"{roll['summary']}；AI反馈：{feedback}")
     await _broadcast(room["id"], {"type": "message.created", "message": dice_msg})
@@ -1185,11 +1346,11 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
         "SELECT role FROM multiplayer_members WHERE room_id=? AND player_id=?",
         (room["id"], req.actor_id),
     ).fetchone()
+    claim = None
     if not member or member["role"] != "gm":
-        claims = _character_claims_for_player(conn, room["id"], req.actor_id)
-        if not claims:
-            raise fastapi.HTTPException(status_code=403, detail="请先确认扮演角色")
-        req = req.copy(update={"actor_name": " / ".join(_claim_names(claims))[:40]})
+        claim = _single_character_claim_for_player(conn, room, req.actor_id, "player")
+        req = _request_with_claim_actor(req, claim)
+    actor_payload = _claim_actor_payload(req.actor_id, req.actor_name, claim)
     player_msg = _save_message(
         conn,
         room["id"],
@@ -1197,12 +1358,18 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
         req.actor_name,
         "action",
         action,
-        {"action_type": req.action_type, "context": req.context},
+        {"source": "player_action", **actor_payload, "action_type": req.action_type, "context": req.context},
     )
     adjudication = _ai_player_action_adjudication(conn, room, req)
     changes = _apply_character_updates(conn, adjudication.get("character_updates"))
     narration = adjudication.get("narration") or f"AI-KP 记录了{req.actor_name}的行动：{action}。"
-    payload = {"source": "player_action", "action": action, "action_type": req.action_type, "character_updates": changes}
+    payload = {
+        "source": "player_action",
+        **actor_payload,
+        "action": action,
+        "action_type": req.action_type,
+        "character_updates": changes,
+    }
     if adjudication.get("needs_roll"):
         payload["needs_roll"] = True
         payload["suggested_roll"] = str(adjudication.get("suggested_roll") or "")[:120]
@@ -1216,7 +1383,7 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
             "AI-KP",
             "state",
             _format_character_changes(changes),
-            {"source": "character_updates", "changes": changes},
+            {"source": "character_updates", **actor_payload, "changes": changes},
         )
     _remember_room_event(conn, room["code"], f"{req.actor_name}行动：{action[:300]}；AI反馈：{narration[:300]}")
     await _broadcast(room["id"], {"type": "message.created", "message": player_msg})
@@ -1400,13 +1567,16 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
             _member_token_from_request(request),
             _room_token_from_request(request),
         )
-        claims = _require_player_character_claims(conn, room, req.sender_id, role)
-        sender_name = " / ".join(_claim_names(claims))[:40] if claims else req.sender_name
+        claim = _single_character_claim_for_player(conn, room, req.sender_id, role)
+        sender_name = _claim_actor_name(claim, req.sender_name)
+        actor_payload = _claim_actor_payload(req.sender_id, sender_name, claim)
         if re.match(r"^[./!！。]\s*r(?:oll)?\b|^[./!！。]\s*r\d", content, re.I):
             dice_req = DiceRollRequest(
                 expression=content,
                 actor_id=req.sender_id,
                 actor_name=sender_name,
+                character_id=actor_payload.get("character_id"),
+                character_name=actor_payload.get("character_name", ""),
                 reason=req.payload.get("reason", ""),
                 skill_name=req.payload.get("skill_name", ""),
                 skill_value=req.payload.get("skill_value"),
@@ -1415,7 +1585,8 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
                 context=req.payload.get("context", ""),
             )
             return await _roll_and_record(conn, room, dice_req)
-        msg = _save_message(conn, room["id"], req.sender_id, sender_name, req.kind, content, req.payload)
+        msg_payload = {**(req.payload or {}), **actor_payload}
+        msg = _save_message(conn, room["id"], req.sender_id, sender_name, req.kind, content, msg_payload)
         _remember_room_event(conn, room["code"], f"{sender_name}: {content[:300]}")
     await _broadcast(room["id"], {"type": "message.created", "message": msg})
     return {"status": "success", "message": msg}
@@ -1432,9 +1603,8 @@ async def roll_dice(room_code: str, req: DiceRollRequest, request: Request):
             _member_token_from_request(request),
             _room_token_from_request(request),
         )
-        claims = _require_player_character_claims(conn, room, req.actor_id, role)
-        if claims:
-            req = req.copy(update={"actor_name": " / ".join(_claim_names(claims))[:40]})
+        claim = _single_character_claim_for_player(conn, room, req.actor_id, role)
+        req = _request_with_claim_actor(req, claim)
         return await _roll_and_record(conn, room, req)
 
 
@@ -1473,6 +1643,8 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
         raise fastapi.HTTPException(status_code=400, detail="角色 ID 无效") from None
     if not character_ids:
         raise fastapi.HTTPException(status_code=400, detail="请至少选择一个角色")
+    if len(character_ids) != 1:
+        raise fastapi.HTTPException(status_code=400, detail="每位玩家只能选择一个角色")
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
         player_id = (req.player_id or "").strip()[:80]
@@ -1490,10 +1662,11 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
             (room["id"], player_id),
         ).fetchone()
         display_name = (member["display_name"] if member else player_id)[:40]
+        _normalize_single_character_claims(conn, int(room["id"]))
 
         placeholders = ",".join("?" for _ in character_ids)
         rows = conn.execute(
-            f"SELECT id, name, role, hp, san, inventory, status FROM characters WHERE id IN ({placeholders})",
+            f"SELECT id, name, role, hp, san, inventory, personality, status FROM characters WHERE id IN ({placeholders})",
             character_ids,
         ).fetchall()
         row_by_id = {int(r["id"]): r for r in rows}
@@ -1543,8 +1716,16 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
                     (room["id"], cid, player_id, display_name, _now()),
                 )
 
+        character_id = int(rows_in_order[0]["id"])
+        character_name = str(rows_in_order[0]["name"] or f"角色{character_id}")
         notes = json.dumps(
-            {"character_ids": character_ids, "character_names": names, "locked": True},
+            {
+                "character_id": character_id,
+                "character_name": character_name,
+                "character_ids": character_ids,
+                "character_names": names,
+                "locked": True,
+            },
             ensure_ascii=False,
         )
         token_id = f"pc_{player_id}"
@@ -1565,31 +1746,40 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
             (
                 room["id"],
                 token_id,
-                "/".join(names)[:80],
+                character_name[:80],
                 "pc",
                 player_id,
                 "",
                 (member["color"] if member else "#7dd3fc")[:20],
-                160 + len(names) * 18,
-                160 + len(names) * 12,
+                160,
+                160,
                 48,
                 _int_or_none(room["current_room_id"]),
                 None,
-                rows_in_order[0]["id"],
+                character_id,
                 notes,
                 _now(),
             ),
         )
         msg = None
         if first_claim:
+            opening_text = _character_opening_text(conn, room, rows_in_order[0])
             msg = _save_message(
                 conn,
                 room["id"],
                 player_id,
-                "/".join(names)[:40],
+                character_name[:40],
                 "system",
-                f"已锁定角色：{'、'.join(names)}",
-                {"character_ids": character_ids, "locked": True},
+                opening_text,
+                {
+                    "source": "character_opening",
+                    "actor_id": player_id,
+                    "actor_name": character_name[:40],
+                    "character_id": character_id,
+                    "character_name": character_name,
+                    "opening": opening_text,
+                    "locked": True,
+                },
             )
         conn.commit()
         token = _serialize_token(conn.execute("SELECT * FROM multiplayer_tokens WHERE room_id=? AND token_id=?", (room["id"], token_id)).fetchone())
@@ -1901,30 +2091,44 @@ async def room_websocket(
                         content=content,
                         payload=incoming.get("payload") or {},
                     )
-                    claims = _require_player_character_claims(conn, room, req.sender_id, meta.get("role", "player"))
-                    sender_name = " / ".join(_claim_names(claims))[:40] if claims else req.sender_name
+                    claim = _single_character_claim_for_player(conn, room, req.sender_id, meta.get("role", "player"))
+                    sender_name = _claim_actor_name(claim, req.sender_name)
+                    actor_payload = _claim_actor_payload(req.sender_id, sender_name, claim)
                     if re.match(r"^[./!！。]\s*r", content, re.I):
                         dice_req = DiceRollRequest(
                             expression=content,
                             actor_id=req.sender_id,
                             actor_name=sender_name,
+                            character_id=actor_payload.get("character_id"),
+                            character_name=actor_payload.get("character_name", ""),
                             ask_ai=bool(req.payload.get("ask_ai", True)),
                             context=req.payload.get("context", ""),
                         )
                         await _roll_and_record(conn, room, dice_req)
                     else:
-                        saved = _save_message(conn, room_id, req.sender_id, sender_name, "chat", content, req.payload)
+                        saved = _save_message(
+                            conn,
+                            room_id,
+                            req.sender_id,
+                            sender_name,
+                            "chat",
+                            content,
+                            {**(req.payload or {}), **actor_payload},
+                        )
                         _remember_room_event(conn, room["code"], f"{sender_name}: {content[:300]}")
                         await _broadcast(room_id, {"type": "message.created", "message": saved})
                 elif msg_type == "dice.roll":
                     payload = incoming.get("payload") or {}
                     actor_id = meta.get("player_id", "")
-                    claims = _require_player_character_claims(conn, room, actor_id, meta.get("role", "player"))
-                    actor_name = " / ".join(_claim_names(claims))[:40] if claims else payload.get("actor_name") or meta.get("name", name)
+                    claim = _single_character_claim_for_player(conn, room, actor_id, meta.get("role", "player"))
+                    actor_name = _claim_actor_name(claim, payload.get("actor_name") or meta.get("name", name))
+                    actor_payload = _claim_actor_payload(actor_id, actor_name, claim)
                     dice_req = DiceRollRequest(
                         expression=payload.get("expression", "1d100"),
                         actor_id=actor_id,
                         actor_name=actor_name,
+                        character_id=actor_payload.get("character_id"),
+                        character_name=actor_payload.get("character_name", ""),
                         reason=payload.get("reason", ""),
                         skill_name=payload.get("skill_name", ""),
                         skill_value=payload.get("skill_value"),
