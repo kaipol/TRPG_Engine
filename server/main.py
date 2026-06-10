@@ -29,16 +29,19 @@ import webbrowser
 import threading
 import math
 from . import ai_provider
+from .local_config import get_server_bind, provider_store_path, resolve_base_dir
 
 
 
 app = fastapi.FastAPI(title="RPG 桌游控制台 API - V5")
+BASE_DIR = resolve_base_dir()
+SERVER_HOST, SERVER_PORT = get_server_bind(BASE_DIR)
 
 # CORS 仅允许本地访问，部署时通过 ALLOWED_ORIGINS 环境变量配置
 # 示例：ALLOWED_ORIGINS=http://localhost:8000,http://192.168.1.100:8000
 _default_origins = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
+    f"http://127.0.0.1:{SERVER_PORT}",
+    f"http://localhost:{SERVER_PORT}",
 ]
 if os.environ.get("ZRIC_ALLOW_FILE_ORIGIN", "").lower() in {"1", "true", "yes"}:
     _default_origins.append("null")
@@ -194,30 +197,13 @@ app.include_router(multiplayer_router)
 import sys
 import os
 
-# 【关键修复】：识别当前是源码运行，还是 exe 运行
-_base_dir_override = os.environ.get("ZRIC_BASE_DIR", "").strip()
-if _base_dir_override:
-    BASE_DIR = os.path.abspath(_base_dir_override)
-elif getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 configure_static_files(WEB_DIR)
 CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
 
-# 【安全】：从 .env 文件或系统环境变量中加载 API 配置，绝不硬编码
-# 安装方式：pip install python-dotenv
-# 使用方式：在项目根目录创建 .env 文件，写入 OPENAI_COMPAT_* 配置；
-# 也可以通过前端保存多个 OpenAI 兼容供应商到本地 openai_providers.json。
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
-except ImportError:
-    pass  # python-dotenv 未安装时，回退到纯系统环境变量
-
-ai_provider.configure_provider_store(os.path.join(BASE_DIR, "openai_providers.json"))
+# 【安全】：AI 供应商和本地启动配置统一保存至 config.json。
+ai_provider.configure_provider_store(str(provider_store_path(BASE_DIR)))
 
 DB_FILE = os.path.join(BASE_DIR, "rpg_game.db")
 os.makedirs(CAMPAIGNS_DIR, exist_ok=True)
@@ -370,7 +356,7 @@ class ImageGenRequest(BaseModel):
     scene_id: int | None = None # 当前场景 ID（传入后自动提取场景名+描述+地图位置）
     scene_name: str = ""        # 场景名（scene_id 未传时的手动兜底）
     scene_content: str = ""     # 场景正文（scene_id 未传时的手动兜底）
-    image_model: str = ""       # 可选：请求级覆盖 OPENAI_COMPAT_IMAGE_MODEL
+    image_model: str = ""       # 可选：请求级覆盖已配置的图像模型
 
 # 【多时间线推演】：数据模型（CRUD 模型已迁移至 timeline.py）
 class TimelineDynamicRequest(BaseModel):
@@ -443,6 +429,7 @@ def list_campaigns(request: Request):
     # 旧版：BASE_DIR 下的 *.json（向后兼容）
     for f in glob.glob(os.path.join(BASE_DIR, "*.json")):
         fname = os.path.basename(f)
+        if fname in {"config.json", "openai_providers.json"}: continue
         if fname.startswith("persona_mode"): continue
         valid, limits = _campaign_player_limits(f)
         if not valid: continue
@@ -1720,7 +1707,7 @@ def generate_image(request: ImageGenRequest):
     图片生成（场景感知版）：
       Step 1 - 自动从当前场景提取上下文（场景名、正文、世界观、地图位置）
       Step 2 - 当前聊天模型将上下文压缩为一段精炼的画面描述（含构图、光影、氛围）
-      Step 3 - prompt + 风格锚点发给 OPENAI_COMPAT_IMAGE_MODEL
+      Step 3 - prompt + 风格锚点发给当前图像模型
     GM 可以不填 description，系统自动从场景生图；也可以填补充描述来引导画面重点。
     """
     # ── 风格方向锚点 ──
@@ -2531,9 +2518,10 @@ if __name__ == "__main__":
     def auto_open_browser():
         time.sleep(2)
         _log.info("正在自动为您打开浏览器...")
-        webbrowser.open("http://127.0.0.1:8000")
+        open_host = "127.0.0.1" if SERVER_HOST in {"0.0.0.0", "::"} else SERVER_HOST
+        webbrowser.open(f"http://{open_host}:{SERVER_PORT}")
 
     threading.Thread(target=auto_open_browser, daemon=True).start()
 
     # 启动服务器 (使用 127.0.0.1 避免某些网络策略拦截)
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT, log_level="info")

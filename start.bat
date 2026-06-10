@@ -6,6 +6,25 @@ set "ROOT_DIR=%CD%"
 set "RUNTIME_DIR=%ROOT_DIR%\.runtime"
 set "PID_FILE=%RUNTIME_DIR%\trpg_engine.pid"
 set "RUNNER=%ROOT_DIR%\scripts\windows_run_server.ps1"
+set "START_PORT=%~1"
+
+if "%START_PORT%"=="" (
+    set "START_PORT=0"
+) else (
+    echo %START_PORT%| findstr /r "^[1-9][0-9]*$" >nul
+    if errorlevel 1 (
+        echo [ERROR] Invalid port: %START_PORT%
+        echo Usage: start.bat [port]
+        pause
+        exit /b 1
+    )
+    if %START_PORT% GTR 65535 (
+        echo [ERROR] Invalid port: %START_PORT%
+        echo Usage: start.bat [port]
+        pause
+        exit /b 1
+    )
+)
 
 echo =====================================================
 echo  Z.R.I.C TRPG Engine - one-click launcher
@@ -59,11 +78,15 @@ if errorlevel 1 (
 
 echo.
 echo [3/3] Starting Z.R.I.C TRPG Engine...
-echo      GM console: http://127.0.0.1:8000/
+if "%START_PORT%"=="0" (
+    echo      GM console: uses saved port from config.json, default 8000.
+) else (
+    echo      GM console: http://127.0.0.1:%START_PORT%/
+)
 echo      Press Ctrl+C in this window to stop the server.
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNNER%" -PythonPath "%ROOT_DIR%\.venv\Scripts\python.exe" -ScriptPath "%ROOT_DIR%\main.py" -WorkingDirectory "%ROOT_DIR%" -PidFile "%PID_FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNNER%" -PythonPath "%ROOT_DIR%\.venv\Scripts\python.exe" -ScriptPath "%ROOT_DIR%\main.py" -WorkingDirectory "%ROOT_DIR%" -PidFile "%PID_FILE%" -Port %START_PORT%
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

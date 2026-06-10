@@ -2,7 +2,7 @@
 
 本目录现在提供一个一体化多人跑团入口：
 
-- `http://127.0.0.1:8000/multiplayer.html`
+- `http://127.0.0.1:<端口>/multiplayer.html`（默认端口 `8000`）
 
 ## 已融合能力
 
@@ -69,10 +69,10 @@ python main.py
 
 然后访问：
 
-- GM 控制台：`http://127.0.0.1:8000/`
-- 多人跑团桌：`http://127.0.0.1:8000/multiplayer.html`
-- 投屏端：`http://127.0.0.1:8000/player.html`
-- NPC 通讯录：`http://127.0.0.1:8000/phone.html`
+- GM 控制台：`http://127.0.0.1:<端口>/`
+- 多人跑团桌：`http://127.0.0.1:<端口>/multiplayer.html`
+- 投屏端：`http://127.0.0.1:<端口>/player.html`
+- NPC 通讯录：`http://127.0.0.1:<端口>/phone.html`
 
 ## 注意
 

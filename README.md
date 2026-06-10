@@ -4,7 +4,7 @@ AI 驱动的 TRPG 主持、剧情推演、知识库检索和多人跑团工具�
 
 ## 快速启动
 
-Windows 下推荐直接双击根目录的 `start.bat`。脚本会自动创建 `.venv`、安装依赖并启动服务；关闭启动窗口或按 `Ctrl+C` 后，会清理本次启动器拉起的 Python 进程，并在下次启动前清理上次残留的同源进程，避免占用 `8000` 端口。清理逻辑只匹配本仓库 `.venv` 和 `main.py` 对应的进程，不会主动关闭其它 Python 程序。
+Windows 下推荐直接双击根目录的 `start.bat`。脚本会自动创建 `.venv`、安装依赖并启动服务；关闭启动窗口或按 `Ctrl+C` 后，会清理本次启动器拉起的 Python 进程，并在下次启动前清理上次残留的同源进程，避免占用启动端口。清理逻辑只匹配本仓库 `.venv` 和 `main.py` 对应的进程，不会主动关闭其它 Python 程序。
 
 Linux 下在项目根目录运行一键启动命令：
 
@@ -25,32 +25,33 @@ pip install -r requirements.txt
 python main.py
 ```
 
+默认端口是 `8000`。需要修改启动端口时，可以在启动命令后追加端口号；这个值会写入本地 `config.json` 的 `server.port`，下次不传参数也会继续使用：
+
+```powershell
+start.bat 8010
+python main.py --port 8010
+```
+
+Linux/macOS：
+
+```bash
+bash ./start.sh 8010
+```
+
 启动后程序会自动打开主入口。主入口提供“单人游玩”和“多人游玩”：两者都由 AI-GM 主持，玩家选择剧中角色进行扮演；GM 控制台保留为高级管理视图。
 
 也可以手动访问：
 
-- 主入口 / 单人玩家桌 / GM 控制台：`http://127.0.0.1:8000/`
-- 投屏端：`http://127.0.0.1:8000/player.html`
-- 手机通讯录：`http://127.0.0.1:8000/phone.html`
-- 多人联机桌：`http://127.0.0.1:8000/multiplayer.html`
+- 主入口 / 单人玩家桌 / GM 控制台：`http://127.0.0.1:<端口>/`
+- 投屏端：`http://127.0.0.1:<端口>/player.html`
+- 手机通讯录：`http://127.0.0.1:<端口>/phone.html`
+- 多人联机桌：`http://127.0.0.1:<端口>/multiplayer.html`
 
 ## AI 配置
 
-首次使用 AI 功能时，可以在前端配置面板填写 OpenAI 兼容端点，也可以复制 `.env.example` 为 `.env` 后填写：
+首次使用 AI 功能时，在前端配置面板填写 OpenAI 兼容端点。前端支持保存多个 OpenAI 兼容供应商 profile，并写入本地 `config.json`。该文件包含本地 API Key、本地启动端口、Token 策略和 AI 缓存设置，已在 `.gitignore` 中忽略。
 
-```powershell
-Copy-Item .env.example .env
-```
-
-常用配置项：
-
-- `OPENAI_COMPAT_API_KEY`
-- `OPENAI_COMPAT_BASE_URL`
-- `OPENAI_COMPAT_CHAT_MODEL`
-- `OPENAI_COMPAT_EMBEDDING_MODEL`
-- `OPENAI_COMPAT_IMAGE_MODEL`
-
-前端支持保存多个 OpenAI 兼容供应商 profile，并写入本地 `openai_providers.json`。该文件包含本地 API Key，已在 `.gitignore` 中忽略。
+`config.json` 是唯一的本地运行配置源。项目不再读取 `.env` 中的 `OPENAI_COMPAT_*` 配置，避免同一密钥和模型在两处漂移。首次启动或首次保存配置时会写出包含默认值和 `//` 注释的 `config.json`；旧版 `openai_providers.json` 如存在会被读取并迁移到新文件。
 
 模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding 和 Image 每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
 
@@ -65,6 +66,7 @@ E:\TRPG_Engine
 │   ├── main.py           # 应用入口、静态页面、剧本导入、AI 配置 API
 │   ├── agent.py          # AI 推演与流式扩写
 │   ├── ai_provider.py    # OpenAI 兼容供应商与模型配置
+│   ├── local_config.py   # 本地 config.json 读取、默认值、注释模板与旧配置迁移
 │   ├── rag.py            # RAG 知识库、切片、embedding、检索
 │   ├── memory.py         # 短期/长期记忆
 │   ├── map.py            # 场景地图
@@ -110,8 +112,8 @@ python -m py_compile main.py (Get-ChildItem server -Recurse -Filter *.py).FullNa
 
 不要提交本地运行数据或凭据：
 
-- `.env`
-- `openai_providers.json`
+- `config.json`
+- `openai_providers.json`（旧版本地配置，存在时会迁移）
 - `.runtime/`
 - `.venv/`
 - `uploads/`

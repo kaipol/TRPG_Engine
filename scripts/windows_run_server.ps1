@@ -9,7 +9,9 @@ param(
     [string]$WorkingDirectory,
 
     [Parameter(Mandatory = $true)]
-    [string]$PidFile
+    [string]$PidFile,
+
+    [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,7 +118,11 @@ try {
 
     $processInfo = New-Object System.Diagnostics.ProcessStartInfo
     $processInfo.FileName = $PythonPath
-    $processInfo.Arguments = '"' + $ScriptPath.Replace('"', '\"') + '"'
+    $argumentList = @('"' + $ScriptPath.Replace('"', '\"') + '"')
+    if ($Port -gt 0) {
+        $argumentList += @('--port', [string]$Port)
+    }
+    $processInfo.Arguments = $argumentList -join ' '
     $processInfo.WorkingDirectory = $WorkingDirectory
     $processInfo.UseShellExecute = $false
     $processInfo.EnvironmentVariables["TRPG_LAUNCHER_PARENT_PID"] = [string]$PID

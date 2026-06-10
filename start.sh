@@ -8,6 +8,18 @@ RUNTIME_DIR="$ROOT_DIR/.runtime"
 PID_FILE="$RUNTIME_DIR/trpg_engine.pid"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 APP_PID=""
+START_PORT="${1:-}"
+
+if [[ -n "$START_PORT" && ! "$START_PORT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] Invalid port: $START_PORT" >&2
+    echo "Usage: ./start.sh [port]" >&2
+    exit 1
+fi
+if [[ -n "$START_PORT" && "$START_PORT" -gt 65535 ]]; then
+    echo "[ERROR] Invalid port: $START_PORT" >&2
+    echo "Usage: ./start.sh [port]" >&2
+    exit 1
+fi
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -85,11 +97,19 @@ echo "[2/3] Installing or updating dependencies..."
 
 echo
 echo "[3/3] Starting Z.R.I.C TRPG Engine..."
-echo "     GM console: http://127.0.0.1:8000/"
+if [[ -n "$START_PORT" ]]; then
+    echo "     GM console: http://127.0.0.1:$START_PORT/"
+else
+    echo "     GM console: uses saved port from config.json, default 8000."
+fi
 echo "     Press Ctrl+C in this terminal to stop the server."
 echo
 
-"$PYTHON_BIN" "$ROOT_DIR/main.py" &
+if [[ -n "$START_PORT" ]]; then
+    "$PYTHON_BIN" "$ROOT_DIR/main.py" --port "$START_PORT" &
+else
+    "$PYTHON_BIN" "$ROOT_DIR/main.py" &
+fi
 APP_PID="$!"
 printf '%s\n' "$APP_PID" >"$PID_FILE"
 echo "[launcher] Server Python PID: $APP_PID"

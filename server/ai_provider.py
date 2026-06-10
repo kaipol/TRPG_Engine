@@ -8,30 +8,20 @@ OpenAI-compatible vendors without rewriting application code.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from openai import OpenAI
 
+from . import local_config
 
-ENV_API_KEY = "OPENAI_COMPAT_API_KEY"
-ENV_BASE_URL = "OPENAI_COMPAT_BASE_URL"
-ENV_PROVIDER_NAME = "OPENAI_COMPAT_PROVIDER_NAME"
-ENV_CHAT_MODEL = "OPENAI_COMPAT_CHAT_MODEL"
-ENV_EMBEDDING_MODEL = "OPENAI_COMPAT_EMBEDDING_MODEL"
-ENV_IMAGE_MODEL = "OPENAI_COMPAT_IMAGE_MODEL"
-ENV_IMAGE_SIZE = "OPENAI_COMPAT_IMAGE_SIZE"
-ENV_TOKEN_POLICY_MODE = "ZRIC_TOKEN_POLICY_MODE"
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_IMAGE_SIZE = "1024x1024"
-DEFAULT_PROVIDER_ID = "default"
-DEFAULT_PROVIDER_NAME = "Default endpoint"
-DEFAULT_TOKEN_POLICY_MODE = "full"
+DEFAULT_BASE_URL = local_config.DEFAULT_BASE_URL
+DEFAULT_IMAGE_SIZE = local_config.DEFAULT_IMAGE_SIZE
+DEFAULT_PROVIDER_ID = local_config.DEFAULT_PROVIDER_ID
+DEFAULT_PROVIDER_NAME = local_config.DEFAULT_PROVIDER_NAME
+DEFAULT_TOKEN_POLICY_MODE = local_config.DEFAULT_TOKEN_POLICY_MODE
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -98,7 +88,7 @@ TOKEN_POLICY_MODES = {
     },
 }
 
-_provider_store_path: Path | None = None
+_provider_store_base_dir: str | None = None
 _active_models: dict[str, str] = {}
 
 
@@ -119,48 +109,34 @@ class OpenAICompatibleConfig:
 
 
 def configure_provider_store(path: str) -> None:
-    global _provider_store_path
-    _provider_store_path = Path(path)
+    global _provider_store_base_dir
+    config_path = Path(path)
+    if config_path.name in {local_config.CONFIG_FILE_NAME, local_config.LEGACY_CONFIG_FILE_NAME}:
+        _provider_store_base_dir = str(config_path.parent)
+    else:
+        _provider_store_base_dir = str(config_path)
+    local_config.ensure_local_config(_provider_store_base_dir)
 
 
-def _env_first(keys: Iterable[str], default: str = "") -> str:
-    for key in keys:
-        value = os.environ.get(key, "").strip()
-        if value:
-            return value
-    return default
-
-
-def _env_record() -> dict:
+def _default_record() -> dict:
     return {
         "id": DEFAULT_PROVIDER_ID,
-        "name": os.environ.get(ENV_PROVIDER_NAME, DEFAULT_PROVIDER_NAME).strip() or DEFAULT_PROVIDER_NAME,
-        "api_key": _env_first((ENV_API_KEY, "OPENAI_API_KEY")),
-        "base_url": _env_first((ENV_BASE_URL, "OPENAI_BASE_URL"), DEFAULT_BASE_URL),
-        "chat_model": _env_first((ENV_CHAT_MODEL, "OPENAI_MODEL")),
-        "embedding_model": os.environ.get(ENV_EMBEDDING_MODEL, "").strip(),
-        "image_model": os.environ.get(ENV_IMAGE_MODEL, "").strip(),
-        "image_size": os.environ.get(ENV_IMAGE_SIZE, DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
+        "name": DEFAULT_PROVIDER_NAME,
+        "api_key": "",
+        "base_url": DEFAULT_BASE_URL,
+        "chat_model": "",
+        "embedding_model": "",
+        "image_model": "",
+        "image_size": DEFAULT_IMAGE_SIZE,
     }
 
 
 def _read_store() -> dict:
-    if not _provider_store_path or not _provider_store_path.exists():
-        return {}
-    try:
-        with _provider_store_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return local_config.read_local_config(_provider_store_base_dir)
 
 
 def _write_store(data: dict) -> None:
-    if not _provider_store_path:
-        raise RuntimeError("OpenAI provider store path is not configured.")
-    _provider_store_path.parent.mkdir(parents=True, exist_ok=True)
-    with _provider_store_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    local_config.write_local_config(data, _provider_store_base_dir)
 
 
 def _slug(value: str) -> str:
@@ -183,7 +159,7 @@ def _normalize_record(raw: dict, fallback_id: str = DEFAULT_PROVIDER_ID) -> dict
     }
 
 
-def _provider_records(include_env: bool = True) -> tuple[str, list[dict]]:
+def _provider_records(include_default: bool = True) -> tuple[str, list[dict]]:
     store = _read_store()
     records = []
     seen = set()
@@ -196,8 +172,8 @@ def _provider_records(include_env: bool = True) -> tuple[str, list[dict]]:
         seen.add(record["id"])
         records.append(record)
 
-    if include_env and not records:
-        records.append(_normalize_record(_env_record(), DEFAULT_PROVIDER_ID))
+    if include_default and not records:
+        records.append(_normalize_record(_default_record(), DEFAULT_PROVIDER_ID))
 
     active_id = _slug(str(store.get("active_provider") or ""))
     if not active_id and records:
@@ -208,7 +184,7 @@ def _provider_records(include_env: bool = True) -> tuple[str, list[dict]]:
 
 
 def _config_from_record(record: dict | None) -> OpenAICompatibleConfig:
-    record = _normalize_record(record or _env_record(), DEFAULT_PROVIDER_ID)
+    record = _normalize_record(record or _default_record(), DEFAULT_PROVIDER_ID)
     return OpenAICompatibleConfig(
         provider_id=record["id"],
         provider_name=record["name"],
@@ -223,14 +199,14 @@ def _config_from_record(record: dict | None) -> OpenAICompatibleConfig:
 
 def get_config(provider_id: str | None = None) -> OpenAICompatibleConfig:
     """Read current runtime configuration from provider profiles or environment variables."""
-    active_id, records = _provider_records(include_env=True)
+    active_id, records = _provider_records(include_default=True)
     selected_id = _slug(provider_id or active_id)
     for record in records:
         if record["id"] == selected_id:
             return _config_from_record(record)
     if records:
         return _config_from_record(records[0])
-    return _config_from_record(_env_record())
+    return _config_from_record(_default_record())
 
 
 def is_configured(provider_id: str | None = None) -> bool:
@@ -238,7 +214,7 @@ def is_configured(provider_id: str | None = None) -> bool:
 
 
 def list_provider_profiles() -> list[dict]:
-    active_id, records = _provider_records(include_env=True)
+    active_id, records = _provider_records(include_default=True)
     profiles = []
     for record in records:
         cfg = _config_from_record(record)
@@ -257,7 +233,7 @@ def list_provider_profiles() -> list[dict]:
 
 
 def get_active_provider_id() -> str:
-    active_id, _ = _provider_records(include_env=True)
+    active_id, _ = _provider_records(include_default=True)
     return active_id
 
 
@@ -276,8 +252,7 @@ def normalize_token_policy_mode(mode: str | None) -> str:
 def get_token_policy_mode() -> str:
     store = _read_store()
     stored = store.get("token_policy_mode") if isinstance(store, dict) else ""
-    env_mode = os.environ.get(ENV_TOKEN_POLICY_MODE, "").strip()
-    return normalize_token_policy_mode(stored or env_mode or DEFAULT_TOKEN_POLICY_MODE)
+    return normalize_token_policy_mode(stored or DEFAULT_TOKEN_POLICY_MODE)
 
 
 def set_token_policy_mode(mode: str) -> str:
@@ -315,7 +290,7 @@ def upsert_provider_profile(
     image_size: str | None = None,
     make_active: bool = True,
 ) -> OpenAICompatibleConfig:
-    active_id, records = _provider_records(include_env=True)
+    active_id, records = _provider_records(include_default=True)
     target_id = _slug(provider_id or provider_name or DEFAULT_PROVIDER_ID)
 
     existing = None
@@ -347,7 +322,7 @@ def upsert_provider_profile(
 
 
 def set_active_provider(provider_id: str) -> OpenAICompatibleConfig:
-    active_id, records = _provider_records(include_env=True)
+    active_id, records = _provider_records(include_default=True)
     target_id = _slug(provider_id)
     for record in records:
         if record["id"] == target_id:
@@ -358,7 +333,7 @@ def set_active_provider(provider_id: str) -> OpenAICompatibleConfig:
 
 
 def delete_provider_profile(provider_id: str) -> str:
-    active_id, records = _provider_records(include_env=False)
+    active_id, records = _provider_records(include_default=False)
     target_id = _slug(provider_id)
     remaining = [record for record in records if record["id"] != target_id]
     if len(remaining) == len(records):
@@ -400,7 +375,7 @@ def _persist_active_model(capability: str, model: str) -> None:
     field = MODEL_CAPABILITY_FIELDS.get(capability)
     if not field:
         return
-    active_id, records = _provider_records(include_env=True)
+    active_id, records = _provider_records(include_default=True)
     for record in records:
         if record["id"] == active_id:
             record[field] = model

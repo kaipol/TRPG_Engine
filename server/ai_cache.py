@@ -4,39 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime
 from typing import Any
 
 from . import ai_provider
 from .database import safe_db
+from .local_config import get_ai_cache_settings, set_ai_cache_settings
 from .logger import get_logger
 
 
 _log = get_logger("ai_cache")
-
-ENV_ENABLED = "ZRIC_AI_RESPONSE_CACHE"
-ENV_MAX_ENTRIES = "ZRIC_AI_RESPONSE_CACHE_MAX"
-DEFAULT_MAX_ENTRIES = 512
-
-SETTING_ENABLED = "ai_response_cache_enabled"
-SETTING_MAX_ENTRIES = "ai_response_cache_max_entries"
-
-
-def _env_enabled_default() -> bool:
-    raw = os.environ.get(ENV_ENABLED, "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
-def _env_max_entries_default() -> int:
-    raw = os.environ.get(ENV_MAX_ENTRIES, "").strip()
-    if not raw:
-        return DEFAULT_MAX_ENTRIES
-    try:
-        return max(16, min(10000, int(raw)))
-    except ValueError:
-        return DEFAULT_MAX_ENTRIES
-
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -50,57 +27,14 @@ def _stable_json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _bool_text(value: bool) -> str:
-    return "1" if value else "0"
-
-
-def _read_setting(conn, key: str, default: str) -> str:
-    try:
-        row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
-        return str(row["value"]) if row and row["value"] is not None else default
-    except Exception:
-        return default
-
-
 def get_settings() -> dict[str, Any]:
-    """Return persisted cache settings, falling back to environment defaults."""
-    default_enabled = _bool_text(_env_enabled_default())
-    default_max_entries = str(_env_max_entries_default())
-    try:
-        with safe_db() as conn:
-            enabled_text = _read_setting(conn, SETTING_ENABLED, default_enabled)
-            max_entries_text = _read_setting(conn, SETTING_MAX_ENTRIES, default_max_entries)
-    except Exception as exc:
-        _log.debug("AI cache settings unavailable: %s", exc)
-        enabled_text = default_enabled
-        max_entries_text = default_max_entries
-
-    try:
-        max_entries = max(16, min(10000, int(max_entries_text)))
-    except ValueError:
-        max_entries = _env_max_entries_default()
-
-    return {
-        "enabled": str(enabled_text).strip().lower() not in {"0", "false", "no", "off"},
-        "max_entries": max_entries,
-    }
+    """Return cache settings from local config.json."""
+    return get_ai_cache_settings()
 
 
 def update_settings(*, enabled: bool | None = None, max_entries: int | None = None) -> dict[str, Any]:
-    """Persist cache settings in system_state."""
-    with safe_db() as conn:
-        if enabled is not None:
-            conn.execute(
-                "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
-                (SETTING_ENABLED, _bool_text(bool(enabled))),
-            )
-        if max_entries is not None:
-            clamped = max(16, min(10000, int(max_entries)))
-            conn.execute(
-                "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
-                (SETTING_MAX_ENTRIES, str(clamped)),
-            )
-        conn.commit()
+    """Persist cache settings in config.json."""
+    set_ai_cache_settings(enabled=enabled, max_entries=max_entries)
     settings = get_settings()
     cleanup(settings["max_entries"])
     return settings
