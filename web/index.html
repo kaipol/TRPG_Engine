@@ -601,7 +601,7 @@ tailwind.config = {
                             <span v-if="!soloVisibleOptions.length" style="font-size:12px;color:#4b5563">等待自由行动</span>
                         </div>
                         <button v-for="(opt,i) in soloVisibleOptions" :key="opt.id || opt.next_node_id || i"
-                                @click="jumpToNode(opt.next_node_id, opt.action_text || opt.text)"
+                                @click="selectSoloVisibleOption(opt)"
                                 class="option-btn">
                             <span class="opt-num">{{ String(i+1).padStart(2,'0') }}</span>
                             <span style="flex:1">{{ opt.visible_text || opt.text }}</span>
@@ -671,14 +671,14 @@ tailwind.config = {
                 </div>
             </section>
             <div class="solo-scroll" ref="soloLogRef">
-                <div v-for="entry in soloActionLog" :key="entry.id" class="solo-message" :class="entry.kind">
+                <div v-for="entry in visibleSoloActionLog" :key="entry.id" class="solo-message" :class="entry.kind">
                     <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:#6b7280">
                         <span style="font-weight:700" :style="{color:entry.kind==='ai'?'#e8b44b':'#93c5fd'}">{{ entry.sender }}</span>
                         <span style="font-family:'JetBrains Mono'">{{ entry.time }}</span>
                     </div>
                     <div style="font-size:13px;line-height:1.65;color:#c9cdd6;white-space:pre-wrap">{{ entry.text }}</div>
                 </div>
-                <div v-if="!soloActionLog.length" style="text-align:center;color:#4b5563;font-size:13px;line-height:1.7;padding:30px 10px">
+                <div v-if="!visibleSoloActionLog.length" style="text-align:center;color:#4b5563;font-size:13px;line-height:1.7;padding:30px 10px">
                     <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
                     行动与裁定会记录在这里
                 </div>

@@ -145,14 +145,14 @@
           <section style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)">
             <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
             <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto">
-              <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
+              <div v-for="msg in visibleTableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
                   <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
                   <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
                 </div>
                 <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
               </div>
-              <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
+              <div v-if="!visibleTableMessages.length" class="small">暂无其他同桌动态</div>
             </div>
           </section>
         </div>
@@ -174,14 +174,14 @@
           <section style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)">
             <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
             <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto">
-              <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
+              <div v-for="msg in visibleTableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
                   <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
                   <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
                 </div>
                 <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
               </div>
-              <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
+              <div v-if="!visibleTableMessages.length" class="small">暂无其他同桌动态</div>
             </div>
           </section>
         </div>
@@ -222,6 +222,16 @@
                 <div v-else-if="gameState.scene_ai_text && gameState.scene_ai_text !== primarySceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-sparkle"></i> 追加细节</div>
                   <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ gameState.scene_ai_text }}</p>
+                </div>
+                <div v-if="sceneAiMessages.length" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+                  <div class="tag" style="color:var(--gold);display:flex;align-items:center;gap:6px"><i class="ph ph-sparkle"></i> 最新 AI 裁决</div>
+                  <div v-for="msg in sceneAiMessages" :key="'scene-ai-'+msg.id" style="background:rgba(232,180,75,.06);border:1px solid rgba(232,180,75,.18);border-radius:8px;padding:13px 15px">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:11px;color:var(--muted)">
+                      <span style="font-weight:800;color:var(--gold)">{{ sceneMessageActorName(msg) }}</span>
+                      <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
+                    </div>
+                    <div style="font-size:14px;line-height:1.7;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+                  </div>
                 </div>
               </div>
             </article>
@@ -305,7 +315,7 @@
           </div>
         </section>
         <div class="thread-scroll" ref="messagesEl">
-          <div v-for="msg in selectedThreadMessages" :key="msg.id" class="solo-message" :class="[msg.kind, {pending: msg.pending || msg.payload?.pending}]">
+          <div v-for="msg in visibleThreadMessages" :key="msg.id" class="solo-message" :class="[msg.kind, {pending: msg.pending || msg.payload?.pending}]">
             <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:var(--muted)">
               <span style="font-weight:800" :style="{color: msg.kind==='ai' ? 'var(--gold)' : msg.kind==='action' ? 'var(--blue)' : 'var(--muted)'}">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
               <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
@@ -316,7 +326,7 @@
             </div>
             <div v-else style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
           </div>
-          <div v-if="!selectedThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
+          <div v-if="!visibleThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
             <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
             每位玩家的行动、骰子与 AI 裁决会记录在这里
           </div>

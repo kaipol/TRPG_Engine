@@ -697,6 +697,7 @@ createApp({
         const soloConfirmedCharacterIds = ref([]);
         const soloActionLog = ref([]);
         const soloLogRef = ref(null);
+        const visibleSoloActionLog = computed(() => [...soloActionLog.value].reverse());
         const isGeneratingText = ref(false);
         const checkpointCount = ref(0);
         const isRollingBack = ref(false);
@@ -2522,13 +2523,25 @@ createApp({
             });
             nextTick(() => {
                 const el = soloLogRef.value;
-                if (el) el.scrollTop = el.scrollHeight;
+                if (el) el.scrollTop = 0;
             });
         };
         const summarizeAiOptionsForSolo = () => {
             const opts = currentNode.value?.options || [];
             if (!opts.length) return 'AI-GM 已记录行动，等待你继续描述下一步。';
             return 'AI-GM 给出了新的行动方向：\n' + opts.slice(0, 4).map((opt, idx) => `${idx + 1}. ${opt.text}`).join('\n');
+        };
+        const selectSoloVisibleOption = async (opt) => {
+            if (!opt || isGeneratingOptions.value || isRollingBack.value) return;
+            const nextId = Number(opt.next_node_id || 0);
+            const next = storyNodes.value.find(node => Number(node.id) === nextId);
+            if (!next) return;
+            const actor = soloActorLabel.value;
+            const visibleText = (opt.visible_text || opt.text || '').trim();
+            const actionText = (opt.action_text || visibleText || opt.text || '').trim();
+            addSoloLog('player', actor, visibleText || actionText || '选择行动方向');
+            await jumpToNode(next.id, actionText || visibleText || opt.text || '继续');
+            addSoloLog('ai', 'AI-GM', `场景推进：${next.name}\n${next.expanded_content || next.content || '等待你继续描述下一步。'}`);
         };
         const fetchGameState = async () => {
             try { const r=await fetch(`${API_BASE_URL}/api/game/state`); const d=await r.json();
@@ -3238,7 +3251,7 @@ createApp({
             setTimeout(() => {
                 fateSpinning.value = false;
                 fateHighlightIdx.value = -1;
-                jumpToNode(eligibleOpts[winnerIdx].next_node_id, eligibleOpts[winnerIdx].text);
+                selectSoloVisibleOption(eligibleOpts[winnerIdx]);
             }, delay + 650);
         };
 
@@ -4016,7 +4029,7 @@ createApp({
             aiCache, aiCacheSummary, isSavingAiCache, fetchAiCacheStatus, setAiCacheEnabled, clearAiCache,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
-            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloPerspectiveCharacter, soloPublicSceneText, soloSceneText, soloVisibleOptions, soloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloPerspectiveCharacter, soloPublicSceneText, soloSceneText, soloVisibleOptions, soloActionLog, visibleSoloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, selectSoloVisibleOption, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
             gmManualEventText, gmManualEventKind, gmManualEventBusy, gmManualEventMsg, gmManualSyncPlayer, gmManualRecordMemory, publishGmManualEvent,
             // 多人房间
             showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,

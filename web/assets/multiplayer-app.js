@@ -221,8 +221,26 @@ const { createApp, nextTick } = Vue;
           if (!selected) return [];
           return this.messages.filter(msg => this.messageThreadActorId(msg) === selected);
         },
+        visibleThreadMessages() {
+          return [...this.selectedThreadMessages].reverse();
+        },
         tableMessages() {
           return this.messages.filter(msg => msg.kind === 'chat' || this.isPublicTableMessage(msg)).slice(-50);
+        },
+        visibleTableMessages() {
+          return [...this.tableMessages].reverse();
+        },
+        sceneAiMessages() {
+          const currentSceneId = Number(this.gameState?.current_scene_id || this.currentScene?.id || 0);
+          return this.messages.filter(msg => {
+            if (msg?.kind !== 'ai') return false;
+            if (msg.pending || msg.payload?.pending) return false;
+            const payload = msg.payload || {};
+            const source = payload.source || '';
+            if (!['player_action', 'dice', 'scene_advance'].includes(source)) return false;
+            const msgSceneId = Number(payload.current_scene_id || payload.scene_id || 0);
+            return !currentSceneId || !msgSceneId || msgSceneId === currentSceneId;
+          }).slice(-6).reverse();
         },
         maxPlayers() {
           return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
@@ -1096,6 +1114,11 @@ const { createApp, nextTick } = Vue;
           const claim = this.characterClaims.find(item => String(item.player_id || '') === String(playerId || ''));
           return claim ? (claim.character_name || claim.display_name || '') : '';
         },
+        sceneMessageActorName(msg) {
+          const payload = msg?.payload || {};
+          const actor = payload.character_name || payload.actor_name || '';
+          return actor ? `AI-GM · ${actor}` : (msg?.sender_name || 'AI-GM');
+        },
         messageBelongsToMe(msg) {
           const payload = msg?.payload || {};
           const playerId = String(this.profile.id || '');
@@ -1271,7 +1294,7 @@ const { createApp, nextTick } = Vue;
         scrollMessages() {
           nextTick(() => {
             const el = this.$refs.messagesEl;
-            if (el) el.scrollTop = el.scrollHeight;
+            if (el) el.scrollTop = 0;
           });
         },
       }
