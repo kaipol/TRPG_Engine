@@ -18,6 +18,7 @@ from typing import Optional
 from .logger import get_logger
 from .entity import apply_emotion_delta, tick_emotion_decay
 from . import ai_provider
+from . import ai_cache
 
 _log = get_logger("agent")
 
@@ -159,6 +160,45 @@ def reset_active_model() -> str:
     return _active_model
 
 
+def _trim_text(text: str, max_chars: int, *, keep_tail: bool = False) -> str:
+    """Apply the active token-saving character budget to one prompt section."""
+    value = str(text or "")
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    marker = "\n...[已按省 token 策略省略部分内容]...\n"
+    marker_len = len(marker)
+    if max_chars <= marker_len + 40:
+        return value[-max_chars:] if keep_tail else value[:max_chars]
+    if keep_tail:
+        return marker + value[-(max_chars - marker_len):]
+    head = max(1, (max_chars - marker_len) // 2)
+    tail = max_chars - marker_len - head
+    return value[:head] + marker + value[-tail:]
+
+
+def _trim_prompt_context(
+    worldview: str,
+    party_status: str,
+    relevant_lore: str,
+    session_memory: str,
+    l1_context: str,
+    world_entities_text: str,
+    rag_context: str,
+    map_context: str,
+) -> tuple[str, str, str, str, str, str, str, str]:
+    policy = ai_provider.get_token_policy()
+    return (
+        _trim_text(worldview, int(policy.get("worldview_chars") or 0)),
+        _trim_text(party_status, int(policy.get("party_status_chars") or 0), keep_tail=True),
+        _trim_text(relevant_lore, int(policy.get("relevant_lore_chars") or 0)),
+        _trim_text(session_memory, int(policy.get("session_memory_chars") or 0), keep_tail=True),
+        _trim_text(l1_context, int(policy.get("l1_context_chars") or 0), keep_tail=True),
+        _trim_text(world_entities_text, int(policy.get("world_entities_chars") or 0), keep_tail=True),
+        _trim_text(rag_context, int(policy.get("rag_context_chars") or 0)),
+        _trim_text(map_context, int(policy.get("map_context_chars") or 0), keep_tail=True),
+    )
+
+
 def get_db_connection():
     conn = sqlite3.connect(_db_file, timeout=10)
     conn.row_factory = sqlite3.Row
@@ -245,20 +285,46 @@ def switch_model(req: ModelSwitchRequest):
 def _call_ai(system_prompt: str, user_prompt: str,
              temperature: float = 0.8, max_tokens: int = 2000,
              json_mode: bool = True,
-             model_override: str | None = None) -> str:
+             model_override: str | None = None,
+             apply_token_policy: bool = True,
+             cacheable: bool = True) -> str:
     """
     统一调用 AI 模型，返回完整文本。
     model_override：请求级模型覆盖（优先于服务器全局默认值）。
     """
     model = _resolve_model(model_override)
-    return _call_openai_compatible(system_prompt, user_prompt, temperature, max_tokens, json_mode, model)
+    return _call_openai_compatible(
+        system_prompt, user_prompt, temperature, max_tokens,
+        json_mode, model, apply_token_policy=apply_token_policy,
+        cacheable=cacheable,
+    )
 
 
 def _call_openai_compatible(system_prompt: str, user_prompt: str,
                             temperature: float, max_tokens: int,
                             json_mode: bool = True,
-                            model_id: str = "") -> str:
+                            model_id: str = "",
+                            apply_token_policy: bool = True,
+                            cacheable: bool = True) -> str:
     """调用当前 OpenAI 兼容端点。"""
+    cache_metadata = None
+    if cacheable:
+        try:
+            cache_key, cache_metadata = ai_cache.key_for_request(
+                model=model_id,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                apply_token_policy=apply_token_policy,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            cached = ai_cache.get_cached_response(cache_key)
+            if cached:
+                return cached.strip()
+        except Exception as cache_exc:
+            _log.debug("AI response cache lookup skipped: %s", cache_exc)
+
     try:
         response = ai_provider.chat_completion(
             [
@@ -270,11 +336,15 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
             max_tokens=max_tokens,
             json_mode=json_mode,
             timeout=120,
+            apply_token_policy=apply_token_policy,
         )
         result = response.choices[0].message.content
         if not result:
             raise ValueError("模型返回了空内容")
-        return result.strip()
+        result = result.strip()
+        if cache_metadata:
+            ai_cache.store_response(cache_metadata, result)
+        return result
     except Exception as e:
         raise RuntimeError(f"OpenAI 兼容 API 调用失败: {type(e).__name__}: {str(e)}")
 
@@ -284,7 +354,8 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
 # ---------------------------------------------------------
 def _stream_ai_sse(system_prompt: str, user_prompt: str,
                    temperature: float = 0.8, max_tokens: int = 2000,
-                   model_override: str | None = None):
+                   model_override: str | None = None,
+                   apply_token_policy: bool = True):
     """
     生成器：流式调用 AI，yield SSE 格式的 data 行。
     支持 OpenAI 兼容端点 (stream=True)。
@@ -303,6 +374,7 @@ def _stream_ai_sse(system_prompt: str, user_prompt: str,
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            apply_token_policy=apply_token_policy,
         )
         for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -361,8 +433,11 @@ def build_system_context(conn, *search_texts):
 
     world_entities_text = _get_world_entities_text(conn, *search_texts) if _get_world_entities_text else ""
 
+    policy = ai_provider.get_token_policy()
+
     # RAG 检索（地图驱动增强）
     rag_context = ""
+    current_room_id = None
     try:
         rag_query = " ".join(search_texts)
         room_row = conn.execute("SELECT value FROM system_state WHERE key='current_room_id'").fetchone()
@@ -372,7 +447,14 @@ def build_system_context(conn, *search_texts):
             if room and (room["label"] or room["description"]):
                 rag_query = f"{rag_query} {room['label']} {room['description']}".strip()
         if _rag_retrieve:
-            rag_context = _rag_retrieve(conn, rag_query)
+            rag_top_k = int(policy.get("rag_top_k") or 0)
+            if rag_top_k > 0:
+                try:
+                    rag_context = _rag_retrieve(conn, rag_query, top_k=rag_top_k)
+                except TypeError:
+                    rag_context = _rag_retrieve(conn, rag_query)
+            else:
+                rag_context = _rag_retrieve(conn, rag_query)
     except Exception as e:
         _log.debug("RAG 检索上下文构建失败（已降级）: %s", e)
 
@@ -384,7 +466,10 @@ def build_system_context(conn, *search_texts):
     except Exception as e:
         _log.debug("地图上下文构建失败（已降级）: %s", e)
 
-    return worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context
+    return _trim_prompt_context(
+        worldview, party_status, relevant_lore, session_memory,
+        l1_context, world_entities_text, rag_context, map_context,
+    )
 
 
 # ---------------------------------------------------------
@@ -417,6 +502,7 @@ _DYNAMIC_OPTIONS_JSON_SCHEMA = """{
         "unlock_edge": {"from_label": "房间A名称", "to_label": "房间B名称", "key_used": "使用的钥匙名"}
       },
       "npc": {"name": "姓名(10字内)", "role": "NPC", "hp": 50, "san": 60, "inventory": "持有物(30字内)", "backstory": "背景(50字内)"},
+      "bgm_name": "从曲库中选择的环境音乐名，可选：午后田园/黄昏渡口/钢琴小品/浪漫舞会/钢琴沉思/月光下的林间/星际穿越/幽影神秘之地/蓝调时刻/赛博梦都/残阳黎明",
       "likelihood": "极高/高/中等/低/极低（一句话理由，基于角色状态和世界观规则）"
     }
   ]
@@ -425,6 +511,7 @@ _DYNAMIC_OPTIONS_JSON_SCHEMA = """{
 - 若某分支没有 stat_changes，则省略整个 key
 - 若某分支没有 entity_updates / emotion_deltas / npc_memories，则省略
 - 若无空间变化，省略 map_actions；若无新 NPC，省略 npc
+- bgm_name 可省略；若输出，必须从上方曲库名中选择一个最契合该分支氛围的曲目
 - likelihood 字段每个分支必须输出，不可省略
 - 只保留有实际内容的字段"""
 
@@ -440,6 +527,7 @@ _DIALOGUE_JSON_SCHEMA = """{
       "entity_updates": "NPC态度变化描述",
       "emotion_deltas": [{"npc_name": "NPC名字", "trust": 10, "fear": 0, "irritation": -5}],
       "npc_memories": [{"npc_name": "NPC名字", "memory": "从该NPC视角记住的一句话"}],
+      "bgm_name": "从曲库中选择的环境音乐名，可选：午后田园/黄昏渡口/钢琴小品/浪漫舞会/钢琴沉思/月光下的林间/星际穿越/幽影神秘之地/蓝调时刻/赛博梦都/残阳黎明",
       "likelihood": "极高/高/中等/低/极低（一句话理由，基于NPC性格和玩家行为）"
     }
   ]
@@ -447,6 +535,7 @@ _DIALOGUE_JSON_SCHEMA = """{
 【极重要·字段省略规则】：
 - 对话模式下不允许出现 stat_changes / map_actions / npc 字段
 - 若无 SAN 变化，省略 san_delta；其余同上
+- bgm_name 可省略；若输出，必须从上方曲库名中选择一个最契合该分支氛围的曲目
 - likelihood 字段每个分支必须输出，不可省略
 - 只保留有实际内容的字段"""
 
@@ -720,6 +809,7 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
         b_npc = branch.get("npc", global_npc)
         b_emotion_deltas = branch.get("emotion_deltas") or []
         b_npc_memories = branch.get("npc_memories") or []
+        b_bgm_name = str(branch.get("bgm_name") or parsed.get("bgm_name") or "").strip()[:40]
 
         # ── 对话模式守卫 ──
         if action_type == "dialogue":
@@ -754,6 +844,7 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
             "player_action": player_action,
             "thought_process": thought_process,
             "skeleton": n_content,  # 60字骨架原文，冻结于此，不受 expand-branch 扩写影响
+            "bgm_name": b_bgm_name,
         }
 
         summary_text = o_text[:100]
@@ -777,6 +868,7 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
             "pending_entity_updates": b_entity_updates or "",
             "pending_map_actions": b_map_actions,
             "pending_npc": b_npc,
+            "bgm_name": b_bgm_name,
             "likelihood": branch.get("likelihood", ""),
         })
 
@@ -843,6 +935,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
         scene_name = fx.get("scene_name", "")
         player_action = fx.get("player_action", "")
         thought_process = fx.get("thought_process", "")
+        bgm_name = str(fx.get("bgm_name") or "").strip()[:40]
 
         # 在执行（并删除）pending_effects 之前，先提取 fx_context 和 skeleton
         # 供前端回传给 expand-branch，使扩写能读到最新的 session_memory/party_status
@@ -1104,6 +1197,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
             "fx_context": _fx_context_for_expand,
             "skeleton": _skeleton_for_expand,
             "action_type": action_type,
+            "bgm_name": bgm_name,
         }
     except Exception as e:
         conn.close()
@@ -1635,6 +1729,9 @@ def npc_chat_stream(request: NPCChatRequest):
             npc_persona += "【核心记忆】\n" + " / ".join(sd["memory"])
     else:
         npc_persona = "【系统提示】这是一个未知 NPC，请根据名字自行推断语气。"
+    policy = ai_provider.get_token_policy()
+    npc_persona = _trim_text(npc_persona, int(policy.get("npc_persona_chars") or 0), keep_tail=True)
+    chat_history = _trim_text(request.chat_history, int(policy.get("npc_history_chars") or 0), keep_tail=True)
 
     conn.close()
 
@@ -1651,7 +1748,7 @@ def npc_chat_stream(request: NPCChatRequest):
 4. 每次回复尽量简短（10-50字），符合现代人发消息的习惯。
 5. 绝对不要打破第四面墙，你不知道自己是游戏角色。"""
 
-    user_prompt = f"【近期聊天记录】\n{request.chat_history}\n\n玩家发来新消息：{request.player_message}\n请直接回复你的消息内容："
+    user_prompt = f"【近期聊天记录】\n{chat_history}\n\n玩家发来新消息：{request.player_message}\n请直接回复你的消息内容："
 
     def generate():
         for sse_line in _stream_ai_sse(system_prompt, user_prompt, temperature=0.7, max_tokens=150):
@@ -1688,7 +1785,7 @@ def npc_chat_commit(request: NPCChatCommitRequest):
 
         sd = _parse_state_desc(entity_row["state_desc"])
         emo = sd.get("emotion", {"trust": 0, "fear": 0, "irritation": 0})
-        current_desc = sd.get("desc", "")
+        current_desc = _trim_text(sd.get("desc", ""), int(ai_provider.get_token_policy().get("npc_persona_chars") or 0), keep_tail=True)
 
         # ── 调用 AI 推断情绪增量与记忆 ──────────────────────────────────────
         sys_p = f"""你是游戏系统的情绪分析模块。根据一段微信聊天记录，判断 NPC【{request.npc_name}】的情绪变化，并用第一人称写下一条简短记忆。如果出现重要关键词（如地点、NPC、物品等）务必保留。

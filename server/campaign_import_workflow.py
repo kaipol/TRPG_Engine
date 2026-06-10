@@ -88,6 +88,7 @@ class CampaignImportWorkflow:
         suffix: str,
         raw: bytes,
         assets: list[ImportAsset],
+        metadata: dict[str, Any] | None = None,
     ) -> ImportJob:
         self._prune_jobs()
         job = ImportJob(id=uuid.uuid4().hex)
@@ -95,7 +96,7 @@ class CampaignImportWorkflow:
             self._jobs[job.id] = job
         thread = threading.Thread(
             target=self._run_job,
-            args=(job.id, requested_name, filename, suffix, raw, assets),
+            args=(job.id, requested_name, filename, suffix, raw, assets, metadata or {}),
             daemon=True,
         )
         thread.start()
@@ -144,6 +145,7 @@ class CampaignImportWorkflow:
         suffix: str,
         raw: bytes,
         assets: list[ImportAsset],
+        metadata: dict[str, Any],
     ) -> None:
         folder_path = ""
         folder_created = False
@@ -212,6 +214,19 @@ class CampaignImportWorkflow:
                 json.dump(campaign_data, f, ensure_ascii=False, indent=4)
             with open(os.path.join(folder_path, "map.json"), "w", encoding="utf-8") as f:
                 json.dump(map_data, f, ensure_ascii=False, indent=4)
+            manifest = {
+                "name": campaign_name,
+                "path": f"campaigns/{campaign_name}",
+                "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source_filename": filename,
+                "node_count": len(campaign_data.get("nodes", [])),
+                "character_count": len(campaign_data.get("characters", [])),
+                "map_room_count": len(map_data.get("map_rooms") or []),
+                "asset_count": len(extracted_assets),
+                **metadata,
+            }
+            with open(os.path.join(folder_path, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
 
             result = {
                 "campaign_path": f"campaigns/{campaign_name}",
@@ -219,6 +234,7 @@ class CampaignImportWorkflow:
                 "nodes_count": len(campaign_data.get("nodes", [])),
                 "map_rooms_count": len(map_data.get("map_rooms", [])),
                 "assets_count": len(extracted_assets),
+                "manifest": manifest,
             }
             self._update(
                 job_id,

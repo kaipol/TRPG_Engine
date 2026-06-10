@@ -53,6 +53,25 @@ def init_db(
     cursor.execute('''CREATE TABLE IF NOT EXISTS options (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER, text TEXT, next_node_id INTEGER)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, role TEXT, hp INTEGER, san INTEGER, inventory TEXT DEFAULT '', status TEXT DEFAULT 'active')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ai_response_cache (
+        cache_key          TEXT PRIMARY KEY,
+        provider_id        TEXT NOT NULL DEFAULT '',
+        model              TEXT NOT NULL DEFAULT '',
+        token_policy_mode  TEXT NOT NULL DEFAULT '',
+        temperature        REAL NOT NULL DEFAULT 0,
+        json_mode          INTEGER NOT NULL DEFAULT 0,
+        max_tokens         INTEGER NOT NULL DEFAULT 0,
+        system_hash        TEXT NOT NULL DEFAULT '',
+        user_hash          TEXT NOT NULL DEFAULT '',
+        response_text      TEXT NOT NULL,
+        prompt_chars       INTEGER NOT NULL DEFAULT 0,
+        response_chars     INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        last_used_at       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        hit_count          INTEGER NOT NULL DEFAULT 0
+    )''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_response_cache_used ON ai_response_cache(last_used_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_response_cache_model ON ai_response_cache(provider_id, model)")
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS lorebook (id INTEGER PRIMARY KEY AUTOINCREMENT, keywords TEXT, content TEXT)''')
 
@@ -157,6 +176,8 @@ def init_db(
         snapshot     TEXT    NOT NULL,
         created_at   TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
     )''')
+    try: cursor.execute("ALTER TABLE game_checkpoints ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError: pass
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS chronicle_log (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,

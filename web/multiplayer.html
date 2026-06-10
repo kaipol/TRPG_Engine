@@ -6,89 +6,11 @@
   <title>Z.R.I.C 多人跑团桌</title>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://unpkg.com/@phosphor-icons/web"></script>
-  <style>
-    :root {
-      --bg: #090b10;
-      --panel: #0f1420;
-      --panel-2: #0b0e17;
-      --line: rgba(255,255,255,.07);
-      --line-soft: rgba(255,255,255,.05);
-      --text: #c9cdd6;
-      --muted: #6b7280;
-      --faint: #4b5563;
-      --gold: #e8b44b;
-      --blue: #93c5fd;
-      --cyan: #7dd3fc;
-      --good: #4fc98a;
-      --bad: #e05c5c;
-      --warn: #fde047;
-      color-scheme: dark;
-      font-family: "Noto Sans SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); letter-spacing: 0; }
-    button, input, textarea, select { font: inherit; color: inherit; }
-    button { border: 1px solid var(--line); background: #111827; border-radius: 6px; min-height: 34px; padding: 0 11px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-    button:hover { border-color: rgba(147,197,253,.35); }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    input, textarea, select { width: 100%; border: 1px solid var(--line); background: #090b10; border-radius: 6px; padding: 8px 10px; outline: none; }
-    textarea { resize: none; }
-    .app { min-height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-    .topbar { min-height: 56px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
-    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-    .brand-mark { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; border: 1px solid rgba(88,166,255,.32); background: rgba(88,166,255,.12); color: #58a6ff; font-family: ui-monospace, Consolas, monospace; font-weight: 800; }
-    .brand-title { font-family: ui-monospace, Consolas, monospace; font-size: 15px; font-weight: 800; color: #58a6ff; letter-spacing: .06em; }
-    .brand-sub { font-size: 11px; color: var(--faint); margin-top: 1px; }
-    .roomline { min-width: 0; flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
-    .dot.on { background: var(--good); box-shadow: 0 0 10px rgba(79,201,138,.45); }
-    .btn-primary { background: rgba(232,180,75,.12); border-color: rgba(232,180,75,.34); color: var(--gold); font-weight: 700; }
-    .btn-info { background: rgba(56,189,248,.08); border-color: rgba(56,189,248,.24); color: var(--cyan); }
-    .btn-ghost { background: transparent; color: #9ca3af; }
-    .btn-sm { min-height: 30px; padding: 0 9px; font-size: 12px; }
-    .tag { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-    .solo-play-shell { flex: 1; display: grid; grid-template-columns: 300px minmax(0,1fr) 340px; min-height: 0; overflow: hidden; }
-    .solo-panel { min-width: 0; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
-    .solo-panel.right { border-right: none; border-left: 1px solid var(--line); }
-    .solo-section { padding: 16px; border-bottom: 1px solid var(--line-soft); flex-shrink: 0; }
-    .solo-scroll { flex: 1; overflow-y: auto; padding: 12px; }
-    .stack { display: flex; flex-direction: column; gap: 10px; }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .room-card { border: 1px solid rgba(56,189,248,.18); background: #090b10; border-radius: 8px; padding: 10px; }
-    .small { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-    .solo-character-card { width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); padding: 12px; cursor: pointer; transition: all .15s; display: block; }
-    .solo-character-card + .solo-character-card { margin-top: 8px; }
-    .solo-character-card:hover { border-color: rgba(147,197,253,.25); background: rgba(147,197,253,.04); }
-    .solo-character-card.selected { border-color: rgba(147,197,253,.5); background: rgba(147,197,253,.08); box-shadow: 0 0 0 1px rgba(147,197,253,.08) inset; }
-    .solo-character-card.locked { opacity: .56; cursor: not-allowed; }
-    .solo-character-card.own-locked { border-color: rgba(79,201,138,.45); background: rgba(79,201,138,.06); box-shadow: 0 0 0 1px rgba(79,201,138,.08) inset; }
-    .role-pill { font-family: ui-monospace, Consolas, monospace; font-size: 10px; padding: 2px 6px; border-radius: 3px; background: rgba(147,197,253,.1); border: 1px solid rgba(147,197,253,.22); color: var(--blue); white-space: nowrap; }
-    .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; font-family: ui-monospace, Consolas, monospace; font-size: 11px; font-weight: 800; }
-    .solo-scene { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-    .solo-scene-scroll { flex: 1; overflow-y: auto; padding: 24px 28px; }
-    .solo-scene-card { background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; }
-    .solo-scene-image { width: 100%; max-height: 340px; object-fit: cover; display: block; background: #05070c; border-bottom: 1px solid var(--line-soft); }
-    .scene-content { white-space: pre-wrap; overflow-wrap: anywhere; color: #d6d9e3; line-height: 1.9; font-size: 16px; }
-    .option-btn { width: 100%; min-height: 0; text-align: left; justify-content: flex-start; border: 1px solid var(--line); background: #0f1420; border-radius: 8px; padding: 10px 12px; color: var(--text); margin-bottom: 8px; }
-    .opt-num { width: 24px; height: 24px; border-radius: 5px; display: inline-grid; place-items: center; flex-shrink: 0; background: rgba(232,180,75,.1); color: var(--gold); font-family: ui-monospace, Consolas, monospace; font-size: 11px; font-weight: 800; }
-    .composer { padding: 16px 22px 18px; border-top: 1px solid var(--line-soft); background: var(--panel-2); flex-shrink: 0; }
-    .solo-action-type { display: flex; align-items: center; background: #090b10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-    .solo-action-type button { border-radius: 0; border: none; font-size: 11px; padding: 0 10px; min-height: 30px; }
-    .solo-message { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); margin-bottom: 8px; }
-    .solo-message.action { border-color: rgba(147,197,253,.2); }
-    .solo-message.ai { border-color: rgba(232,180,75,.2); background: rgba(232,180,75,.04); }
-    .solo-message.dice { border-color: rgba(250,204,21,.25); }
-    .solo-message.state { border-color: rgba(79,201,138,.22); }
-    .member { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #090b10; }
-    .swatch { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
-    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    @media (max-width: 1180px) { .solo-play-shell { grid-template-columns: 260px minmax(0,1fr); } .solo-panel.right { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--line); min-height: 340px; } }
-    @media (max-width: 760px) { .app { overflow: auto; } .topbar { flex-wrap: wrap; padding: 10px 12px; } .solo-play-shell { display: block; overflow: visible; } .solo-panel, .solo-scene, .solo-panel.right { min-height: 420px; border-left: none; border-right: none; border-bottom: 1px solid var(--line); } .solo-scene-scroll { padding: 16px; } }
-  </style>
+  <link rel="stylesheet" href="/assets/multiplayer.css">
 </head>
 <body>
   <div id="app" class="app">
+    <audio ref="audioEl" loop :src="bgmUrl"></audio>
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">Z</div>
@@ -101,7 +23,32 @@
         <template v-if="room">房间 {{ room.code }} · {{ room.name }}</template>
         <template v-else>输入房间码后开始</template>
       </div>
-      <div class="status"><span class="dot" :class="{on: wsConnected}"></span>{{ wsConnected ? '实时同步中' : '未连接' }}</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+        <div class="top-lore-actions">
+          <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
+            <i class="ph ph-globe" style="font-size:15px"></i> 世界观
+          </button>
+          <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
+            <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+          </button>
+          <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
+            <i class="ph ph-database" style="font-size:15px"></i> 知识库
+          </button>
+          <button @click="openDossierPanel('lore')" class="btn btn-ghost btn-sm top-lore-btn" title="查看百科库">
+            <i class="ph ph-books" style="font-size:15px"></i> 百科
+          </button>
+          <button @click="openDossierPanel('entities')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界实体">
+            <i class="ph ph-graph" style="font-size:15px"></i> 实体
+          </button>
+          <button @click="openDossierPanel('memory')" class="btn btn-ghost btn-sm top-lore-btn" title="查看记忆流">
+            <i class="ph ph-brain" style="font-size:15px"></i> 记忆
+          </button>
+        </div>
+        <div class="status"><span class="dot" :class="{on: wsConnected}"></span>{{ wsConnected ? '实时同步中' : '未连接' }}</div>
+        <button class="btn btn-ghost btn-sm" @click="showSettings=true" title="设置">
+          <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
+        </button>
+      </div>
     </header>
 
     <main class="solo-play-shell">
@@ -110,21 +57,41 @@
           <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--blue)">
             <i class="ph ph-user-circle"></i> 玩家入场
           </div>
-          <input v-model.trim="profile.name" placeholder="玩家名">
-          <button v-if="room" class="btn-ghost btn-sm" @click="resetPlayerIdentity" :disabled="joinBusy" title="同一浏览器要模拟另一名玩家时使用">
-            <i class="ph ph-identification-card"></i> 新玩家身份
+          <div v-if="account" class="auth-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+              <div style="min-width:0">
+                <strong style="display:block;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ account.display_name }}</strong>
+                <div class="small" style="font-family:ui-monospace,Consolas,monospace">@{{ account.username }}</div>
+              </div>
+              <button class="btn-ghost btn-sm" @click="logoutAccount" :disabled="authBusy">
+                <i class="ph ph-sign-out"></i> 退出
+              </button>
+            </div>
+          </div>
+          <div v-else class="auth-card">
+            <div style="display:flex;flex-direction:column;gap:4px;line-height:1.55">
+              <strong style="color:#f5edd8">请先在主界面登录或注册账号</strong>
+              <span class="small">账号用于区分同房间玩家，并管理你的私有存档。</span>
+            </div>
+            <a class="btn-info" href="/" style="text-decoration:none;text-align:center">
+              <i class="ph ph-arrow-left"></i> 回到选择剧本页
+            </a>
+          </div>
+          <div v-if="authMsg" class="small" style="margin-top:8px" :style="{color: authMsg.includes('失败') || authMsg.includes('请先') ? 'var(--bad)' : 'var(--good)'}">{{ authMsg }}</div>
+          <button v-if="room" class="btn-ghost btn-sm" @click="resetPlayerIdentity" :disabled="joinBusy" title="重新连接并恢复当前浏览器在本房间的玩家身份">
+            <i class="ph ph-plugs-connected"></i> 重新连接
           </button>
-          <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
+          <div v-if="!room" style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px">
             <input v-model.trim="joinCode" @keyup.enter="joinRoomByCode(joinCode)" placeholder="房间码" style="text-transform:uppercase">
-            <button class="btn-info" @click="joinRoomByCode(joinCode)" :disabled="!joinCode.trim() || joinBusy">
+            <button class="btn-info" @click="joinRoomByCode(joinCode)" :disabled="!account || !joinCode.trim() || joinBusy">
               <i :class="joinBusy?'ph ph-circle-notch':'ph ph-sign-in'" :style="joinBusy?'animation:spin 1s linear infinite':''"></i> 进入
             </button>
           </div>
           <div v-if="room" class="room-card">
             <strong style="color:#f5edd8">{{ room.name }}</strong>
-            <div class="small">房间 {{ room.code }} · {{ wsConnected ? '已同步' : '连接中' }}</div>
+            <div class="small">{{ wsConnected ? '已同步' : '连接中' }}</div>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft)">
-              <span class="small">角色席位 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
+              <span class="small">入场 {{ joinedPlayerCount }} / {{ maxPlayers }} · 选角 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
               <span class="small" :style="{color: roomSeatTone}">{{ roomSeatLabel }}</span>
             </div>
           </div>
@@ -139,8 +106,8 @@
           </div>
           <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '选择剧中角色后开始行动。' }}</div>
           <div v-if="hasLockedCharacters" class="small" style="margin-top:6px;color:var(--good)">角色已确认，开局后不可改选。</div>
-          <div v-else-if="roomFullForNewPlayer" class="small" style="margin-top:6px;color:var(--bad)">席位已满，等待 GM 调整房间人数。</div>
-          <div v-else class="small" style="margin-top:6px;color:var(--muted)">每位玩家只能选择 1 个角色。本房间还剩 {{ playerSlotsRemaining }} 个角色席位。</div>
+          <div v-else-if="characterSlotsRemaining <= 0" class="small" style="margin-top:6px;color:var(--bad)">角色席位已满。</div>
+          <div v-else class="small" style="margin-top:6px;color:var(--muted)">每位玩家只能选择 1 个角色。本房间还剩 {{ characterSlotsRemaining }} 个角色席位。</div>
         </section>
 
         <section class="solo-section" v-if="room && hasLockedCharacters">
@@ -175,6 +142,19 @@
             {{ claimButtonText }}
           </button>
           <div v-if="characterClaimMsg" class="small" style="margin-top:8px;color:var(--good)">{{ characterClaimMsg }}</div>
+          <section style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)">
+            <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
+            <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto">
+              <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
+                <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
+                  <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+                  <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
+                </div>
+                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+              </div>
+              <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
+            </div>
+          </section>
         </div>
 
         <div class="solo-scroll" v-else-if="room">
@@ -185,10 +165,23 @@
                 <span class="swatch" :style="{color:m.color}"></span>
                 <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                   {{ m.display_name }}
-                  <div class="small">{{ memberClaimName(m.player_id) || (m.role === 'gm' ? '主持' : '未选角') }}</div>
+                  <div class="small">{{ memberClaimName(m.player_id) || '未选角' }}</div>
                 </span>
                 <span class="small">{{ m.connected ? '在线' : '离线' }}</span>
               </div>
+            </div>
+          </section>
+          <section style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)">
+            <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
+            <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto">
+              <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
+                <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
+                  <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+                  <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
+                </div>
+                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+              </div>
+              <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
             </div>
           </section>
         </div>
@@ -208,7 +201,7 @@
             <i class="ph ph-user-switch" style="font-size:56px;opacity:.24"></i>
             <p style="font-size:15px;margin:0;color:var(--text)">先在左侧选择并确认要扮演的角色</p>
             <p style="font-size:13px;line-height:1.7;margin:0;max-width:460px">
-              GM 创建房间时开放了 {{ maxPlayers }} 个角色席位，当前还剩 {{ playerSlotsRemaining }} 个。确认入座后才会进入场景行动。
+              AI-GM 会主持本房间；开放 {{ maxPlayers }} 个玩家席位，当前还剩 {{ playerSlotsRemaining }} 个入场名额。确认角色后才会进入场景行动。
             </p>
           </div>
         </template>
@@ -220,13 +213,13 @@
                 <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:var(--gold)">
                   <i class="ph ph-map-pin"></i> 场景 {{ currentScene?.id ? '#' + currentScene.id : '' }}
                 </div>
-                <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ characterOpeningText ? actorName + ' 的开场' : (currentScene?.name || '等待开场') }}</h1>
-                <p class="scene-content">{{ sceneText || '主持端载入场景后会同步到这里。' }}</p>
-                <div v-if="characterOpeningText && publicSceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ primarySceneTitle }}</h1>
+                <p class="scene-content">{{ primarySceneText || '主持端载入场景后会同步到这里。' }}</p>
+                <div v-if="showCharacterOpening && publicSceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-map-pin"></i> 公共场景</div>
                   <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ publicSceneText }}</p>
                 </div>
-                <div v-else-if="gameState.scene_ai_text && gameState.scene_ai_text !== sceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
+                <div v-else-if="gameState.scene_ai_text && gameState.scene_ai_text !== primarySceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-sparkle"></i> 追加细节</div>
                   <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ gameState.scene_ai_text }}</p>
                 </div>
@@ -255,12 +248,17 @@
               </div>
             </div>
             <div style="display:flex;gap:10px">
-              <input v-model="chatText" :disabled="!room || !hasLockedCharacters" :placeholder="hasLockedCharacters ? (actorName + '尝试做什么...') : '先确认要扮演的角色'" style="flex:1;font-size:14px">
-              <button class="btn-primary" type="submit" :disabled="!room || !chatText.trim() || !hasLockedCharacters || actionBusy">
+              <input v-model="actionText" @input="pendingOption=null" :disabled="!room || !hasLockedCharacters" :placeholder="hasLockedCharacters ? (actorName + '尝试做什么...') : '先确认要扮演的角色'" style="flex:1;font-size:14px">
+              <button class="btn-primary" type="submit" :disabled="!room || !actionText.trim() || !hasLockedCharacters || actionBusy">
                 <i :class="actionBusy?'ph ph-circle-notch':'ph ph-sparkle'" :style="actionBusy?'animation:spin 1s linear infinite':''"></i>
                 {{ actionBusy ? '裁定中' : '交给 AI-GM' }}
               </button>
-              <button class="btn-ghost" type="button" @click="sendChat" :disabled="!room || !chatText.trim() || !hasLockedCharacters">公屏</button>
+            </div>
+            <div class="public-composer">
+              <input v-model="publicChatText" @keyup.enter="sendChat" :disabled="!room || !hasLockedCharacters" placeholder="发送公屏消息">
+              <button class="btn-ghost" type="button" @click="sendChat" :disabled="!room || !publicChatText.trim() || !hasLockedCharacters">
+                <i class="ph ph-chats-circle"></i> 公屏
+              </button>
             </div>
           </form>
         </template>
@@ -268,36 +266,14 @@
 
       <aside class="solo-panel right">
         <section class="solo-section">
-          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold);margin-bottom:10px"><i class="ph ph-scroll"></i> 我的行动与裁决</div>
-          <div class="small">{{ selectedCharacterNames.length ? '当前扮演：' + selectedCharacterNames.join(' / ') : '角色确认后可提交自由行动。' }}</div>
-        </section>
-        <div class="solo-scroll" ref="messagesEl" style="border-bottom:1px solid var(--line-soft)">
-          <div v-for="msg in myThreadMessages" :key="msg.id" class="solo-message" :class="msg.kind">
-            <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:var(--muted)">
-              <span style="font-weight:800" :style="{color: msg.kind==='ai' ? 'var(--gold)' : msg.kind==='action' ? 'var(--blue)' : 'var(--muted)'}">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
-              <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
-            </div>
-            <div style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+            <div class="tag" style="display:flex;align-items:center;gap:6px"><i class="ph ph-heartbeat"></i> 角色状态</div>
+            <button class="btn-ghost btn-sm" @click="rollbackTurn" :disabled="!room || rollbackBusy || checkpointCount===0" :title="checkpointCount===0?'尚无可返回的上一回合':('返回上一回合，剩余 '+checkpointCount+' 条快照')">
+              <i :class="rollbackBusy?'ph ph-circle-notch':'ph ph-clock-counter-clockwise'" :style="rollbackBusy?'animation:spin 1s linear infinite':''"></i>
+              {{ rollbackBusy ? '返回中' : '返回上一回合' }}
+            </button>
           </div>
-          <div v-if="!myThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
-            <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
-            你的行动、骰子与 AI 裁决会记录在这里
-          </div>
-        </div>
-        <section class="solo-section" style="border-bottom:none">
-          <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-chats-circle"></i> 全桌动态</div>
-          <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto;margin-bottom:14px">
-            <div v-for="msg in tableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
-              <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
-                <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
-                <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
-              </div>
-              <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
-            </div>
-            <div v-if="!tableMessages.length" class="small">暂无其他同桌动态</div>
-          </div>
-          <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><i class="ph ph-heartbeat"></i> 角色状态</div>
-          <div style="display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto">
+          <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto">
             <div v-for="char in visibleStatusCharacters" :key="char.id" style="background:#090b10;border:1px solid var(--line);border-radius:6px;padding:10px">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px">
                 <strong style="font-size:13px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
@@ -311,571 +287,330 @@
             </div>
           </div>
         </section>
+
+        <section class="solo-section">
+          <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold);margin-bottom:10px"><i class="ph ph-scroll"></i> 行动与裁决</div>
+          <div class="small">{{ actionThreadPlayers.length ? '按玩家查看行动、骰子与 AI 裁决。' : '角色确认后可提交自由行动。' }}</div>
+          <div v-if="actionThreadPlayers.length" class="thread-tabs">
+            <button
+              v-for="player in actionThreadPlayers"
+              :key="player.id"
+              class="thread-tab"
+              :class="{active:selectedThreadPlayerId===player.id}"
+              @click="activeThreadPlayerId=player.id"
+              type="button"
+            >
+              {{ player.name }} · {{ player.count }}
+            </button>
+          </div>
+        </section>
+        <div class="thread-scroll" ref="messagesEl">
+          <div v-for="msg in selectedThreadMessages" :key="msg.id" class="solo-message" :class="[msg.kind, {pending: msg.pending || msg.payload?.pending}]">
+            <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:var(--muted)">
+              <span style="font-weight:800" :style="{color: msg.kind==='ai' ? 'var(--gold)' : msg.kind==='action' ? 'var(--blue)' : 'var(--muted)'}">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+              <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
+            </div>
+            <div v-if="msg.pending || msg.payload?.pending" class="pending-line">
+              <i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+              <span>{{ msg.content }}</span>
+            </div>
+            <div v-else style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+          </div>
+          <div v-if="!selectedThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
+            <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
+            每位玩家的行动、骰子与 AI 裁决会记录在这里
+          </div>
+        </div>
       </aside>
     </main>
+
+    <div v-if="showDossierModal" class="modal-bg" @click.self="showDossierModal=false">
+      <div class="modal-box dossier-modal">
+        <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0">
+          <div style="min-width:0">
+            <div class="tag" style="color:var(--gold);font-size:13px;display:flex;align-items:center;gap:7px">
+              <i :class="['ph', dossierActiveTab.icon]" style="font-size:16px"></i>
+              跑团资料册 / {{ dossierActiveTab.label }}
+            </div>
+            <div style="font-size:12px;color:#4b5563;margin-top:4px">
+              世界观、地图、百科与公开知识库在这里阅读；编辑与解析仍保留在剧本管理区。
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <button @click="showDossierModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
+              <i class="ph ph-x" style="font-size:15px"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="dossier-shell">
+          <nav class="dossier-nav">
+            <button v-for="tab in dossierTabs" :key="tab.id"
+                    @click="switchDossierTab(tab.id)"
+                    class="btn btn-ghost dossier-tab-btn"
+                    :class="{active:dossierTab===tab.id}">
+              <span style="display:flex;align-items:center;gap:8px">
+                <i :class="['ph', tab.icon]"></i> {{ tab.label }}
+              </span>
+              <span v-if="dossierTabCount(tab.id)" style="font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#6b7280">{{ dossierTabCount(tab.id) }}</span>
+            </button>
+          </nav>
+
+          <main class="dossier-content">
+            <template v-if="dossierTab==='worldview'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <div>
+                  <div style="font-size:17px;font-weight:700;color:#f5edd8">世界观</div>
+                  <div style="font-size:12px;color:#4b5563;margin-top:3px">剧本的全局规则、氛围、背景与禁忌。</div>
+                </div>
+              </div>
+              <div class="dossier-scroll">
+                <div v-if="worldviewContent" class="dossier-prose">{{ worldviewContent }}</div>
+                <div v-else class="dossier-empty">暂无世界观内容。GM 可在“设置 → 剧本解析与管理”中补充剧本背景。</div>
+              </div>
+            </template>
+
+            <template v-else-if="dossierTab==='map'">
+              <div style="padding:12px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                  <span class="tag" style="color:#38bdf8"><i class="ph ph-stack"></i> 楼层</span>
+                  <button v-for="fl in mapFloors" :key="'dossier-floor-'+fl"
+                          @click="selectDossierFloor(fl)"
+                          class="btn btn-ghost btn-sm"
+                          :style="mapActiveFloor===fl?{background:'rgba(56,189,248,.12)',borderColor:'rgba(56,189,248,.35)',color:'#38bdf8'}:{color:'#6b7280'}">
+                    {{ fl === 1 ? '1F' : fl > 0 ? fl + 'F' : 'B' + Math.abs(fl) }}
+                    <span style="font-family:ui-monospace,Consolas,monospace;font-size:10px">{{ mapRooms.filter(r=>(r.floor??1)===fl).length }}</span>
+                  </button>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <button @click.stop="dossierFitMapToFloor()" class="btn btn-ghost btn-sm"><i class="ph ph-arrows-out"></i> 适配全图</button>
+                </div>
+              </div>
+              <div class="dossier-map-layout">
+                <div ref="dossierMapCanvasRef" class="dossier-map-canvas-wrap">
+                  <svg class="dossier-map-svg"
+                       :width="dossierMapSvgW"
+                       :height="dossierMapSvgH"
+                       :view-box.camel="dossierMapViewBox"
+                       @mousedown="dossierMapOnMouseDown"
+                       @mousemove="dossierMapOnMouseMove"
+                       @mouseup="dossierMapOnMouseUp"
+                       @mouseleave="dossierMapOnMouseUp"
+                       @touchstart.prevent="dossierMapOnTouchStart"
+                       @touchmove.prevent="dossierMapOnTouchMove"
+                       @touchend.prevent="dossierMapOnTouchEnd"
+                       @wheel.prevent="dossierMapOnWheel">
+                    <defs>
+                      <pattern id="dossierGrid" :width="MAP_GRID" :height="MAP_GRID" patternUnits="userSpaceOnUse">
+                        <path :d="`M ${MAP_GRID} 0 L 0 0 0 ${MAP_GRID}`" fill="none" stroke="rgba(255,255,255,.035)" stroke-width="1"/>
+                      </pattern>
+                    </defs>
+                    <rect :x="dossierMapViewX" :y="dossierMapViewY" :width="dossierMapSvgW/dossierMapScale" :height="dossierMapSvgH/dossierMapScale" fill="url(#dossierGrid)"/>
+
+                    <g v-for="edge in mapVisibleEdges" :key="'dossier-edge-'+edge.id">
+                      <template v-if="mapRoomById(edge.from_id) && mapRoomById(edge.to_id)">
+                        <line v-if="(mapRoomById(edge.from_id).floor??1)===(mapRoomById(edge.to_id).floor??1)"
+                              :x1="mapRoomById(edge.from_id).x + mapRoomById(edge.from_id).w/2"
+                              :y1="mapRoomById(edge.from_id).y + mapRoomById(edge.from_id).h/2"
+                              :x2="mapRoomById(edge.to_id).x + mapRoomById(edge.to_id).w/2"
+                              :y2="mapRoomById(edge.to_id).y + mapRoomById(edge.to_id).h/2"
+                              :stroke="edge.locked?'#e05c5c':'#475569'"
+                              stroke-width="2" :stroke-dasharray="edge.locked?'6 3':'none'"/>
+                        <text v-if="edge.label && (mapRoomById(edge.from_id).floor??1)===(mapRoomById(edge.to_id).floor??1)"
+                              :x="(mapRoomById(edge.from_id).x+mapRoomById(edge.from_id).w/2+mapRoomById(edge.to_id).x+mapRoomById(edge.to_id).w/2)/2"
+                              :y="(mapRoomById(edge.from_id).y+mapRoomById(edge.from_id).h/2+mapRoomById(edge.to_id).y+mapRoomById(edge.to_id).h/2)/2 - 5"
+                              text-anchor="middle" font-size="11" fill="#64748b">{{ edge.label }}</text>
+                      </template>
+                    </g>
+
+                    <g v-for="room in mapVisibleRooms" :key="'dossier-room-'+room.id" class="dossier-map-room" @click.stop="dossierSelectMapRoom(room)">
+                      <rect :x="room.x" :y="room.y" :width="room.w" :height="room.h" rx="8"
+                            :fill="room.state==='unknown'?'rgba(255,255,255,.035)':room.color"
+                            :stroke="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?'#e8b44b':room.state==='active'?'#4fc98a':room.state==='locked'?'#e05c5c':'rgba(255,255,255,.14)'"
+                            :stroke-width="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?3:1.4"
+                            :stroke-dasharray="room.state==='unknown'?'4 3':'none'"/>
+                      <text :x="room.x + room.w/2" :y="room.y + room.h/2 - 5"
+                            text-anchor="middle" font-size="14" font-family="'Noto Serif SC'" font-weight="700"
+                            pointer-events="none"
+                            :fill="room.state==='unknown'?'#64748b':'#f8ead0'">{{ (room.label || '').length>10 ? (room.label || '').slice(0,10)+'…' : room.label }}</text>
+                      <text :x="room.x + room.w/2" :y="room.y + room.h/2 + 14"
+                            text-anchor="middle" font-size="11" fill="#94a3b8" pointer-events="none">
+                        {{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[room.state] || room.state }}
+                      </text>
+                    </g>
+
+                    <g v-for="(tl, tlIdx) in timelines.filter(t => t.status==='active' && t.current_room_id && mapRoomById(t.current_room_id) && (mapRoomById(t.current_room_id).floor??1)===mapActiveFloor)"
+                       :key="'dossier-tl-'+tl.id">
+                      <rect :x="mapRoomById(tl.current_room_id).x + 5 + tlIdx * 20"
+                            :y="mapRoomById(tl.current_room_id).y + 5"
+                            width="17" height="21" rx="4" :fill="tl.color + '33'" :stroke="tl.color" stroke-width="1.5"/>
+                      <text :x="mapRoomById(tl.current_room_id).x + 13.5 + tlIdx * 20"
+                            :y="mapRoomById(tl.current_room_id).y + 19"
+                            text-anchor="middle" font-size="10" font-family="ui-monospace,Consolas,monospace" :fill="tl.color">{{ tl.label.slice(0,1) }}</text>
+                    </g>
+
+                    <g v-for="entity in worldEntities.filter(e => e.room_id && mapRoomById(e.room_id) && (mapRoomById(e.room_id).floor??1)===mapActiveFloor && e.status!=='dead' && e.status!=='pending')"
+                       :key="'dossier-entity-'+entity.id" @click.stop="dossierSelectedEntity=entity" style="cursor:pointer">
+                      <circle :cx="mapRoomById(entity.room_id).x + mapRoomById(entity.room_id).w - 12"
+                              :cy="mapRoomById(entity.room_id).y + mapRoomById(entity.room_id).h - 12 - worldEntities.filter(e2=>e2.room_id===entity.room_id&&e2.status!=='dead'&&e2.status!=='pending').indexOf(entity)*14"
+                              r="6" :fill="entity.entity_type==='npc'?'#f97316':entity.entity_type==='location'?'#38bdf8':'#a78bfa'" stroke="rgba(0,0,0,.45)" stroke-width="1"/>
+                    </g>
+                  </svg>
+                  <div v-if="!mapVisibleRooms.length" class="dossier-empty" style="position:absolute;inset:24px;display:flex;align-items:center;justify-content:center">
+                    当前楼层暂无地点。GM 可在“设置 → 剧本解析与管理 → 地图”中补充地点。
+                  </div>
+                </div>
+                <aside class="dossier-side-list">
+                  <div style="padding:14px;border-bottom:1px solid var(--line)">
+                    <div class="tag" style="color:#38bdf8;margin-bottom:8px"><i class="ph ph-map-pin"></i> 本层地点</div>
+                  <div style="font-size:12px;color:#6b7280;line-height:1.6">拖动画布可查看所有地点，滚轮缩放，点击地点查看描述。</div>
+                  </div>
+                  <div class="dossier-list-scroll">
+                    <div v-if="dossierSelectedRoom" class="dossier-card" style="border-color:rgba(232,180,75,.24);background:rgba(232,180,75,.04)">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                        <strong style="color:#f5edd8">{{ dossierSelectedRoom.label }}</strong>
+                        <span class="tag">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[dossierSelectedRoom.state] || dossierSelectedRoom.state }}</span>
+                      </div>
+                      <div class="small" style="white-space:pre-wrap;color:#9ca3af">{{ dossierSelectedRoom.description || '暂无地点描述。' }}</div>
+                    </div>
+                    <button v-for="room in mapVisibleRooms" :key="'dossier-room-list-'+room.id"
+                            @click="dossierSelectMapRoom(room, true)"
+                            class="dossier-card"
+                            style="width:100%;text-align:left;cursor:pointer"
+                            :style="dossierSelectedRoom&&dossierSelectedRoom.id===room.id?{borderColor:'rgba(232,180,75,.35)'}:{}">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                        <span style="font-size:13px;font-weight:700;color:#d9d2c4">{{ room.label }}</span>
+                        <span style="font-size:11px;color:var(--muted)">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前'}[room.state] || room.state }}</span>
+                      </div>
+                    </button>
+                  </div>
+                </aside>
+              </div>
+            </template>
+
+            <template v-else-if="dossierTab==='knowledge'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line)">
+                <div style="font-size:17px;font-weight:700;color:#f5edd8">公开知识库</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:3px">这里展示非隐藏 RAG 文档；隐藏文档留给触发器或 GM 管理区。</div>
+              </div>
+              <div style="flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr)">
+                <aside class="dossier-side-list" style="border-left:none;border-right:1px solid var(--line)">
+                  <div style="padding:12px;border-bottom:1px solid var(--line)">
+                    <input v-model.trim="dossierSearch" class="inp" placeholder="搜索文档标题或来源…" style="font-size:12px">
+                  </div>
+                  <div class="dossier-list-scroll">
+                    <div v-if="!dossierVisibleRagDocuments.length" class="dossier-empty" style="padding:24px 14px">暂无公开知识库文档。</div>
+                    <button v-for="doc in dossierVisibleRagDocuments" :key="'dossier-doc-'+doc.id"
+                            @click="selectDossierDoc(doc.id)"
+                            class="dossier-card"
+                            style="width:100%;text-align:left;cursor:pointer"
+                            :style="dossierSelectedDocId===doc.id?{borderColor:'rgba(129,140,248,.35)',background:'rgba(129,140,248,.05)'}:{}">
+                      <div style="font-size:13px;font-weight:700;color:#d9d2c4;margin-bottom:5px">{{ doc.title }}</div>
+                      <div class="small">{{ doc.chunk_count }} 段 · {{ doc.source || '无来源' }}</div>
+                    </button>
+                  </div>
+                </aside>
+                <section class="dossier-scroll">
+                  <div v-if="dossierLoadingDoc" class="dossier-empty"><i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i> 正在读取文档…</div>
+                  <div v-else-if="!dossierSelectedDoc" class="dossier-empty">从左侧选择一份公开文档。</div>
+                  <template v-else>
+                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px">
+                      <div>
+                        <div style="font-size:18px;font-weight:800;color:#f5edd8">{{ dossierSelectedDoc.title }}</div>
+                        <div style="font-size:12px;color:#4b5563;margin-top:4px">{{ dossierSelectedDoc.source || '无来源标注' }} · {{ dossierDocChunks.length }} 个切片</div>
+                      </div>
+                    </div>
+                    <div v-if="dossierDocChunks.length" class="dossier-prose">{{ dossierDocText }}</div>
+                    <div v-else class="dossier-empty">此文档暂无可读切片。</div>
+                  </template>
+                </section>
+              </div>
+            </template>
+
+            <template v-else-if="dossierTab==='lore'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line)">
+                <div style="font-size:17px;font-weight:700;color:#f5edd8">百科库</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:3px">关键词词条、设定说明和剧本解析得到的资料。</div>
+              </div>
+              <div class="dossier-scroll">
+                <input v-model.trim="dossierSearch" class="inp" placeholder="搜索关键词或内容…" style="margin-bottom:14px">
+                <div v-if="!dossierFilteredLore.length" class="dossier-empty">暂无匹配百科词条。</div>
+                <div v-for="item in dossierFilteredLore" :key="'dossier-lore-'+item.id" class="dossier-card">
+                  <div style="font-size:13px;font-weight:800;color:#a78bfa;margin-bottom:8px">{{ item.keywords }}</div>
+                  <div style="font-size:13px;color:#c9cdd6;line-height:1.8;white-space:pre-wrap">{{ item.content }}</div>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="dossierTab==='entities'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line)">
+                <div style="font-size:17px;font-weight:700;color:#f5edd8">世界实体</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:3px">NPC、地点与事件的当前状态。</div>
+              </div>
+              <div class="dossier-scroll">
+                <input v-model.trim="dossierSearch" class="inp" placeholder="搜索名称、地点或状态…" style="margin-bottom:14px">
+                <div v-if="!dossierFilteredEntities.length" class="dossier-empty">暂无匹配实体。</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px">
+                  <div v-for="entity in dossierFilteredEntities" :key="'dossier-entity-card-'+entity.id" class="dossier-card">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+                      <strong style="color:#f5edd8">{{ entity.name }}</strong>
+                      <span class="tag" :style="{color:entity.entity_type==='npc'?'#f97316':entity.entity_type==='location'?'#38bdf8':'#a78bfa'}">{{ {npc:'人物',location:'地点',event:'事件'}[entity.entity_type] || entity.entity_type }}</span>
+                    </div>
+                    <div class="small" style="margin-bottom:8px">{{ entity.location || (entity.room_id && mapRoomById(entity.room_id) ? mapRoomById(entity.room_id).label : '未知位置') }} · {{ entity.status || 'active' }}</div>
+                    <div style="font-size:12px;color:#c9cdd6;line-height:1.7;white-space:pre-wrap">{{ entity.state_desc || '暂无状态描述。' }}</div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="dossierTab==='memory'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line)">
+                <div style="font-size:17px;font-weight:700;color:#f5edd8">记忆流</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:3px">当前会话已经发生的剧情记录。</div>
+              </div>
+              <div class="dossier-scroll">
+                <div v-if="memoryContent" class="dossier-prose">{{ memoryContent }}</div>
+                <div v-else class="dossier-empty">暂无会话记忆。</div>
+              </div>
+            </template>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showSettings" class="modal-bg" @click.self="showSettings=false">
+      <div class="modal-box">
+        <div style="padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0">
+          <div>
+            <div class="tag" style="display:flex;align-items:center;gap:7px;color:var(--gold)">
+              <i class="ph ph-sliders-horizontal"></i> 游戏设置
+            </div>
+            <div class="small" style="margin-top:4px">{{ room ? room.name : '多人跑团桌' }}</div>
+          </div>
+          <button class="btn-ghost btn-sm" @click="showSettings=false" title="关闭"><i class="ph ph-x"></i></button>
+        </div>
+        <div style="padding:18px 20px;overflow:auto;display:flex;flex-direction:column;gap:16px">
+          <section>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+              <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--gold)">
+                <i :class="bgmPlaying?'ph ph-speaker-high':'ph ph-speaker-slash'"></i> 环境音乐
+              </div>
+              <button class="btn-ghost btn-sm" @click="toggleBgm" :disabled="!bgmUrl">
+                {{ bgmPlaying ? '停止' : '播放' }}
+              </button>
+            </div>
+            <div class="small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ bgmName }}</div>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:12px">
+              <i class="ph ph-speaker-low" style="color:var(--faint);font-size:13px"></i>
+              <input type="range" v-model="bgmVolume" min="0" max="1" step="0.05" style="flex:1;accent-color:var(--gold)">
+              <i class="ph ph-speaker-high" style="color:var(--faint);font-size:13px"></i>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <script>
-    const { createApp, nextTick } = Vue;
-    const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : 'http://localhost:8000';
-    const readStoredJson = (storage, key, fallback) => {
-      try { return JSON.parse(storage.getItem(key) || '') || fallback; }
-      catch (_) { return fallback; }
-    };
-
-    createApp({
-      data() {
-        const saved = readStoredJson(localStorage, 'zric-mp-profile', {});
-        const tabSaved = readStoredJson(sessionStorage, 'zric-mp-tab-profile', {});
-        const tabTokens = readStoredJson(sessionStorage, 'zric-mp-tab-tokens', {});
-        return {
-          room: null,
-          members: [],
-          messages: [],
-          characterClaims: [],
-          gameState: {},
-          ws: null,
-          wsConnected: false,
-          joinBusy: false,
-          actionBusy: false,
-          hpLabel: 'HP',
-          sanLabel: 'SAN',
-          profile: {
-            id: tabSaved.id || crypto.randomUUID(),
-            name: tabSaved.name || saved.name || '玩家',
-            role: 'player',
-            color: tabSaved.color || saved.color || '#7dd3fc',
-          },
-          memberTokens: tabTokens.memberTokens || {},
-          tabInstanceId: crypto.randomUUID(),
-          presenceTimer: null,
-          joinCode: '',
-          chatText: '',
-          actionType: 'mixed',
-          selectedCharacterIds: Array.isArray(tabSaved.characterIds) ? tabSaved.characterIds : [],
-          characterClaimBusy: false,
-          characterClaimMsg: '',
-        };
-      },
-      watch: {
-        profile: { deep: true, handler() { this.saveProfile(); } },
-        selectedCharacterIds() { this.saveProfile(); }
-      },
-      computed: {
-        currentScene() { return this.gameState?.current_scene || null; },
-        currentRoom() { return this.gameState?.current_room || null; },
-        publicSceneText() {
-          const scene = this.currentScene || {};
-          return scene.expanded_content || this.gameState?.scene_ai_text || scene.content || '';
-        },
-        characterOpeningMessage() {
-          return [...this.messages].reverse().find(msg => {
-            const payload = msg?.payload || {};
-            return payload.source === 'character_opening' && this.messageBelongsToMe(msg);
-          }) || null;
-        },
-        characterOpeningText() {
-          const message = this.characterOpeningMessage;
-          if (message) return message.payload?.opening || message.content || '';
-          return this.localCharacterOpeningText();
-        },
-        sceneText() {
-          return this.characterOpeningText || this.publicSceneText;
-        },
-        visibleActionOptions() {
-          return this.characterPerspectiveOptions(
-            this.selectedCharacters[0],
-            this.currentScene?.options || [],
-            this.publicSceneText
-          );
-        },
-        sceneImage() {
-          const scene = this.currentScene || {};
-          return this.gameState?.scene_image || scene.scene_image || '';
-        },
-        allCharacters() { return this.gameState?.all_characters || this.gameState?.characters || []; },
-        visibleCharacters() { return this.gameState?.characters || this.allCharacters; },
-        playableCharacters() {
-          const listed = this.gameState?.playable_characters;
-          const base = Array.isArray(listed) && listed.length ? listed : this.visibleCharacters;
-          const active = base.filter(char => (char.status || 'active') !== 'hidden');
-          return active.length ? active : base;
-        },
-        myClaims() {
-          const playerId = String(this.profile.id || '');
-          return this.characterClaims.filter(claim => String(claim.player_id || '') === playerId);
-        },
-        lockedCharacterIds() { return this.myClaims.map(claim => claim.character_id); },
-        hasLockedCharacters() { return this.lockedCharacterIds.length > 0; },
-        selectedCharacters() {
-          const sourceIds = this.hasLockedCharacters ? this.lockedCharacterIds : this.selectedCharacterIds;
-          const selectedIds = new Set(sourceIds.map(id => String(id)));
-          const sourceCharacters = this.hasLockedCharacters ? this.allCharacters : this.playableCharacters;
-          return sourceCharacters.filter(char => selectedIds.has(String(char.id)));
-        },
-        selectedCharacterNames() { return this.selectedCharacters.map(char => char.name); },
-        visibleStatusCharacters() { return this.selectedCharacters.length ? this.selectedCharacters : this.playableCharacters; },
-        actorName() { return this.selectedCharacterNames.join(' / ') || this.profile.name || '玩家'; },
-        myThreadMessages() {
-          if (!this.hasLockedCharacters) return [];
-          return this.messages.filter(msg => this.messageBelongsToMe(msg) && ['action', 'ai', 'dice', 'state', 'system'].includes(msg.kind));
-        },
-        tableMessages() {
-          return this.messages.filter(msg => msg.kind === 'chat' || this.isPublicTableMessage(msg)).slice(-50);
-        },
-        maxPlayers() {
-          return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
-        },
-        claimedPlayerCount() {
-          return Number(this.room?.claimed_character_count ?? this.room?.claimed_player_count ?? 0);
-        },
-        playerSlotsRemaining() {
-          const remaining = Number(this.room?.player_slots_remaining);
-          if (Number.isFinite(remaining)) return Math.max(0, remaining);
-          return Math.max(0, this.maxPlayers - this.claimedPlayerCount);
-        },
-        roomFullForNewPlayer() {
-          return !!this.room && !this.hasLockedCharacters && this.playerSlotsRemaining <= 0;
-        },
-        roomSeatLabel() {
-          if (this.hasLockedCharacters) return '你已入座';
-          return this.playerSlotsRemaining > 0 ? `剩余 ${this.playerSlotsRemaining} 席` : '席位已满';
-        },
-        roomSeatTone() {
-          if (this.hasLockedCharacters) return 'var(--good)';
-          return this.playerSlotsRemaining > 0 ? 'var(--good)' : 'var(--bad)';
-        },
-        claimButtonDisabled() {
-          return this.selectedCharacterIds.length !== 1 || this.characterClaimBusy || this.hasLockedCharacters || this.roomFullForNewPlayer || this.selectedCharacterIds.length > this.playerSlotsRemaining;
-        },
-        claimButtonText() {
-          if (this.hasLockedCharacters) return '角色已锁定';
-          if (this.characterClaimBusy) return '记录中';
-          if (this.roomFullForNewPlayer) return '席位已满';
-          if (this.selectedCharacterIds.length > 1) return '每位玩家只能确认 1 个角色';
-          if (this.selectedCharacterIds.length > this.playerSlotsRemaining) return `最多确认 ${this.playerSlotsRemaining} 个角色`;
-          return this.selectedCharacterIds.length ? '确认扮演 ' + this.selectedCharacterNames.join(' / ') : '选择角色后确认';
-        }
-      },
-      async mounted() {
-        const params = new URLSearchParams(location.search);
-        const urlRoomCode = (params.get('room') || params.get('code') || '').trim().toUpperCase();
-        if (urlRoomCode) this.joinCode = urlRoomCode;
-        this.ensureUniqueTabIdentity();
-        window.addEventListener('beforeunload', this.clearCurrentPresence);
-        await this.fetchStatLabels();
-        if (urlRoomCode) {
-          this.joinRoomByCode(urlRoomCode).catch(err => { this.characterClaimMsg = err.message || '加入房间失败'; });
-        }
-      },
-      beforeUnmount() {
-        window.removeEventListener('beforeunload', this.clearCurrentPresence);
-        this.stopPresence();
-      },
-      methods: {
-        saveProfile() {
-          this.profile.role = 'player';
-          sessionStorage.setItem('zric-mp-tab-profile', JSON.stringify({ ...this.profile, characterIds: this.selectedCharacterIds }));
-          localStorage.setItem('zric-mp-profile', JSON.stringify({ name: this.profile.name, color: this.profile.color }));
-        },
-        saveRoomTokens() {
-          sessionStorage.setItem('zric-mp-tab-tokens', JSON.stringify({ memberTokens: this.memberTokens }));
-        },
-        presenceKey(playerId = this.profile.id) {
-          return `zric-mp-presence:${playerId}`;
-        },
-        readPresence(playerId = this.profile.id) {
-          return readStoredJson(localStorage, this.presenceKey(playerId), null);
-        },
-        isReloadNavigation() {
-          const nav = performance.getEntriesByType?.('navigation')?.[0];
-          return nav?.type === 'reload';
-        },
-        clearCurrentPresence() {
-          const current = this.readPresence();
-          if (!current || current.tabInstanceId === this.tabInstanceId) {
-            localStorage.removeItem(this.presenceKey());
-          }
-        },
-        stopPresence() {
-          if (this.presenceTimer) clearInterval(this.presenceTimer);
-          this.presenceTimer = null;
-          this.clearCurrentPresence();
-        },
-        startPresence() {
-          if (this.presenceTimer) clearInterval(this.presenceTimer);
-          const writePresence = () => {
-            localStorage.setItem(this.presenceKey(), JSON.stringify({
-              tabInstanceId: this.tabInstanceId,
-              updatedAt: Date.now(),
-            }));
-          };
-          writePresence();
-          this.presenceTimer = setInterval(writePresence, 3000);
-        },
-        ensureUniqueTabIdentity() {
-          const current = this.readPresence();
-          const activeElsewhere = current
-            && current.tabInstanceId !== this.tabInstanceId
-            && Date.now() - Number(current.updatedAt || 0) < 10000;
-          if (activeElsewhere && !this.isReloadNavigation()) {
-            this.profile.id = crypto.randomUUID();
-            this.selectedCharacterIds = [];
-            this.memberTokens = {};
-            sessionStorage.removeItem('zric-mp-tab-tokens');
-            this.characterClaimMsg = '检测到同浏览器已有活跃玩家，已为本标签页生成新身份';
-          }
-          this.saveProfile();
-          this.saveRoomTokens();
-          this.startPresence();
-        },
-        extractRoomCode(path) {
-          const match = String(path || '').match(/\/api\/multiplayer\/rooms\/([^/?]+)/);
-          return match ? decodeURIComponent(match[1]) : '';
-        },
-        async api(path, options = {}) {
-          const jsonBody = !(options.body instanceof FormData);
-          const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
-          const roomCode = this.room?.code || this.extractRoomCode(path);
-          if (roomCode && this.memberTokens[roomCode]) headers['X-Member-Token'] = this.memberTokens[roomCode];
-          const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '请求失败');
-          return data;
-        },
-        async fetchStatLabels() {
-          try {
-            const res = await fetch(`${API_BASE_URL}/api/game/stat-labels`);
-            const data = await res.json();
-            this.hpLabel = data.hp_label || 'HP';
-            this.sanLabel = data.san_label || 'SAN';
-          } catch (_) {}
-        },
-        async joinRoomByCode(code, roleOverride = '') {
-          const roomCode = String(code || '').trim().toUpperCase();
-          if (!roomCode) return;
-          this.joinBusy = true;
-          this.characterClaimMsg = '';
-          this.saveProfile();
-          try {
-            const data = await this.api(`/api/multiplayer/rooms/${encodeURIComponent(roomCode)}/join`, {
-              method: 'POST',
-              body: JSON.stringify({
-                player_id: this.profile.id,
-                display_name: this.profile.name,
-                role: roleOverride || 'player',
-                color: this.profile.color,
-              }),
-            });
-            if (data.room?.code && data.member_token) {
-              this.memberTokens[data.room.code] = data.member_token;
-              this.saveRoomTokens();
-            }
-            this.applySnapshot(data);
-            this.connectWs();
-          } finally {
-            this.joinBusy = false;
-          }
-        },
-        async resetPlayerIdentity() {
-          const code = (this.room?.code || this.joinCode || '').trim().toUpperCase();
-          this.stopPresence();
-          if (this.ws) this.ws.close();
-          this.ws = null;
-          this.wsConnected = false;
-          this.profile.id = crypto.randomUUID();
-          this.selectedCharacterIds = [];
-          this.memberTokens = {};
-          sessionStorage.removeItem('zric-mp-tab-tokens');
-          this.saveProfile();
-          this.saveRoomTokens();
-          this.startPresence();
-          this.characterClaimMsg = '已切换为新的玩家身份，请重新选角';
-          if (code) {
-            try {
-              await this.joinRoomByCode(code);
-            } catch (err) {
-              this.characterClaimMsg = err.message || '切换身份后重新加入失败';
-            }
-          }
-        },
-        applySnapshot(data) {
-          this.room = data.room || this.room;
-          this.gameState = data.game_state || this.gameState || {};
-          this.members = data.members || this.members;
-          this.messages = data.messages || this.messages;
-          this.characterClaims = data.character_claims || this.gameState.character_claims || this.characterClaims || [];
-          this.joinCode = this.room ? this.room.code : this.joinCode;
-          if (this.hasLockedCharacters) this.selectedCharacterIds = [...this.lockedCharacterIds];
-          this.pruneSelectedCharacters();
-          this.scrollMessages();
-        },
-        pruneSelectedCharacters() {
-          const base = this.hasLockedCharacters ? this.allCharacters : this.playableCharacters;
-          if (!base.length) return;
-          const ids = new Set(base.map(char => String(char.id)));
-          this.selectedCharacterIds = this.selectedCharacterIds.filter(id => ids.has(String(id)));
-          if (!this.hasLockedCharacters && this.selectedCharacterIds.length > 1) {
-            this.selectedCharacterIds = this.selectedCharacterIds.slice(0, 1);
-          }
-        },
-        connectWs() {
-          if (!this.room || !window.location.protocol.startsWith('http')) return;
-          if (this.ws) this.ws.close();
-          const params = new URLSearchParams({ player_id: this.profile.id, name: this.profile.name, role: 'player' });
-          if (this.memberTokens[this.room.code]) params.set('member_token', this.memberTokens[this.room.code]);
-          const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/rooms/${this.room.code}?${params}`;
-          this.ws = new WebSocket(wsUrl);
-          this.ws.onopen = () => { this.wsConnected = true; };
-          this.ws.onclose = () => { this.wsConnected = false; };
-          this.ws.onerror = () => { this.wsConnected = false; };
-          this.ws.onmessage = event => this.handleEvent(JSON.parse(event.data));
-        },
-        handleEvent(evt) {
-          if (evt.member_token && evt.room?.code) {
-            this.memberTokens[evt.room.code] = evt.member_token;
-            this.saveRoomTokens();
-          }
-          if (evt.type === 'snapshot') this.applySnapshot(evt);
-          else if (evt.type === 'message.created') {
-            if (!this.messages.some(msg => msg.id === evt.message.id)) this.messages.push(evt.message);
-            this.scrollMessages();
-          } else if (evt.type === 'game.state') {
-            this.gameState = evt.game_state || this.gameState || {};
-            this.characterClaims = this.gameState.character_claims || this.characterClaims || [];
-            if (this.hasLockedCharacters) this.selectedCharacterIds = [...this.lockedCharacterIds];
-            this.pruneSelectedCharacters();
-          } else if (evt.type === 'member.updated') {
-            const index = this.members.findIndex(m => m.player_id === evt.member.player_id);
-            if (index >= 0) this.members.splice(index, 1, evt.member);
-            else this.members.push(evt.member);
-          } else if (evt.type === 'member.left') {
-            const member = this.members.find(m => m.player_id === evt.player_id);
-            if (member) member.connected = 0;
-          } else if (evt.type === 'room.updated') {
-            this.applySnapshot(evt.snapshot);
-          }
-        },
-        toggleCharacter(id) {
-          const idKey = String(id);
-          const char = this.playableCharacters.find(item => String(item.id) === idKey);
-          if (!char || this.isCharacterDisabled(char)) return;
-          if (this.isCharacterSelected(id)) {
-            this.selectedCharacterIds = this.selectedCharacterIds.filter(x => String(x) !== idKey);
-            this.characterClaimMsg = '';
-            return;
-          }
-          if (this.selectedCharacterIds.length >= this.playerSlotsRemaining) {
-            this.characterClaimMsg = `本房间还可确认 ${this.playerSlotsRemaining} 个角色席位`;
-            return;
-          }
-          this.selectedCharacterIds = [id];
-          this.characterClaimMsg = '';
-        },
-        isCharacterSelected(id) {
-          const idKey = String(id);
-          return this.selectedCharacterIds.some(selectedId => String(selectedId) === idKey);
-        },
-        clearCharacters() {
-          if (this.hasLockedCharacters) return;
-          this.selectedCharacterIds = [];
-          this.characterClaimMsg = '';
-        },
-        async claimCharacters() {
-          if (!this.room || !this.selectedCharacterIds.length || this.hasLockedCharacters || this.roomFullForNewPlayer) return;
-          if (this.selectedCharacterIds.length !== 1) {
-            this.characterClaimMsg = '每位玩家只能确认 1 个角色';
-            return;
-          }
-          if (this.selectedCharacterIds.length > this.playerSlotsRemaining) {
-            this.characterClaimMsg = `最多确认 ${this.playerSlotsRemaining} 个角色`;
-            return;
-          }
-          this.characterClaimBusy = true;
-          this.characterClaimMsg = '';
-          try {
-            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/characters/claim`, {
-              method: 'POST',
-              body: JSON.stringify({ player_id: this.profile.id, character_ids: this.selectedCharacterIds }),
-            });
-            this.applySnapshot(data);
-            this.characterClaimMsg = '角色已确认';
-          } catch (err) {
-            this.characterClaimMsg = err.message || '角色确认失败';
-          } finally {
-            this.characterClaimBusy = false;
-          }
-        },
-        claimForCharacter(char) {
-          const charId = String(char?.id ?? '');
-          return this.characterClaims.find(claim => String(claim.character_id) === charId) || null;
-        },
-        isOwnClaim(char) {
-          const claim = this.claimForCharacter(char);
-          return !!claim && String(claim.player_id || '') === String(this.profile.id || '');
-        },
-        isClaimedByOther(char) {
-          const claim = this.claimForCharacter(char);
-          return !!claim && String(claim.player_id || '') !== String(this.profile.id || '');
-        },
-        isCharacterDisabled(char) {
-          if (this.isClaimedByOther(char) || this.roomFullForNewPlayer || (this.hasLockedCharacters && !this.isOwnClaim(char))) return true;
-          return !this.isCharacterSelected(char?.id) && this.selectedCharacterIds.length >= this.playerSlotsRemaining;
-        },
-        characterClaimLabel(char) {
-          if (this.isOwnClaim(char)) return '已锁定';
-          const claim = this.claimForCharacter(char);
-          return claim ? '已占用' : '';
-        },
-        characterClaimLine(char) {
-          const claim = this.claimForCharacter(char);
-          if (!claim) return '';
-          return String(claim.player_id || '') === String(this.profile.id || '') ? '你已确认扮演该角色' : `已由 ${claim.display_name || '其他玩家'} 扮演`;
-        },
-        memberClaimName(playerId) {
-          const claim = this.characterClaims.find(item => String(item.player_id || '') === String(playerId || ''));
-          return claim ? (claim.character_name || claim.display_name || '') : '';
-        },
-        messageBelongsToMe(msg) {
-          const payload = msg?.payload || {};
-          const playerId = String(this.profile.id || '');
-          const ownCharacterIds = new Set(this.lockedCharacterIds.map(id => String(id)));
-          const actorId = String(payload.actor_id || msg?.sender_id || '');
-          const characterId = String(payload.character_id || '');
-          if (actorId && actorId === playerId) return true;
-          if (characterId && ownCharacterIds.has(characterId)) return true;
-          if (Array.isArray(payload.character_ids) && payload.character_ids.some(id => ownCharacterIds.has(String(id)))) return true;
-          return false;
-        },
-        isPublicTableMessage(msg) {
-          const payload = msg?.payload || {};
-          if (payload.actor_id || payload.character_id || Array.isArray(payload.character_ids)) return false;
-          return ['system', 'state'].includes(msg?.kind);
-        },
-        compactText(value, max = 220) {
-          return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
-        },
-        characterSeed(char, extra = '') {
-          const source = `${char?.id || ''}|${char?.name || ''}|${char?.role || ''}|${char?.personality || ''}|${char?.inventory || ''}|${extra}`;
-          return Array.from(source).reduce((sum, ch, idx) => sum + ch.charCodeAt(0) * (idx + 1), 0);
-        },
-        characterAngleLine(char, extra = '') {
-          const name = char?.name || '角色';
-          const role = char?.role || '角色';
-          const hooks = [
-            `${name}会先用「${role}」的专业/本能判断眼前风险。`,
-            `${name}更在意哪些细节会影响自己的秘密、目标或安全。`,
-            `${name}会从同伴的反应里寻找可以利用或必须警惕的信号。`,
-            `${name}会优先确认退路、资源，以及自己还能掌控的东西。`,
-            `${name}会把现场异常和自身经历联系起来，而不是只看表面。`,
-          ];
-          return hooks[this.characterSeed(char, extra) % hooks.length];
-        },
-        localCharacterOpeningText() {
-          const char = this.selectedCharacters[0];
-          if (!char) return '';
-          const scene = this.currentScene || {};
-          const sceneName = scene.name || '开场';
-          const publicText = this.publicSceneText || '主持端尚未写下更多场景细节，你先从自己的视角观察当下。';
-          const details = [`${char.name || '角色'}，你以「${char.role || '角色'}」的身份进入「${sceneName}」。`];
-          if (char.personality) details.push(`你的性格/背景提示是：${this.compactText(char.personality, 160)}。`);
-          if (char.inventory) details.push(`你当前随身/状态记录：${this.compactText(char.inventory, 160)}。`);
-          details.push(this.characterAngleLine(char, sceneName));
-          details.push(`从你的视角看，开场是这样的：${this.compactText(publicText, 420)}`);
-          details.push('你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
-          return details.join('\n');
-        },
-        characterPerspectiveOptions(char, options, sceneText = '') {
-          const list = Array.isArray(options) ? options : [];
-          if (!char) return list.map(opt => ({ ...opt, visible_text: opt.text, action_text: opt.text }));
-          return list.map((opt, idx) => {
-            const rawText = this.compactText(opt?.text, 180) || '自由行动';
-            const role = char.role || '角色';
-            const name = char.name || '角色';
-            const lenses = [
-              `以${role}的判断，先${rawText}`,
-              `从${name}自己的处境出发，${rawText}`,
-              `带着${role}的顾虑，尝试${rawText}`,
-              `优先确认这对${name}意味着什么，再${rawText}`,
-              `以${name}的个人目标为准，把现场线索和${role}判断联系起来，${rawText}`,
-            ];
-            const visibleText = lenses[(this.characterSeed(char, `${idx}|${rawText}|${sceneText}`) + idx) % lenses.length];
-            return {
-              ...opt,
-              visible_text: visibleText,
-              action_text: `${name}（${role}）：${visibleText}`,
-            };
-          });
-        },
-        useOptionAsAction(option) {
-          if (!this.hasLockedCharacters) return;
-          if (typeof option === 'string') this.chatText = option || this.chatText;
-          else this.chatText = option?.action_text || option?.visible_text || option?.text || this.chatText;
-        },
-        async sendChat() {
-          const content = this.chatText.trim();
-          if (!content || !this.room || !this.hasLockedCharacters) return;
-          if (/^[./!！。]?r(oll)?\s*\d/i.test(content)) {
-            await this.rollDice(content);
-            this.chatText = '';
-            return;
-          }
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'chat.send', content }));
-          else {
-            const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/messages`, {
-              method: 'POST',
-              body: JSON.stringify({ sender_id: this.profile.id, sender_name: this.actorName, content }),
-            });
-            if (data.message && !this.messages.some(msg => msg.id === data.message.id)) this.messages.push(data.message);
-            this.scrollMessages();
-          }
-          this.chatText = '';
-        },
-        async submitAction() {
-          const action = this.chatText.trim();
-          if (!action || !this.room || !this.hasLockedCharacters || this.actionBusy) return;
-          this.actionBusy = true;
-          const payload = { action, action_type: this.actionType || 'mixed', context: this.sceneText || '', actor_name: this.actorName };
-          try {
-            if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'player.action', payload }));
-            else {
-              const data = await this.api(`/api/multiplayer/rooms/${this.room.code}/action`, {
-                method: 'POST',
-                body: JSON.stringify({ actor_id: this.profile.id, actor_name: this.actorName, ...payload }),
-              });
-              [data.message, data.ai_message, data.state_message].filter(Boolean).forEach(message => {
-                if (!this.messages.some(msg => msg.id === message.id)) this.messages.push(message);
-              });
-              if (data.game_state) this.gameState = data.game_state;
-              this.scrollMessages();
-            }
-            this.chatText = '';
-          } finally {
-            this.actionBusy = false;
-          }
-        },
-        async rollDice(rawExpression) {
-          if (!this.room || !this.hasLockedCharacters) return;
-          const expression = String(rawExpression || '1d100').replace(/^[./!！。]?r(oll)?\s*/i, '').trim() || '1d100';
-          const payload = { expression, actor_id: this.profile.id, actor_name: this.actorName, context: this.sceneText || '', ask_ai: true };
-          if (this.wsConnected) this.ws.send(JSON.stringify({ type: 'dice.roll', payload }));
-          else await this.api(`/api/multiplayer/rooms/${this.room.code}/dice`, { method: 'POST', body: JSON.stringify(payload) });
-        },
-        statusLabel(status) { return ({ active: '在场', hidden: '未登场', benched: '暂离', dead: '死亡' })[status || 'active'] || status || '在场'; },
-        messageKindLabel(kind) { return ({ action: '行动', ai: 'AI-GM', dice: '骰子', state: '状态', system: '系统', chat: '公屏' })[kind] || kind || '消息'; },
-        shortTime(value) {
-          const text = String(value || '');
-          const match = text.match(/(\d{2}:\d{2})(?::\d{2})?/);
-          return match ? match[1] : text;
-        },
-        scrollMessages() {
-          nextTick(() => {
-            const el = this.$refs.messagesEl;
-            if (el) el.scrollTop = el.scrollHeight;
-          });
-        },
-      }
-    }).mount('#app');
-  </script>
+  <script src="/assets/multiplayer-app.js"></script>
 </body>
 </html>

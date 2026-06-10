@@ -25,11 +25,13 @@ ENV_CHAT_MODEL = "OPENAI_COMPAT_CHAT_MODEL"
 ENV_EMBEDDING_MODEL = "OPENAI_COMPAT_EMBEDDING_MODEL"
 ENV_IMAGE_MODEL = "OPENAI_COMPAT_IMAGE_MODEL"
 ENV_IMAGE_SIZE = "OPENAI_COMPAT_IMAGE_SIZE"
+ENV_TOKEN_POLICY_MODE = "ZRIC_TOKEN_POLICY_MODE"
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_PROVIDER_ID = "default"
 DEFAULT_PROVIDER_NAME = "Default endpoint"
+DEFAULT_TOKEN_POLICY_MODE = "full"
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -40,6 +42,60 @@ MODEL_CAPABILITY_FIELDS = {
     "chat": "chat_model",
     "embedding": "embedding_model",
     "image": "image_model",
+}
+
+TOKEN_POLICY_MODES = {
+    "full": {
+        "label": "完整",
+        "worldview_chars": 0,
+        "party_status_chars": 0,
+        "relevant_lore_chars": 0,
+        "session_memory_chars": 0,
+        "l1_context_chars": 0,
+        "world_entities_chars": 0,
+        "rag_context_chars": 0,
+        "rag_top_k": 0,
+        "map_context_chars": 0,
+        "npc_persona_chars": 0,
+        "npc_history_chars": 0,
+        "multiplayer_context_chars": 0,
+        "output_token_cap": 0,
+        "json_output_token_cap": 0,
+    },
+    "balanced": {
+        "label": "平衡",
+        "worldview_chars": 5200,
+        "party_status_chars": 2400,
+        "relevant_lore_chars": 2200,
+        "session_memory_chars": 3600,
+        "l1_context_chars": 1800,
+        "world_entities_chars": 2600,
+        "rag_context_chars": 3200,
+        "rag_top_k": 4,
+        "map_context_chars": 2600,
+        "npc_persona_chars": 1600,
+        "npc_history_chars": 900,
+        "multiplayer_context_chars": 800,
+        "output_token_cap": 1000,
+        "json_output_token_cap": 1200,
+    },
+    "frugal": {
+        "label": "极省",
+        "worldview_chars": 3000,
+        "party_status_chars": 1600,
+        "relevant_lore_chars": 1200,
+        "session_memory_chars": 1800,
+        "l1_context_chars": 900,
+        "world_entities_chars": 1400,
+        "rag_context_chars": 1800,
+        "rag_top_k": 2,
+        "map_context_chars": 1400,
+        "npc_persona_chars": 900,
+        "npc_history_chars": 500,
+        "multiplayer_context_chars": 500,
+        "output_token_cap": 700,
+        "json_output_token_cap": 950,
+    },
 }
 
 _provider_store_path: Path | None = None
@@ -206,10 +262,45 @@ def get_active_provider_id() -> str:
 
 
 def _store_from_records(active_id: str, records: list[dict]) -> dict:
-    return {
-        "active_provider": active_id,
-        "providers": records,
-    }
+    store = _read_store()
+    store["active_provider"] = active_id
+    store["providers"] = records
+    return store
+
+
+def normalize_token_policy_mode(mode: str | None) -> str:
+    mode_key = (mode or "").strip().lower()
+    return mode_key if mode_key in TOKEN_POLICY_MODES else DEFAULT_TOKEN_POLICY_MODE
+
+
+def get_token_policy_mode() -> str:
+    store = _read_store()
+    stored = store.get("token_policy_mode") if isinstance(store, dict) else ""
+    env_mode = os.environ.get(ENV_TOKEN_POLICY_MODE, "").strip()
+    return normalize_token_policy_mode(stored or env_mode or DEFAULT_TOKEN_POLICY_MODE)
+
+
+def set_token_policy_mode(mode: str) -> str:
+    normalized = normalize_token_policy_mode(mode)
+    store = _read_store()
+    store["token_policy_mode"] = normalized
+    _write_store(store)
+    return normalized
+
+
+def get_token_policy(mode: str | None = None) -> dict:
+    mode_key = normalize_token_policy_mode(mode or get_token_policy_mode())
+    policy = dict(TOKEN_POLICY_MODES[mode_key])
+    policy["mode"] = mode_key
+    return policy
+
+
+def clamp_output_tokens(max_tokens: int, *, json_mode: bool = False) -> int:
+    policy = get_token_policy()
+    cap_key = "json_output_token_cap" if json_mode else "output_token_cap"
+    cap = int(policy.get(cap_key) or 0)
+    requested = max(1, int(max_tokens or 1))
+    return min(requested, cap) if cap > 0 else requested
 
 
 def upsert_provider_profile(
@@ -399,11 +490,14 @@ def chat_completion(
     response_format: dict | None = None,
     stream: bool = False,
     timeout: float = 120,
+    apply_token_policy: bool = False,
 ):
     model_id = (model or get_active_model("chat")).strip()
     if not model_id:
         raise RuntimeError("No OpenAI-compatible chat model is selected.")
     json_mode = json_mode or (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+    if apply_token_policy:
+        max_tokens = clamp_output_tokens(max_tokens, json_mode=json_mode)
     normalized_messages = list(messages or [])
     if json_mode and not _messages_contain_json(normalized_messages):
         normalized_messages = _with_json_instruction(normalized_messages)

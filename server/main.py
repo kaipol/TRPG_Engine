@@ -9,6 +9,7 @@ from fastapi import Request, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 import uvicorn
 import sqlite3
@@ -20,9 +21,8 @@ import glob
 import re
 import shutil
 import zipfile
+import tempfile
 from datetime import datetime
-import hmac
-import ipaddress
 import urllib.parse
 import time
 import webbrowser
@@ -138,6 +138,51 @@ from .dice import dice_router, configure_dice_service
 app.include_router(dice_router)
 
 # ---------------------------------------------------------
+# 【模块化】：挂载配置管理接口
+# ---------------------------------------------------------
+from .config_api import config_router, configure_config_api
+app.include_router(config_router)
+
+# ---------------------------------------------------------
+# 【模块化】：托管前端静态页面和资源
+# ---------------------------------------------------------
+from .static_files import configure_static_files, static_router
+from .campaign_storage import (
+    account_id as _account_id,
+    account_owner_metadata as _account_owner_metadata,
+    campaign_asset_url as _campaign_asset_url,
+    campaign_summary as _campaign_summary,
+    cleanup_managed_campaign_folder as _cleanup_managed_campaign_folder,
+    configure_campaign_storage,
+    ensure_save_readable as _ensure_save_readable,
+    folder_size_bytes as _folder_size_bytes,
+    format_mtime as _format_mtime,
+    manifest_owner_id as _manifest_owner_id,
+    read_save_manifest as _read_save_manifest,
+    require_private_save_owner as _require_private_save_owner,
+    resolve_campaign_asset as _resolve_campaign_asset,
+    resolve_campaign_folder_name as _resolve_campaign_folder_name,
+    sanitize_asset_name as _sanitize_asset_name,
+    sanitize_campaign_name as _sanitize_campaign_name,
+    save_visible_to_account as _save_visible_to_account,
+    unique_path as _unique_path,
+    write_save_manifest as _write_save_manifest,
+)
+from .campaign_import_converters import (
+    ai_convert_campaign,
+    decode_text_bytes,
+    extract_docx_images,
+    extract_docx_text,
+    extract_pdf,
+)
+
+# ---------------------------------------------------------
+# 【模块化】：挂载全局账号认证
+# ---------------------------------------------------------
+from .auth import account_from_request, auth_router, configure_auth, init_auth_tables, require_account_from_request
+app.include_router(auth_router)
+
+# ---------------------------------------------------------
 # 【模块化】：挂载多人联机融合模块
 # ---------------------------------------------------------
 from .multiplayer import MAX_ROOM_PLAYERS, multiplayer_router, configure_multiplayer, init_multiplayer_tables
@@ -150,12 +195,17 @@ import sys
 import os
 
 # 【关键修复】：识别当前是源码运行，还是 exe 运行
-if getattr(sys, 'frozen', False):
+_base_dir_override = os.environ.get("ZRIC_BASE_DIR", "").strip()
+if _base_dir_override:
+    BASE_DIR = os.path.abspath(_base_dir_override)
+elif getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
+configure_static_files(WEB_DIR)
+CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
 
 # 【安全】：从 .env 文件或系统环境变量中加载 API 配置，绝不硬编码
 # 安装方式：pip install python-dotenv
@@ -170,7 +220,6 @@ except ImportError:
 ai_provider.configure_provider_store(os.path.join(BASE_DIR, "openai_providers.json"))
 
 DB_FILE = os.path.join(BASE_DIR, "rpg_game.db")
-CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
 os.makedirs(CAMPAIGNS_DIR, exist_ok=True)
 RAG_AUTO_REBUILD_EMBEDDINGS = os.environ.get("ZRIC_AUTO_REBUILD_RAG_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
 
@@ -234,7 +283,9 @@ from .campaign_import_workflow import CampaignImportWorkflow, ImportAsset
 _log = get_logger("main")
 
 configure_database(DB_FILE)
+configure_auth(DB_FILE)
 init_core_db(init_map_tables=init_map_tables, init_rag_tables=init_rag_tables)
+init_auth_tables()
 init_multiplayer_tables()
 
 # ---------------------------------------------------------
@@ -244,6 +295,24 @@ init_multiplayer_tables()
 @app.on_event("startup")
 def _startup_wire_agent():
     configure_agent(
+        db_file=DB_FILE,
+        persona_config=PERSONA_CONFIG,
+        fn_get_map_context=_get_map_context,
+        fn_auto_place_room=_auto_place_room,
+        fn_process_map_actions=_process_map_actions,
+        fn_get_current_room_id=_get_current_room_id,
+        fn_ai_extract_and_upsert_entities=_ai_extract_and_upsert_entities,
+        fn_build_persona_instruction=_build_persona_instruction,
+        fn_l1_append=_l1_append,
+        fn_l1_get_working_context=_l1_get_working_context,
+        fn_append_to_memory=append_to_memory,
+        fn_tl_append_memory=_tl_append_memory,
+        fn_get_world_entities_text=_get_world_entities_text,
+        fn_rag_retrieve=_rag_retrieve,
+        fn_get_embeddings=None,
+        fn_refresh_vector_cache=_refresh_vector_cache,
+    )
+    configure_config_api(
         db_file=DB_FILE,
         persona_config=PERSONA_CONFIG,
         fn_get_map_context=_get_map_context,
@@ -362,9 +431,13 @@ def _is_legacy_campaign_file(path: str) -> bool:
     return valid
 
 
+configure_campaign_storage(BASE_DIR, CAMPAIGNS_DIR, _is_legacy_campaign_file)
+
+
 @app.get("/api/campaigns")
-def list_campaigns():
+def list_campaigns(request: Request):
     """列出所有可加载的剧本（兼容旧版单文件 + 新版文件夹结构）"""
+    account = account_from_request(request)
     results = []
 
     # 旧版：BASE_DIR 下的 *.json（向后兼容）
@@ -373,7 +446,17 @@ def list_campaigns():
         if fname.startswith("persona_mode"): continue
         valid, limits = _campaign_player_limits(f)
         if not valid: continue
-        results.append({"name": fname, "type": "legacy", "path": fname, **limits})
+        results.append({
+            "name": fname,
+            "type": "legacy",
+            "path": fname,
+            "updated_at": _format_mtime(f),
+            "size_bytes": os.path.getsize(f) if os.path.exists(f) else 0,
+            "download_url": "",
+            "deletable": False,
+            **limits,
+            **_campaign_summary(f),
+        })
 
     # 新版：campaigns/ 下的子文件夹（含 campaign.json）
     if os.path.isdir(CAMPAIGNS_DIR):
@@ -382,20 +465,37 @@ def list_campaigns():
             campaign_json = os.path.join(folder, "campaign.json")
             valid, limits = _campaign_player_limits(campaign_json)
             if os.path.isdir(folder) and valid:
+                manifest = _read_save_manifest(folder)
+                if not _save_visible_to_account(manifest, account):
+                    continue
+                owner_id = _manifest_owner_id(manifest)
+                owned_by_me = owner_id is not None and owner_id == _account_id(account)
                 has_map = os.path.exists(os.path.join(folder, "map.json"))
                 kb_dir = os.path.join(folder, "knowledge")
+                assets_dir = os.path.join(folder, "assets")
                 kb_count = 0
                 if os.path.isdir(kb_dir):
                     kb_count = len(
                         glob.glob(os.path.join(kb_dir, "*.txt"))
                         + glob.glob(os.path.join(kb_dir, "*.md"))
                     )
+                asset_count = len(glob.glob(os.path.join(assets_dir, "*"))) if os.path.isdir(assets_dir) else 0
                 results.append({
                     "name": d, "type": "folder",
                     "path": f"campaigns/{d}",
+                    "scope": "private" if owner_id is not None else "public",
+                    "owned_by_me": owned_by_me,
+                    "owner_account_id": owner_id,
+                    "owner_username": manifest.get("owner_username", ""),
                     "has_map": has_map,
                     "kb_count": kb_count,
+                    "asset_count": asset_count,
+                    "updated_at": _format_mtime(campaign_json),
+                    "size_bytes": _folder_size_bytes(folder),
+                    "download_url": f"/api/game/saves/{urllib.parse.quote(d)}/download" if owned_by_me else "",
+                    "deletable": owned_by_me,
                     **limits,
+                    **_campaign_summary(campaign_json),
                 })
 
     # 向后兼容：同时返回旧版字符串数组格式（供未升级的前端使用）
@@ -434,278 +534,9 @@ def _resolve_campaign_load_target(filename: str) -> tuple[str, bool, str, str | 
         raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
     return target, False, target, None, None
 
-def _sanitize_campaign_name(name: str) -> str:
-    cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "_", (name or "").strip())
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    return cleaned[:60] or f"导入剧本_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
-def _sanitize_asset_name(name: str, default_ext: str = "") -> str:
-    stem, ext = os.path.splitext(name or "")
-    stem = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "_", stem).strip(" ._")
-    ext = (ext or default_ext or "").lower()
-    if ext and not ext.startswith("."):
-        ext = "." + ext
-    return (stem[:48] or "asset") + ext[:12]
 
-
-def _unique_path(folder: str, filename: str) -> str:
-    base, ext = os.path.splitext(filename)
-    candidate = os.path.join(folder, filename)
-    i = 1
-    while os.path.exists(candidate):
-        candidate = os.path.join(folder, f"{base}_{i}{ext}")
-        i += 1
-    return candidate
-
-
-def _campaign_asset_url(campaign_name: str, asset_name: str) -> str:
-    return (
-        f"/api/campaign-assets/{urllib.parse.quote(campaign_name)}/"
-        f"{urllib.parse.quote(asset_name)}"
-    )
-
-
-def _resolve_campaign_asset(campaign_name: str, asset_name: str) -> str:
-    root = os.path.realpath(os.path.join(CAMPAIGNS_DIR, campaign_name, "assets"))
-    target = os.path.realpath(os.path.join(root, asset_name))
-    if not target.startswith(root + os.sep):
-        raise fastapi.HTTPException(status_code=403, detail="禁止访问")
-    if not os.path.isfile(target):
-        raise fastapi.HTTPException(status_code=404, detail="资源不存在")
-    return target
-
-
-def _decode_text_bytes(raw: bytes) -> str:
-    for enc in ("utf-8", "utf-8-sig", "gbk"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    raise fastapi.HTTPException(status_code=400, detail="文件编码无法识别，请转为 UTF-8 后重试")
-
-
-def _extract_docx_text(raw: bytes) -> str:
-    try:
-        from docx import Document
-    except ImportError:
-        # Minimal fallback: DOCX is a zip of XML files. This loses table structure
-        # but keeps the import path usable if python-docx is not installed yet.
-        try:
-            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-                xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
-            xml = re.sub(r"</w:p\s*>", "\n", xml)
-            xml = re.sub(r"<[^>]+>", "", xml)
-            return xml
-        except Exception as exc:
-            raise fastapi.HTTPException(status_code=500, detail="DOCX 解析需要安装 python-docx") from exc
-
-    try:
-        doc = Document(io.BytesIO(raw))
-        parts = [p.text for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                if cells:
-                    parts.append(" | ".join(cells))
-        return "\n".join(parts)
-    except Exception as exc:
-        raise fastapi.HTTPException(status_code=400, detail=f"DOCX 解析失败：{exc}") from exc
-
-
-def _extract_docx_images(raw: bytes, assets_dir: str) -> list[str]:
-    saved = []
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            for info in zf.infolist():
-                if not info.filename.startswith("word/media/"):
-                    continue
-                data = zf.read(info.filename)
-                if not data:
-                    continue
-                safe = _sanitize_asset_name(os.path.basename(info.filename))
-                target = _unique_path(assets_dir, safe)
-                with open(target, "wb") as f:
-                    f.write(data)
-                saved.append(os.path.basename(target))
-    except Exception:
-        pass
-    return saved
-
-
-def _extract_pdf(raw: bytes, assets_dir: str) -> tuple[str, list[str], list[str]]:
-    warnings = []
-    saved = []
-    try:
-        import pypdf
-    except ImportError as exc:
-        raise fastapi.HTTPException(status_code=500, detail="PDF 解析需要安装 pypdf") from exc
-
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(raw))
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        for page_idx, page in enumerate(reader.pages, start=1):
-            for img_idx, image in enumerate(getattr(page, "images", []) or [], start=1):
-                data = getattr(image, "data", None)
-                if not data:
-                    continue
-                raw_name = getattr(image, "name", "") or f"pdf_p{page_idx}_{img_idx}.png"
-                safe = _sanitize_asset_name(raw_name, ".png")
-                target = _unique_path(assets_dir, safe)
-                with open(target, "wb") as f:
-                    f.write(data)
-                saved.append(os.path.basename(target))
-    except Exception as exc:
-        raise fastapi.HTTPException(status_code=400, detail=f"PDF 解析失败：{exc}") from exc
-
-    if not text.strip():
-        warnings.append("PDF 未提取到文本；扫描版 PDF 暂不支持 OCR，已生成空白保底剧本。")
-    return text, saved, warnings
-
-
-def _fallback_campaign(title: str, text: str, first_image_url: str = "") -> dict:
-    opening = text.strip()[:1800] or "原始文档未能提取出可用正文。请在导入后手动补充开场场景。"
-    return {
-        "worldview": f"【{title}】\n\n由原始剧本文档导入生成。AI 转换不可用时创建了保底剧本，请在客户端继续整理节点、地图与触发器。",
-        "session_memory": "【跑团记忆日志已初始化】\n",
-        "characters": [
-            {"name": "玩家", "role": "PC", "hp": 100, "san": 80, "inventory": "", "status": "active"}
-        ],
-        "nodes": [
-            {
-                "id": 1,
-                "name": "开场",
-                "summary": "由导入文档生成的起始场景",
-                "content": opening,
-                "expanded_content": "",
-                "scene_image": first_image_url,
-            }
-        ],
-        "options": [],
-        "lorebook": [],
-        "triggers": [],
-        "world_entities": [],
-        "timelines": [],
-        "rag_library": [],
-        "memory_l1": [],
-        "pending_effects": [],
-        "npc_chat_logs": [],
-    }
-
-
-def _normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: list[str]) -> tuple[dict, dict]:
-    campaign = _fallback_campaign(title, text, image_urls[0] if image_urls else "")
-    if not isinstance(raw, dict):
-        return campaign, {"map_rooms": [], "map_edges": []}
-
-    campaign["worldview"] = str(raw.get("worldview") or campaign["worldview"])
-    campaign["session_memory"] = str(raw.get("session_memory") or campaign["session_memory"])
-
-    nodes = raw.get("nodes") if isinstance(raw.get("nodes"), list) else []
-    normalized_nodes = []
-    old_to_new = {}
-    for idx, node in enumerate(nodes[:80], start=1):
-        if not isinstance(node, dict):
-            continue
-        old_id = node.get("id", idx)
-        old_to_new[str(old_id)] = len(normalized_nodes) + 1
-        normalized_nodes.append({
-            "id": len(normalized_nodes) + 1,
-            "name": str(node.get("name") or f"场景 {idx}")[:80],
-            "summary": str(node.get("summary") or "")[:300],
-            "content": str(node.get("content") or "")[:6000],
-            "expanded_content": str(node.get("expanded_content") or ""),
-            "scene_image": str(node.get("scene_image") or ""),
-        })
-    if normalized_nodes:
-        campaign["nodes"] = normalized_nodes
-    if image_urls and not any(n.get("scene_image") for n in campaign["nodes"]):
-        campaign["nodes"][0]["scene_image"] = image_urls[0]
-
-    valid_node_ids = {n["id"] for n in campaign["nodes"]}
-    options = []
-    for opt in (raw.get("options") if isinstance(raw.get("options"), list) else [])[:160]:
-        if not isinstance(opt, dict):
-            continue
-        node_id = old_to_new.get(str(opt.get("node_id")), opt.get("node_id"))
-        next_id = old_to_new.get(str(opt.get("next_node_id")), opt.get("next_node_id"))
-        try:
-            node_id = int(node_id)
-            next_id = int(next_id)
-        except (TypeError, ValueError):
-            continue
-        if node_id in valid_node_ids and next_id in valid_node_ids:
-            options.append({"node_id": node_id, "text": str(opt.get("text") or "继续")[:200], "next_node_id": next_id})
-    campaign["options"] = options
-
-    def list_of_dicts(key: str, limit: int) -> list[dict]:
-        values = raw.get(key) if isinstance(raw.get(key), list) else []
-        return [v for v in values[:limit] if isinstance(v, dict)]
-
-    campaign["characters"] = list_of_dicts("characters", 40) or campaign["characters"]
-    campaign["lorebook"] = list_of_dicts("lorebook", 120)
-    campaign["triggers"] = list_of_dicts("triggers", 60)
-    campaign["world_entities"] = list_of_dicts("world_entities", 80)
-    campaign["timelines"] = list_of_dicts("timelines", 20)
-
-    map_rooms = list_of_dicts("map_rooms", 120)
-    map_edges = list_of_dicts("map_edges", 240)
-    if not map_rooms and isinstance(raw.get("map"), dict):
-        map_rooms = [v for v in raw["map"].get("map_rooms", []) if isinstance(v, dict)]
-        map_edges = [v for v in raw["map"].get("map_edges", []) if isinstance(v, dict)]
-    map_data = {"map_rooms": map_rooms, "map_edges": map_edges}
-    return campaign, map_data
-
-
-def _ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[dict, dict, list[str]]:
-    warnings = []
-    if not ai_provider.is_configured():
-        warnings.append("OpenAI 兼容端点尚未配置，已生成保底剧本。")
-        return _fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
-
-    sample = text[:45000]
-    system_prompt = (
-        "你是 TRPG 剧本转换器。请把原始剧本文档转换为 Z.R.I.C 客户端可读的 JSON。"
-        "只返回 JSON 对象，不要 Markdown。所有内容用中文。"
-    )
-    user_prompt = f"""
-剧本名称：{title}
-可用图片 URL：{json.dumps(image_urls, ensure_ascii=False)}
-
-请输出字段：
-- worldview: string
-- session_memory: string
-- characters: array，元素包含 name, role, hp, san, inventory, status
-- nodes: array，元素包含 id, name, summary, content, scene_image；id 从 1 开始
-- options: array，元素包含 node_id, text, next_node_id
-- lorebook: array，元素包含 keywords, content
-- triggers: array，可为空
-- world_entities: array，元素包含 entity_type, name, location, status, state_desc
-- map_rooms: array，元素包含 id, map_id, label, x, y, w, h, description, state, color, node_id, floor
-- map_edges: array，元素包含 id, map_id, from_id, to_id, label, locked, key_item, edge_type
-
-要求：
-1. 生成一个能直接游玩的起始节点和若干关键场景，优先保持原文结构。
-2. 地图房间应绑定相关 node_id；没有把握时少生成，不要编造复杂规则。
-3. 图片 URL 只在适合的节点 scene_image 中使用，不要改写 URL。
-4. 输出必须是单个 JSON 对象。
-
-原始剧本文档：
-{sample}
-"""
-    try:
-        from .agent import _call_ai
-        raw = _call_ai(system_prompt, user_prompt, temperature=0.35, max_tokens=6000, json_mode=True)
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        parsed = json_repair.loads(raw.strip())
-        campaign, map_data = _normalize_imported_campaign(parsed, title, text, image_urls)
-        return campaign, map_data, warnings
-    except Exception as exc:
-        warnings.append(f"AI 转换失败，已生成保底剧本：{type(exc).__name__}: {exc}")
-        return _fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
 
 
 _campaign_import_workflow = CampaignImportWorkflow(
@@ -714,13 +545,14 @@ _campaign_import_workflow = CampaignImportWorkflow(
     sanitize_asset_name=_sanitize_asset_name,
     unique_path=_unique_path,
     campaign_asset_url=_campaign_asset_url,
-    decode_text_bytes=_decode_text_bytes,
-    extract_docx_text=_extract_docx_text,
-    extract_docx_images=_extract_docx_images,
-    extract_pdf=_extract_pdf,
-    ai_convert_campaign=_ai_convert_campaign,
+    decode_text_bytes=decode_text_bytes,
+    extract_docx_text=extract_docx_text,
+    extract_docx_images=extract_docx_images,
+    extract_pdf=extract_pdf,
+    ai_convert_campaign=ai_convert_campaign,
     logger=_log,
 )
+_campaign_import_job_owners: dict[str, dict] = {}
 
 
 @app.get("/api/campaigns/import/formats")
@@ -739,10 +571,12 @@ def campaign_import_formats():
 
 @app.post("/api/campaigns/import")
 async def import_campaign_from_document(
+    request: Request,
     name: str = Form(""),
     main_file: UploadFile = File(...),
     assets: list[UploadFile] | None = File(None),
 ):
+    account = require_account_from_request(request)
     filename = main_file.filename or "scenario.txt"
     suffix = os.path.splitext(filename)[1].lower()
     if suffix == ".doc":
@@ -764,19 +598,25 @@ async def import_campaign_from_document(
         suffix=suffix,
         raw=raw,
         assets=buffered_assets,
+        metadata=_account_owner_metadata(account),
     )
+    _campaign_import_job_owners[job.id] = _account_owner_metadata(account)
     return {"status": "accepted", "job_id": job.id, "job": job.to_dict()}
 
 
 @app.get("/api/campaigns/import/{job_id}")
-def get_campaign_import_job(job_id: str):
+def get_campaign_import_job(job_id: str, request: Request):
+    account = require_account_from_request(request)
+    owner = _campaign_import_job_owners.get(job_id)
+    if owner and owner.get("owner_account_id") != _account_id(account):
+        raise fastapi.HTTPException(status_code=403, detail="无权查看其他账号的导入任务")
     job = _campaign_import_workflow.get_job(job_id)
     if not job:
         raise fastapi.HTTPException(status_code=404, detail="导入任务不存在或已过期")
     return {"status": "success", "job": job}
 
 @app.post("/api/game/load")
-def load_campaign(req: LoadCampaignRequest):
+def load_campaign(req: LoadCampaignRequest, request: Request):
     """
     加载剧本。支持两种格式：
     1. 旧版单文件：req.filename = "save_xxx.json"
@@ -785,6 +625,8 @@ def load_campaign(req: LoadCampaignRequest):
     """
     # 判断是文件夹还是单文件，并限制到可加载剧本白名单路径形态。
     target, is_folder, campaign_path, map_path, kb_dir = _resolve_campaign_load_target(req.filename)
+    if is_folder:
+        _ensure_save_readable(target, account_from_request(request))
 
     if not os.path.exists(campaign_path):
         raise fastapi.HTTPException(status_code=404, detail=f"文件不存在: {campaign_path}")
@@ -1122,8 +964,9 @@ class ExportSaveRequest(BaseModel):
     save_name: str = ""
 
 @app.post("/api/game/export")
-def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
+def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest()):
     """导出存档到 campaigns/ 文件夹，支持自定义名。"""
+    account = require_account_from_request(request)
     conn = get_db_connection()
     nodes = [dict(row) for row in conn.execute("SELECT * FROM nodes").fetchall()]
     options = [dict(row) for row in conn.execute("SELECT * FROM options").fetchall()]
@@ -1153,13 +996,43 @@ def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
     conn.close()
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    staged_assets_dir = ""
     try:
         if req.save_name.strip():
-            safe_name = "".join(c for c in req.save_name.strip() if c.isalnum() or c in " _-（）()【】·")[:60]
+            safe_name = _sanitize_campaign_name(req.save_name.strip())
             folder_name = safe_name or f"save_{timestamp}"
         else:
             folder_name = f"save_{timestamp}"
         folder_path = os.path.join(CAMPAIGNS_DIR, folder_name)
+        staged_assets_dir = tempfile.mkdtemp(prefix="zric_export_assets_")
+        staged_assets: dict[str, str] = {}
+        for node in nodes:
+            scene_image = (node.get("scene_image") or "").strip()
+            prefix = "/api/campaign-assets/"
+            if not scene_image.startswith(prefix):
+                continue
+            rel = scene_image[len(prefix):]
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
+                continue
+            src_campaign = urllib.parse.unquote(parts[0])
+            src_asset = urllib.parse.unquote(parts[1])
+            dst_name = _sanitize_asset_name(os.path.basename(src_asset))
+            if dst_name in staged_assets:
+                continue
+            try:
+                src_path = _resolve_campaign_asset(src_campaign, src_asset)
+                staged_path = os.path.join(staged_assets_dir, dst_name)
+                shutil.copy2(src_path, staged_path)
+                staged_assets[dst_name] = staged_path
+            except (fastapi.HTTPException, OSError):
+                continue
+        if os.path.isdir(folder_path):
+            existing_campaign = os.path.join(folder_path, "campaign.json")
+            if not os.path.exists(existing_campaign) or not _is_legacy_campaign_file(existing_campaign):
+                raise fastapi.HTTPException(status_code=400, detail="目标存档格式无效，已拒绝覆盖")
+            _require_private_save_owner(folder_path, account)
+            _cleanup_managed_campaign_folder(folder_path)
         os.makedirs(folder_path, exist_ok=True)
         export_nodes = [dict(n) for n in nodes]
         for node in export_nodes:
@@ -1192,23 +1065,8 @@ def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
 
         copied_assets = set()
         assets_dir = os.path.join(folder_path, "assets")
-        for node in nodes:
-            scene_image = (node.get("scene_image") or "").strip()
-            prefix = "/api/campaign-assets/"
-            if not scene_image.startswith(prefix):
-                continue
-            rel = scene_image[len(prefix):]
-            parts = rel.split("/", 1)
-            if len(parts) != 2:
-                continue
-            src_campaign = urllib.parse.unquote(parts[0])
-            src_asset = urllib.parse.unquote(parts[1])
-            try:
-                src_path = _resolve_campaign_asset(src_campaign, src_asset)
-            except fastapi.HTTPException:
-                continue
+        for dst_name, src_path in staged_assets.items():
             os.makedirs(assets_dir, exist_ok=True)
-            dst_name = _sanitize_asset_name(os.path.basename(src_asset))
             dst_path = os.path.join(assets_dir, dst_name)
             if os.path.realpath(src_path) != os.path.realpath(dst_path):
                 shutil.copy2(src_path, dst_path)
@@ -1223,13 +1081,80 @@ def export_campaign(req: ExportSaveRequest = ExportSaveRequest()):
                 with open(os.path.join(kb_dir, f"{safe_title}.txt"), "w", encoding="utf-8") as f:
                     f.write(full_text)
 
+        manifest = {
+            "name": folder_name,
+            "path": f"campaigns/{folder_name}",
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            **_account_owner_metadata(account),
+            "node_count": len(nodes),
+            "character_count": len(characters),
+            "lore_count": len(lorebook),
+            "rag_count": len(rag_export),
+            "map_room_count": len(map_data.get("map_rooms") or []),
+            "asset_count": len(copied_assets),
+        }
+        with open(os.path.join(folder_path, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+
         return {
             "status": "success",
             "folder": folder_name,
+            "path": f"campaigns/{folder_name}",
+            "download_url": f"/api/game/saves/{urllib.parse.quote(folder_name)}/download",
+            "updated_at": _format_mtime(os.path.join(folder_path, "campaign.json")),
+            "summary": manifest,
             "message": f"已导出到 campaigns/{folder_name}/"
         }
     except Exception as e:
+        if isinstance(e, fastapi.HTTPException):
+            raise
         raise fastapi.HTTPException(status_code=500, detail=str(e))
+    finally:
+        if staged_assets_dir and os.path.isdir(staged_assets_dir):
+            shutil.rmtree(staged_assets_dir, ignore_errors=True)
+
+
+@app.get("/api/game/saves/{campaign_name}/download")
+def download_save_archive(campaign_name: str, request: Request):
+    """将文件夹存档打包为 ZIP 下载。"""
+    account = require_account_from_request(request)
+    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    _require_private_save_owner(folder, account)
+    tmp = tempfile.NamedTemporaryFile(prefix=f"zric_{_sanitize_asset_name(name, '.zip')}_", suffix=".zip", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(folder):
+                for filename in files:
+                    path = os.path.join(root, filename)
+                    rel = os.path.relpath(path, folder).replace("\\", "/")
+                    zf.write(path, arcname=f"{name}/{rel}")
+    except Exception as exc:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise fastapi.HTTPException(status_code=500, detail=f"打包存档失败：{exc}") from exc
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"{name}.zip",
+        background=BackgroundTask(lambda p: os.path.exists(p) and os.remove(p), tmp_path),
+    )
+
+
+@app.delete("/api/game/saves/{campaign_name}")
+def delete_save_folder(campaign_name: str, request: Request):
+    """删除 campaigns/<name> 文件夹存档。旧版根目录 JSON 不允许通过此接口删除。"""
+    account = require_account_from_request(request)
+    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    _require_private_save_owner(folder, account)
+    try:
+        shutil.rmtree(folder)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=500, detail=f"删除存档失败：{exc}") from exc
+    return {"status": "success", "name": name, "message": f"已删除存档：{name}"}
 
 # ---------------------------------------------------------
 # 【记忆系统】：已迁移至 memory.py（通过 app.include_router(memory_router) 自动注册）
@@ -2072,299 +1997,6 @@ def export_battle_report():
         return {"status": "error", "message": str(e), "report": ""}
 
 
-# ---------------------------------------------------------
-# API 接口：OpenAI 兼容端点配置（前端可热更新 .env）
-# ---------------------------------------------------------
-class ApiKeysUpdateRequest(BaseModel):
-    provider_id: str | None = None
-    provider_name: str | None = None
-    openai_compat_api_key: str | None = None
-    openai_compat_base_url: str | None = None
-    chat_model: str | None = None
-    embedding_model: str | None = None
-    image_model: str | None = None
-    image_size: str | None = None
-    make_active: bool = True
-
-
-class ProviderSwitchRequest(BaseModel):
-    provider_id: str
-
-
-class ProviderDeleteRequest(BaseModel):
-    provider_id: str
-
-
-class ModelListRequest(BaseModel):
-    capability: str = "chat"
-    search: str = ""
-    provider_id: str | None = None
-    provider_name: str | None = None
-    openai_compat_api_key: str | None = None
-    openai_compat_base_url: str | None = None
-    chat_model: str | None = None
-    embedding_model: str | None = None
-    image_model: str | None = None
-
-
-def _is_loopback_client(request: Request) -> bool:
-    host = request.client.host if request.client else ""
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return host in {"localhost", "127.0.0.1", "::1"}
-
-
-def _require_admin_config_access(request: Request):
-    admin_token = os.environ.get("ZRIC_ADMIN_TOKEN", "").strip()
-    provided = request.headers.get("X-Admin-Token", "").strip()
-    auth = request.headers.get("Authorization", "").strip()
-    if auth.lower().startswith("bearer "):
-        provided = auth[7:].strip()
-    if admin_token:
-        if not provided or not hmac.compare_digest(provided, admin_token):
-            raise fastapi.HTTPException(status_code=403, detail="管理员令牌无效")
-        return
-    if not _is_loopback_client(request):
-        raise fastapi.HTTPException(
-            status_code=403,
-            detail="未配置 ZRIC_ADMIN_TOKEN 时，仅允许本机回环地址更新 API Key",
-        )
-
-
-@app.get("/api/config/keys")
-def get_api_keys_status():
-    """返回 AI 端点配置状态（不返回明文密钥）。"""
-    cfg = ai_provider.get_config()
-    providers = ai_provider.list_provider_profiles()
-    return {
-        "status": "success",
-        "keys": {
-            "openai_compatible": {
-                "configured": cfg.configured,
-                "label": "OpenAI 兼容端点",
-                "required": True,
-            },
-        },
-        "providers": providers,
-        "active_provider": cfg.provider_id,
-        "config": {
-            "provider_id": cfg.provider_id,
-            "provider_name": cfg.provider_name,
-            "base_url": cfg.base_url,
-            "chat_model": ai_provider.get_active_model("chat") or cfg.chat_model,
-            "embedding_model": ai_provider.get_active_model("embedding") or cfg.embedding_model,
-            "image_model": ai_provider.get_active_model("image") or cfg.image_model,
-            "image_size": cfg.image_size,
-        },
-    }
-
-@app.post("/api/config/keys")
-def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
-    """
-    将用户填写的 OpenAI 兼容端点配置写入本地 provider profile 并热重载。
-    只更新有值的字段，不清空已有配置。
-    """
-    _require_admin_config_access(request)
-
-    try:
-        cfg = ai_provider.upsert_provider_profile(
-            provider_id=req.provider_id or "",
-            provider_name=req.provider_name or "",
-            api_key=req.openai_compat_api_key,
-            base_url=req.openai_compat_base_url,
-            chat_model=req.chat_model,
-            embedding_model=req.embedding_model,
-            image_model=req.image_model,
-            image_size=req.image_size,
-            make_active=req.make_active,
-        )
-    except Exception as e:
-        return {"status": "error", "message": f"保存供应商配置失败：{e}"}
-
-    if req.chat_model and req.make_active:
-        ai_provider.set_active_model(req.chat_model.strip(), "chat")
-    if req.embedding_model and req.make_active:
-        ai_provider.set_active_model(req.embedding_model.strip(), "embedding")
-    if req.image_model and req.make_active:
-        ai_provider.set_active_model(req.image_model.strip(), "image")
-
-    # 重新配置 agent（刷新注入函数引用）。
-    from .agent import configure_agent as _reconfigure_agent
-    _reconfigure_agent(
-        db_file=DB_FILE,
-        persona_config=PERSONA_CONFIG,
-        fn_get_map_context=_get_map_context,
-        fn_auto_place_room=_auto_place_room,
-        fn_process_map_actions=_process_map_actions,
-        fn_get_current_room_id=_get_current_room_id,
-        fn_ai_extract_and_upsert_entities=_ai_extract_and_upsert_entities,
-        fn_build_persona_instruction=_build_persona_instruction,
-        fn_l1_append=_l1_append,
-        fn_l1_get_working_context=_l1_get_working_context,
-        fn_append_to_memory=append_to_memory,
-        fn_tl_append_memory=_tl_append_memory,
-        fn_get_world_entities_text=_get_world_entities_text,
-        fn_rag_retrieve=_rag_retrieve,
-        fn_get_embeddings=None,
-        fn_refresh_vector_cache=_refresh_vector_cache,
-    )
-
-    return {
-        "status": "success",
-        "message": f"已保存供应商：{cfg.provider_name}",
-        "keys": {
-            "openai_compatible": {"configured": ai_provider.is_configured()},
-        },
-        "providers": ai_provider.list_provider_profiles(),
-        "active_provider": ai_provider.get_active_provider_id(),
-        "config": get_api_keys_status()["config"],
-    }
-
-
-@app.post("/api/config/providers/switch")
-def switch_provider(req: ProviderSwitchRequest, request: Request):
-    """切换当前 OpenAI 兼容供应商 profile。"""
-    _require_admin_config_access(request)
-    try:
-        cfg = ai_provider.set_active_provider(req.provider_id)
-        from .agent import reset_active_model
-        reset_active_model()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-    return {
-        "status": "success",
-        "active_provider": cfg.provider_id,
-        "config": get_api_keys_status()["config"],
-        "providers": ai_provider.list_provider_profiles(),
-    }
-
-
-@app.post("/api/config/providers/delete")
-def delete_provider(req: ProviderDeleteRequest, request: Request):
-    """删除本地 OpenAI 兼容供应商 profile。"""
-    _require_admin_config_access(request)
-    try:
-        active_provider = ai_provider.delete_provider_profile(req.provider_id)
-        from .agent import reset_active_model
-        reset_active_model()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-    return {
-        "status": "success",
-        "active_provider": active_provider,
-        "config": get_api_keys_status()["config"],
-        "providers": ai_provider.list_provider_profiles(),
-    }
-
-
-def _config_model_response(req: ModelListRequest, *, allow_draft_endpoint: bool = False):
-    capability = (req.capability or "chat").strip() or "chat"
-    search = (req.search or "").strip()
-    field = ai_provider.MODEL_CAPABILITY_FIELDS.get(capability)
-    if not field:
-        return {
-            "status": "error",
-            "message": f"不支持的模型能力：{capability}",
-            "capability": capability,
-            "active": "",
-            "models": [],
-        }
-
-    provider_id = (req.provider_id or "").strip()
-    draft_key = (req.openai_compat_api_key or "").strip()
-    draft_base_url = (req.openai_compat_base_url or "").strip()
-    provider_name = (req.provider_name or "").strip()
-    draft_model_values = {
-        "chat": req.chat_model or "",
-        "embedding": req.embedding_model or "",
-        "image": req.image_model or "",
-    }
-
-    if allow_draft_endpoint and (draft_key or not provider_id):
-        if not draft_key or not draft_base_url:
-            return {
-                "status": "error",
-                "message": "请先填写当前供应商的 API Key 和 Base URL，再获取模型。",
-                "capability": capability,
-                "active": draft_model_values.get(capability, ""),
-                "models": [],
-                "provider": {
-                    "id": provider_id or "draft",
-                    "name": provider_name or "未保存供应商",
-                    "base_url": draft_base_url,
-                },
-                "draft": True,
-            }
-        try:
-            models = ai_provider.list_remote_models_for_endpoint(
-                api_key=draft_key,
-                base_url=draft_base_url,
-                search=search,
-                provider_name=provider_name or "未保存供应商",
-                provider_id=provider_id or "draft",
-            )
-            error = ""
-        except Exception as e:
-            models = []
-            error = f"{type(e).__name__}: {e}"
-        active = draft_model_values.get(capability, "")
-        provider = {
-            "id": provider_id or "draft",
-            "name": provider_name or "未保存供应商",
-            "base_url": draft_base_url,
-        }
-        configured = bool(draft_key and draft_base_url)
-        draft = True
-    else:
-        cfg = ai_provider.get_config(provider_id or None)
-        try:
-            models = ai_provider.list_remote_models(search, provider_id or None)
-            error = ""
-        except Exception as e:
-            models = []
-            error = f"{type(e).__name__}: {e}"
-        active_runtime = ai_provider.get_active_model(capability) if cfg.provider_id == ai_provider.get_active_provider_id() else ""
-        active = active_runtime or getattr(cfg, field, "")
-        provider = {"id": cfg.provider_id, "name": cfg.provider_name, "base_url": cfg.base_url}
-        configured = cfg.configured
-        draft = False
-
-    if active and not any(m["key"] == active for m in models):
-        needle = search.lower()
-        if not needle or needle in active.lower():
-            models.insert(0, {
-                "key": active,
-                "model_id": active,
-                "label": active,
-                "available": configured,
-                "provider": provider["name"],
-                "provider_id": provider["id"],
-            })
-    return {
-        "status": "success",
-        "capability": capability,
-        "active": active,
-        "models": models,
-        "provider": provider,
-        "draft": draft,
-        "error": error,
-    }
-
-
-@app.get("/api/config/models")
-def list_config_models(capability: str = "chat", search: str = ""):
-    """为配置面板获取已保存供应商的模型列表，并按能力返回当前选中模型。"""
-    return _config_model_response(ModelListRequest(capability=capability, search=search))
-
-
-@app.post("/api/config/models")
-def list_config_models_for_current_form(req: ModelListRequest, request: Request):
-    """按配置面板当前表单草稿获取模型，不隐式回退到旧 active 供应商。"""
-    _require_admin_config_access(request)
-    return _config_model_response(req, allow_draft_endpoint=True)
-
-
 # =============================================================
 # 【多时间线 CRUD】：已迁移至 timeline.py
 # _tl_append_memory 通过顶部 import 引入
@@ -2376,7 +2008,7 @@ def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
     时间线分支推演——委托给 agent.py 的统一推演引擎。
     时间线专属上下文在此构建，AI 调用和后处理由 agent 模块完成。
     """
-    from .agent import _call_ai, _build_dynamic_system_prompt, _post_process_dynamic_result
+    from .agent import _call_ai, _build_dynamic_system_prompt, _post_process_dynamic_result, _trim_prompt_context
 
     conn = get_db_connection()
     tl = conn.execute("SELECT * FROM timelines WHERE id=?", (tl_id,)).fetchone()
@@ -2405,7 +2037,12 @@ def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
     ) or "（本时间线暂无绑定角色）"
 
     world_entities_text = _get_world_entities_text(conn, req.scene_name, req.content, req.player_action)
-    rag_context = _rag_retrieve(conn, f"{req.scene_name} {req.content} {req.player_action}")
+    token_policy = ai_provider.get_token_policy()
+    rag_top_k = int(token_policy.get("rag_top_k") or 0)
+    if rag_top_k > 0:
+        rag_context = _rag_retrieve(conn, f"{req.scene_name} {req.content} {req.player_action}", top_k=rag_top_k)
+    else:
+        rag_context = _rag_retrieve(conn, f"{req.scene_name} {req.content} {req.player_action}")
     l1_context = _l1_get_working_context(conn, tl_id)
 
     try:
@@ -2413,6 +2050,11 @@ def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
         map_context = _get_map_context(conn, tl_room_id)
     except Exception:
         map_context = ""
+
+    worldview, party_status, relevant_lore, tl_memory, l1_context, world_entities_text, rag_context, map_context = _trim_prompt_context(
+        worldview, party_status, relevant_lore, tl_memory,
+        l1_context, world_entities_text, rag_context, map_context,
+    )
 
     system_prompt = _build_dynamic_system_prompt(
         worldview, party_status, relevant_lore, tl_memory,
@@ -2628,39 +2270,67 @@ class GmControlEventRequest(BaseModel):
 
 class CheckpointRequest(BaseModel):
     from_node_id: int
+    label: str = ""
 
 @app.post("/api/game/checkpoint")
 def create_checkpoint(req: CheckpointRequest):
-    """选项跳转前保存当前游戏状态快照（仅快照跳转时会变动的9张表）。"""
+    """保存当前游戏状态快照，用于返回上一回合。"""
     with safe_db() as conn:
         def rows(sql, *args):
             return [dict(r) for r in conn.execute(sql, args).fetchall()]
+        def max_id(table):
+            try:
+                return conn.execute(f"SELECT COALESCE(MAX(id),0) FROM {table}").fetchone()[0]
+            except sqlite3.OperationalError:
+                return 0
+        state_keys = [
+            "session_memory",
+            "player_current_scene_id", "player_scene_image", "player_scene_prompt",
+            "player_scene_ai_text", "player_bgm_url", "player_bgm_name",
+            "current_room_id",
+        ]
+        system_state = {
+            key: (row["value"] if row else "")
+            for key in state_keys
+            for row in [conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()]
+        }
 
         snap = {
             "characters":     rows("SELECT * FROM characters"),
             "world_entities": rows("SELECT * FROM world_entities"),
             "memory_l1_max_id": (conn.execute("SELECT COALESCE(MAX(id),0) FROM memory_l1").fetchone()[0]),
+            "node_max_id": max_id("nodes"),
+            "option_max_id": max_id("options"),
+            "chronicle_log_max_id": max_id("chronicle_log"),
             "timelines":      rows("SELECT * FROM timelines"),
             "node_expanded":  {str(r["id"]): r["expanded_content"]
                                for r in conn.execute("SELECT id,expanded_content FROM nodes").fetchall()},
             "triggers":       rows("SELECT id,fired,fire_count,last_fired_at FROM triggers"),
             "pending_effects": rows("SELECT * FROM pending_effects"),
-            "session_memory": (conn.execute("SELECT value FROM system_state WHERE key='session_memory'").fetchone() or {"value":""})["value"],
+            "session_memory": system_state.get("session_memory", ""),
+            "system_state": system_state,
             "map_rooms_state": {str(r["id"]): r["state"]
                                 for r in conn.execute("SELECT id,state FROM map_rooms").fetchall()},
         }
 
         conn.execute(
-            "INSERT INTO game_checkpoints (from_node_id, snapshot) VALUES (?,?)",
-            (req.from_node_id, json.dumps(snap, ensure_ascii=False))
+            "INSERT INTO game_checkpoints (from_node_id, snapshot, label) VALUES (?,?,?)",
+            (req.from_node_id, json.dumps(snap, ensure_ascii=False), req.label[:80])
         )
         # 保留最近10条，自动淘汰最旧的
         conn.execute("""
             DELETE FROM game_checkpoints
             WHERE id NOT IN (SELECT id FROM game_checkpoints ORDER BY id DESC LIMIT 10)
         """)
+        remaining = conn.execute("SELECT COUNT(*) FROM game_checkpoints").fetchone()[0]
         conn.commit()
-    return {"status": "success"}
+    return {"status": "success", "remaining": remaining}
+
+@app.get("/api/game/checkpoints")
+def list_checkpoints():
+    with safe_db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM game_checkpoints").fetchone()[0]
+    return {"status": "success", "count": count}
 
 
 @app.post("/api/game/rollback")
@@ -2676,14 +2346,27 @@ def rollback_checkpoint():
         cp_id       = row["id"]
         from_node   = row["from_node_id"]
         snap        = json.loads(row["snapshot"])
+        node_max_id = int(snap.get("node_max_id") or 0)
+        option_max_id = int(snap.get("option_max_id") or 0)
+        chronicle_log_max_id = int(snap.get("chronicle_log_max_id") or 0)
+
+        if node_max_id:
+            conn.execute("DELETE FROM options WHERE node_id > ? OR next_node_id > ?",
+                         (node_max_id, node_max_id))
+            conn.execute("DELETE FROM pending_effects WHERE node_id > ?", (node_max_id,))
+            conn.execute("DELETE FROM nodes WHERE id > ?", (node_max_id,))
+        if option_max_id:
+            conn.execute("DELETE FROM options WHERE id > ?", (option_max_id,))
+        if chronicle_log_max_id:
+            conn.execute("DELETE FROM chronicle_log WHERE id > ?", (chronicle_log_max_id,))
 
         # ── characters ──────────────────────────────────────────
         conn.execute("DELETE FROM characters")
         for c in snap["characters"]:
             conn.execute(
-                "INSERT INTO characters (id,name,role,hp,san,inventory,status) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO characters (id,name,role,hp,san,inventory,personality,status) VALUES (?,?,?,?,?,?,?,?)",
                 (c["id"], c["name"], c["role"], c["hp"], c["san"],
-                 c.get("inventory",""), c.get("status","active"))
+                 c.get("inventory",""), c.get("personality",""), c.get("status","active"))
             )
 
         # ── world_entities ───────────────────────────────────────
@@ -2730,10 +2413,12 @@ def rollback_checkpoint():
             )
 
         # ── session_memory ───────────────────────────────────────
-        conn.execute(
-            "INSERT OR REPLACE INTO system_state (key,value) VALUES ('session_memory',?)",
-            (snap["session_memory"],)
-        )
+        system_state = snap.get("system_state") or {"session_memory": snap.get("session_memory", "")}
+        for key, value in system_state.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO system_state (key,value) VALUES (?,?)",
+                (key, value or "")
+            )
 
         # ── map_rooms.state ──────────────────────────────────────
         for room_id_str, state in snap["map_rooms_state"].items():
@@ -2826,31 +2511,9 @@ def serve_campaign_asset(campaign_name: str, asset_name: str):
     return FileResponse(path)
 
 # ---------------------------------------------------------
-# 【重点新增】：托管静态 HTML 文件，实现即插即用
+# 【模块化】：静态前端路由必须最后挂载，避免捕获 API 路径
 # ---------------------------------------------------------
-@app.get("/")
-def serve_index():
-    # 当访问 http://localhost:8000 时，直接返回 index.html
-    path = os.path.join(WEB_DIR, "index.html")
-    if os.path.exists(path): return FileResponse(path)
-    return {"error": "未找到 web/index.html 文件，请确认 Web 静态页面已放在 web/ 目录下。"}
-
-@app.get("/{filename}")
-def serve_static(filename: str):
-    # 【安全】：防止路径穿越攻击（如 ../../etc/passwd.html）
-    # 1. 只允许纯文件名（不含目录分隔符）
-    # 2. 只允许 .html 后缀
-    # 3. 解析后的绝对路径必须仍在 BASE_DIR 内
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise fastapi.HTTPException(status_code=400, detail="非法文件名")
-    if not filename.endswith(".html"):
-        raise fastapi.HTTPException(status_code=404, detail="文件不存在")
-    path = os.path.normpath(os.path.join(WEB_DIR, filename))
-    if not path.startswith(os.path.normpath(WEB_DIR)):
-        raise fastapi.HTTPException(status_code=403, detail="禁止访问")
-    if not os.path.isfile(path):
-        raise fastapi.HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path)
+app.include_router(static_router)
 
 # ---------------------------------------------------------
 # 程序入口
