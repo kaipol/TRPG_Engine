@@ -24,7 +24,6 @@ from typing import Any
 
 import fastapi
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
 
 try:
     from .logger import get_logger
@@ -39,6 +38,13 @@ _log = get_logger("multiplayer")
 multiplayer_router = APIRouter(tags=["多人联机"])
 from . import ai_provider
 from .auth import account_player_id, get_account_by_token, require_account_from_request
+from .campaign_storage import (
+    campaign_asset_url,
+    resolve_campaign_folder_name,
+    sanitize_asset_name,
+    unique_path,
+)
+from .local_config import get_multiplayer_settings
 from .multiplayer_models import (
     AiEventRequest,
     CharacterClaimRequest,
@@ -53,9 +59,6 @@ from .multiplayer_models import (
     TokenUpsertRequest,
 )
 
-APP_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = APP_ROOT.parent
-
 try:
     from .trpgdice.component.roll.dice import get_roll_result, parse_dice_expression
 except Exception as exc:  # pragma: no cover - surfaced by /health and tests
@@ -69,17 +72,17 @@ _append_to_memory = None
 _chunk_text = None
 _get_embeddings = None
 _refresh_vector_cache = None
-_assets_dir = PROJECT_ROOT / "uploads" / "multiplayer"
 
 _ws_clients_by_room: dict[int, set[WebSocket]] = {}
 _ws_meta: dict[WebSocket, dict[str, Any]] = {}
 
-MAX_SCENARIO_UPLOAD_BYTES = int(os.environ.get("ZRIC_MAX_SCENARIO_UPLOAD_BYTES", str(8 * 1024 * 1024)))
-MAX_SCENARIO_CHARS = int(os.environ.get("ZRIC_MAX_SCENARIO_CHARS", "400000"))
-MAX_SCENARIO_CHUNKS = int(os.environ.get("ZRIC_MAX_SCENARIO_CHUNKS", "800"))
-MAX_SCENARIO_PDF_PAGES = int(os.environ.get("ZRIC_MAX_SCENARIO_PDF_PAGES", "80"))
-MAX_MAP_UPLOAD_BYTES = int(os.environ.get("ZRIC_MAX_MAP_UPLOAD_BYTES", str(12 * 1024 * 1024)))
-MAX_ROOM_PLAYERS = int(os.environ.get("ZRIC_MAX_ROOM_PLAYERS", "24"))
+_MULTIPLAYER_SETTINGS = get_multiplayer_settings()
+MAX_SCENARIO_UPLOAD_BYTES = int(_MULTIPLAYER_SETTINGS["max_scenario_upload_bytes"])
+MAX_SCENARIO_CHARS = int(_MULTIPLAYER_SETTINGS["max_scenario_chars"])
+MAX_SCENARIO_CHUNKS = int(_MULTIPLAYER_SETTINGS["max_scenario_chunks"])
+MAX_SCENARIO_PDF_PAGES = int(_MULTIPLAYER_SETTINGS["max_scenario_pdf_pages"])
+MAX_MAP_UPLOAD_BYTES = int(_MULTIPLAYER_SETTINGS["max_map_upload_bytes"])
+MAX_ROOM_PLAYERS = int(_MULTIPLAYER_SETTINGS["max_room_players"])
 BGM_TRACKS: dict[str, str] = {
     "午后田园": "https://soundimage.org/wp-content/uploads/2014/08/Netherplace.mp3",
     "黄昏渡口": "https://soundimage.org/wp-content/uploads/2018/01/Romantic-Lands-Beckon.mp3",
@@ -130,7 +133,6 @@ def configure_multiplayer(
     _chunk_text = fn_chunk_text
     _get_embeddings = fn_get_embeddings
     _refresh_vector_cache = fn_refresh_vector_cache
-    _assets_dir.mkdir(parents=True, exist_ok=True)
 
 
 def get_db_connection():
@@ -281,6 +283,7 @@ def init_multiplayer_tables():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_claims_room_player ON multiplayer_character_claims(room_id, player_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_checkpoints_room ON multiplayer_room_checkpoints(room_id, id)")
         conn.execute("UPDATE multiplayer_members SET role='player' WHERE role='gm'")
+        conn.execute("UPDATE multiplayer_members SET connected=0")
         for row in conn.execute("SELECT id FROM multiplayer_rooms").fetchall():
             _normalize_single_character_claims(conn, int(row["id"]))
         conn.execute(
@@ -397,6 +400,29 @@ def _room_by_code(conn, room_code: str):
     return row
 
 
+def _room_campaign_folder(row) -> tuple[str, str]:
+    room = dict(row)
+    settings = _load_json(room.get("settings", "{}"), {})
+    candidates = [
+        str(settings.get("campaign_path") or "").strip(),
+        str(room.get("campaign_path") or "").strip(),
+    ]
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        normalized = raw_path.replace("\\", "/").strip("/")
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) == 2 and parts[0] == "campaigns":
+            campaign_name = parts[1]
+        elif len(parts) == 1:
+            campaign_name = parts[0]
+        else:
+            raise fastapi.HTTPException(status_code=400, detail="房间绑定的剧本路径无效")
+        name, folder, _campaign_json = resolve_campaign_folder_name(campaign_name)
+        return name, folder
+    raise fastapi.HTTPException(status_code=400, detail="房间未绑定剧本，无法保存地图到对应剧本目录")
+
+
 def _serialize_room(row) -> dict[str, Any]:
     data = dict(row)
     data["settings"] = _load_json(data.get("settings", "{}"), {})
@@ -454,7 +480,19 @@ def _account_player_id_from_request(request: Request) -> str:
 
 def _joined_player_count(conn, room_id: int) -> int:
     rows = conn.execute(
-        "SELECT player_id FROM multiplayer_members WHERE room_id=?",
+        """
+        SELECT m.player_id
+        FROM multiplayer_members m
+        WHERE m.room_id=?
+          AND (
+            m.connected=1
+            OR EXISTS (
+                SELECT 1
+                FROM multiplayer_character_claims c
+                WHERE c.room_id=m.room_id AND c.player_id=m.player_id
+            )
+          )
+        """,
         (room_id,),
     ).fetchall()
     return len({str(row["player_id"] or "").strip() for row in rows if str(row["player_id"] or "").strip()})
@@ -1783,16 +1821,6 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
     }
 
 
-def _safe_asset_path(asset_path: str) -> Path:
-    root = _assets_dir.resolve()
-    target = (root / asset_path).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError:
-        raise fastapi.HTTPException(status_code=403, detail="禁止访问")
-    return target
-
-
 async def _extract_upload_text(file: UploadFile) -> tuple[str, str]:
     filename = file.filename or "scenario.txt"
     raw = await file.read()
@@ -1887,17 +1915,27 @@ async def patch_room(room_code: str, req: RoomPatchRequest, request: Request):
         if req.settings:
             settings.update(req.settings)
         settings = _normalize_room_settings(conn, settings)
+        campaign_path = str(settings.get("campaign_path") or "").strip()[:240] or None
         conn.execute(
             """
             UPDATE multiplayer_rooms
             SET name=COALESCE(?, name),
+                campaign_path=COALESCE(?, campaign_path),
                 current_scene_id=COALESCE(?, current_scene_id),
                 current_room_id=COALESCE(?, current_room_id),
                 settings=?,
                 updated_at=?
             WHERE id=?
             """,
-            (req.name, req.current_scene_id, req.current_room_id, _dump_json(settings), _now(), room["id"]),
+            (
+                req.name,
+                campaign_path,
+                req.current_scene_id,
+                req.current_room_id,
+                _dump_json(settings),
+                _now(),
+                room["id"],
+            ),
         )
         conn.commit()
         snap = _snapshot(conn, room["id"])
@@ -2442,16 +2480,21 @@ async def upload_map_background(room_code: str, request: Request, file: UploadFi
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
         _require_gm(room, _room_token_from_request(request))
-        room_dir = _assets_dir / "rooms" / room["code"]
-        room_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = f"map_{int(time.time())}_{secrets.token_hex(3)}{suffix}"
-        target = room_dir / safe_name
+        campaign_name, campaign_folder = _room_campaign_folder(room)
+        safe_room_code = re.sub(r"[^A-Za-z0-9_-]", "_", str(room["code"]))
+        safe_name = sanitize_asset_name(
+            f"mp_map_{safe_room_code}_{int(time.time())}_{secrets.token_hex(3)}{suffix}",
+            default_ext=suffix,
+        )
+        target = unique_path(campaign_folder, safe_name)
         raw = await file.read()
-        if len(raw) > 12 * 1024 * 1024:
-            raise fastapi.HTTPException(status_code=400, detail="地图图片不能超过 12MB")
-        target.write_bytes(raw)
-        rel = f"rooms/{room['code']}/{safe_name}"
-        url = f"/api/multiplayer/assets/{rel}"
+        if len(raw) > MAX_MAP_UPLOAD_BYTES:
+            max_mb = MAX_MAP_UPLOAD_BYTES // (1024 * 1024)
+            raise fastapi.HTTPException(status_code=400, detail=f"地图图片不能超过 {max_mb}MB")
+        with open(target, "wb") as f:
+            f.write(raw)
+        asset_name = os.path.basename(target)
+        url = campaign_asset_url(campaign_name, asset_name)
         conn.execute(
             "UPDATE multiplayer_rooms SET map_background_url=?, updated_at=? WHERE id=?",
             (url, _now(), room["id"]),
@@ -2460,14 +2503,6 @@ async def upload_map_background(room_code: str, request: Request, file: UploadFi
         snap = _snapshot(conn, room["id"])
     await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
     return {"status": "success", "url": url, **snap}
-
-
-@multiplayer_router.get("/api/multiplayer/assets/{asset_path:path}")
-def get_multiplayer_asset(asset_path: str):
-    path = _safe_asset_path(asset_path)
-    if not path.is_file():
-        raise fastapi.HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path)
 
 
 @multiplayer_router.websocket("/ws/rooms/{room_code}")

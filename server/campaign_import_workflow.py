@@ -64,6 +64,7 @@ class CampaignImportWorkflow:
         ai_convert_campaign: Callable[[str, str, list[str]], tuple[dict, dict, list[str]]],
         logger,
         max_jobs: int = 40,
+        max_running_seconds: int = 15 * 60,
     ) -> None:
         self.campaigns_dir = campaigns_dir
         self.sanitize_campaign_name = sanitize_campaign_name
@@ -77,6 +78,7 @@ class CampaignImportWorkflow:
         self.ai_convert_campaign = ai_convert_campaign
         self.logger = logger
         self.max_jobs = max_jobs
+        self.max_running_seconds = max_running_seconds
         self._jobs: dict[str, ImportJob] = {}
         self._lock = threading.Lock()
 
@@ -105,6 +107,13 @@ class CampaignImportWorkflow:
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
+            if job and job.status in {"queued", "running"} and self._job_is_stale(job):
+                job.status = "error"
+                job.progress = 100
+                job.step = "error"
+                job.message = "剧本解析超时"
+                job.error = "剧本解析长时间无进展，已停止等待；请检查 PDF 是否为复杂扫描件，或降低导入文件复杂度后重试。"
+                job.updated_at = datetime.now().isoformat(timespec="seconds")
             return job.to_dict() if job else None
 
     def _update(
@@ -121,6 +130,8 @@ class CampaignImportWorkflow:
     ) -> None:
         with self._lock:
             job = self._jobs[job_id]
+            if job.status in {"success", "error"} and status != job.status:
+                return
             if status is not None:
                 job.status = status
             if progress is not None:
@@ -267,6 +278,13 @@ class CampaignImportWorkflow:
             return os.path.commonpath([root, target]) == root and target != root
         except ValueError:
             return False
+
+    def _job_is_stale(self, job: ImportJob) -> bool:
+        try:
+            updated = datetime.fromisoformat(job.updated_at)
+        except ValueError:
+            updated = datetime.now()
+        return (datetime.now() - updated).total_seconds() > self.max_running_seconds
 
     def _prune_jobs(self) -> None:
         with self._lock:

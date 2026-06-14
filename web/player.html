@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>投屏端 · RPG 跑团</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/assets/tailwind-lite.css">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&display=swap');
 
@@ -456,9 +456,9 @@
         </div>
         <div class="offline-sub" style="max-width:400px;text-align:center;line-height:2;margin-top:.5rem">
             请确保 NEXUS 引擎已启动，通过
-            <a href="http://localhost:8000/player.html"
+            <a :href="`${API_BASE_URL}/player.html`"
                style="color:rgba(175,142,55,0.7);text-decoration:underline">
-                http://localhost:8000/player.html
+                {{ API_BASE_URL }}/player.html
             </a>
             访问此页面
         </div>
@@ -557,7 +557,7 @@
 <script>
 const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : "http://127.0.0.1:8000";
 const WS_URL = API_BASE_URL.replace(/^http/, 'ws') + "/ws/player";
 const FALLBACK_POLL_INTERVAL = 5000;
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
-import os
 from typing import Any
 
 import fastapi
@@ -14,6 +13,7 @@ from pydantic import BaseModel
 from . import ai_cache, ai_provider
 from .agent import configure_agent as _configure_agent
 from .agent import reset_active_model
+from .local_config import get_admin_token
 
 
 config_router = APIRouter(tags=["Config"])
@@ -134,7 +134,7 @@ def _is_loopback_client(request: Request) -> bool:
 
 
 def _require_admin_config_access(request: Request):
-    admin_token = os.environ.get("ZRIC_ADMIN_TOKEN", "").strip()
+    admin_token = get_admin_token()
     provided = request.headers.get("X-Admin-Token", "").strip()
     auth = request.headers.get("Authorization", "").strip()
     if auth.lower().startswith("bearer "):
@@ -146,7 +146,10 @@ def _require_admin_config_access(request: Request):
     if not _is_loopback_client(request):
         raise fastapi.HTTPException(
             status_code=403,
-            detail="未配置 ZRIC_ADMIN_TOKEN 时，仅允许本机回环地址更新 API Key",
+            detail=(
+                "未配置 config.json 的 security.admin_token 时，仅允许本机回环地址更新 API Key。"
+                "远程部署请设置 security.admin_token，并在前端配置面板填写管理员令牌。"
+            ),
         )
 
 

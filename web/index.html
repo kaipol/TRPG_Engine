@@ -4,33 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Z.R.I.C — TRPG Engine</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
 
-<script>
-tailwind.config = {
-    theme: {
-        extend: {
-            fontFamily: {
-                serif: ['"Noto Serif SC"', 'serif'],
-                mono: ['"JetBrains Mono"', 'monospace'],
-                sans: ['"Noto Sans SC"', 'sans-serif'],
-            },
-            colors: {
-                zinc: { 925: '#111318', 975: '#090b10' },
-                accent: { DEFAULT: '#e8b44b', dim: '#9b7830', muted: 'rgba(232,180,75,0.08)', border: 'rgba(232,180,75,0.2)' },
-                danger: { DEFAULT: '#e05c5c', dim: '#8b3a3a', muted: 'rgba(224,92,92,0.08)', border: 'rgba(224,92,92,0.2)' },
-                ok:     { DEFAULT: '#4fc98a', dim: '#2d6e4e', muted: 'rgba(79,201,138,0.08)', border: 'rgba(79,201,138,0.2)' },
-                info:   { DEFAULT: '#5b9cf5', dim: '#2d4f8a', muted: 'rgba(91,156,245,0.08)', border: 'rgba(91,156,245,0.2)' },
-                ink:    { DEFAULT: '#c9cdd6', dim: '#6b7280', faint: '#374151', deep: '#1f2532' },
-            }
-        }
-    }
-}
-</script>
-
+<link rel="stylesheet" href="/assets/tailwind-lite.css">
 <link rel="stylesheet" href="/assets/index.css">
 </head>
 
@@ -277,8 +255,7 @@ tailwind.config = {
      OpenAI 兼容供应商配置模态
 ══════════════════════════════════════════════════════════════ -->
 <div v-if="showApiKeyPanel"
-     style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)"
-     @click.self="showApiKeyPanel=false">
+     style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)">
     <div class="panel" style="width:min(920px,94vw);border-radius:12px;box-shadow:0 32px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;max-height:90vh">
         <div style="padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
             <div style="display:flex;align-items:center;gap:10px">
@@ -322,6 +299,17 @@ tailwind.config = {
             </aside>
 
             <div style="padding:18px 22px;overflow-y:auto;display:flex;flex-direction:column;gap:14px">
+                <div>
+                    <label class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+                        管理员令牌
+                        <span style="font-size:10px;color:#6b7280">远程部署并配置 security.admin_token 时填写</span>
+                    </label>
+                    <input v-model.trim="apiAdminToken" type="password" class="inp inp-mono"
+                           placeholder="与服务器 config.json 的 security.admin_token 一致；本机回环访问可留空"
+                           autocomplete="off"
+                           style="font-size:12px">
+                </div>
+
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
                     <div>
                         <label class="tag" style="display:block;margin-bottom:7px">供应商名称</label>
@@ -1600,8 +1588,8 @@ tailwind.config = {
                     {{ appState==='menu' ? '载入剧本并创建房间' : '创建房间' }}
                 </button>
                 <div style="display:flex;gap:8px">
-                    <input v-model.trim="multiplayerJoinCode" @keyup.enter="joinMultiplayerRoom" class="inp inp-mono" placeholder="输入房间码" style="text-transform:uppercase">
-                    <button @click="joinMultiplayerRoom" :disabled="!multiplayerAuthAccount || multiplayerBusy||!multiplayerJoinCode.trim()" class="btn btn-ghost" style="flex-shrink:0">
+                    <input v-model.trim="multiplayerJoinCode" @keyup.enter="enterMultiplayerRoomByCode()" class="inp inp-mono" placeholder="输入房间码" style="text-transform:uppercase">
+                    <button @click="enterMultiplayerRoomByCode()" :disabled="!multiplayerAuthAccount || multiplayerBusy||!multiplayerJoinCode.trim()" class="btn btn-ghost" style="flex-shrink:0">
                         加入
                     </button>
                 </div>

@@ -4,7 +4,7 @@
 - Status: Active
 - Last refreshed: 2026-06-09
 - Primary product surfaces: Player table, GM console, top-bar dossier viewer, launch/config screen, multiplayer room flow, campaign loader.
-- Evidence reviewed: README.md, web/index.html, web/multiplayer.html, docs/multiplayer_integration.md, server/main.py, server/rag.py, server/multiplayer.py.
+- Evidence reviewed: README.md, web/index.html, web/multiplayer.html, server/main.py, server/rag.py, server/multiplayer.py.
 
 ## Brand
 - Personality: Quiet command center for live TRPG play; technical, focused, and a little arcane.

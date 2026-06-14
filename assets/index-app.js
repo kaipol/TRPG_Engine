@@ -1,5 +1,7 @@
 const { createApp, ref, onMounted, watch, computed, nextTick } = Vue;
 const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : "http://localhost:8000";
+const CAMPAIGN_IMPORT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS = 3 * 60 * 1000;
 
 createApp({
     setup() {
@@ -49,6 +51,7 @@ createApp({
 
         // ── API 供应商配置 ──
         const showApiKeyPanel = ref(false);
+        const apiAdminToken = ref('');
         const openApiKeyPanel = () => {
             showGameSettingsModal.value = false;
             showApiKeyPanel.value = true;
@@ -109,6 +112,13 @@ createApp({
             saved_response_chars: 0,
         });
         const isSavingAiCache = ref(false);
+
+        const configRequestHeaders = () => {
+            const headers = { 'Content-Type': 'application/json' };
+            const adminToken = apiAdminToken.value.trim();
+            if (adminToken) headers['X-Admin-Token'] = adminToken;
+            return headers;
+        };
 
         const applyTokenPolicyPayload = (payload) => {
             const data = payload?.token_policy || payload;
@@ -244,7 +254,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/token-policy`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: configRequestHeaders(),
                     body: JSON.stringify({ mode: targetMode }),
                 });
                 const d = await r.json();
@@ -280,7 +290,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/ai-cache`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: configRequestHeaders(),
                     body: JSON.stringify({ enabled }),
                 });
                 const d = await r.json();
@@ -306,7 +316,10 @@ createApp({
             isSavingAiCache.value = true;
             apiKeySaveMsg.value = '';
             try {
-                const r = await fetch(`${API_BASE_URL}/api/config/ai-cache/clear`, { method: 'POST' });
+                const r = await fetch(`${API_BASE_URL}/api/config/ai-cache/clear`, {
+                    method: 'POST',
+                    headers: configRequestHeaders(),
+                });
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyAiCachePayload(d);
@@ -335,7 +348,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/switch`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: configRequestHeaders(),
                     body: JSON.stringify({ provider_id: providerId })
                 });
                 const d = await r.json();
@@ -357,7 +370,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/delete`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: configRequestHeaders(),
                     body: JSON.stringify({ provider_id: providerId })
                 });
                 const d = await r.json();
@@ -457,7 +470,7 @@ createApp({
         const requestConfigModels = async (capability) => {
             const r = await fetch(`${API_BASE_URL}/api/config/models`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: configRequestHeaders(),
                 body: JSON.stringify(configModelRequestBody(capability)),
             });
             return await r.json();
@@ -578,7 +591,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/keys`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: configRequestHeaders(),
                     body: JSON.stringify({
                         provider_id: apiKeyInputs.value.providerId || null,
                         provider_name: apiKeyInputs.value.providerName || `Provider ${apiProviders.value.length + 1}`,
@@ -969,10 +982,14 @@ createApp({
             return Math.max(0, multiplayerRoomMaxPlayers.value - multiplayerJoinedPlayerCount.value);
         });
 
+        const multiplayerTableUrl = (code) => {
+            if (!code) return '';
+            const origin = window.location.protocol.startsWith('http') ? window.location.origin : API_BASE_URL;
+            return `${origin}/multiplayer.html?room=${encodeURIComponent(code)}`;
+        };
         const multiplayerInviteUrl = computed(() => {
             if (!multiplayerRoom.value?.code) return '';
-            const origin = window.location.protocol.startsWith('http') ? window.location.origin : API_BASE_URL;
-            return `${origin}/multiplayer.html?room=${encodeURIComponent(multiplayerRoom.value.code)}`;
+            return multiplayerTableUrl(multiplayerRoom.value.code);
         });
 
         const applyMultiplayerAuthSession = (data) => {
@@ -1223,7 +1240,6 @@ createApp({
                     saveMultiplayerLocalState();
                 }
                 applyMultiplayerSnapshot(data);
-                await joinMultiplayerRoom(data.room.code, 'player');
                 await syncMultiplayerRoomState();
                 multiplayerStatusMsg.value = `房间 ${data.room.code} 已创建`;
             } catch(e) {
@@ -1233,8 +1249,33 @@ createApp({
             }
         };
 
+        const enterMultiplayerRoomByCode = async (codeArg = '') => {
+            const explicitCode = codeArg && typeof codeArg === 'object' && 'type' in codeArg ? '' : codeArg;
+            const code = String(explicitCode || multiplayerJoinCode.value || '').trim().toUpperCase();
+            if (!code) return;
+            if (!requireMultiplayerAuth()) return;
+            multiplayerBusy.value = true;
+            multiplayerError.value = '';
+            multiplayerStatusMsg.value = '';
+            try {
+                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(code)}`, {
+                    method: 'GET',
+                });
+                applyMultiplayerSnapshot(data);
+                const roomCode = data.room?.code || code;
+                multiplayerJoinCode.value = roomCode;
+                multiplayerStatusMsg.value = `正在进入房间 ${roomCode}`;
+                window.location.href = multiplayerTableUrl(roomCode);
+            } catch(e) {
+                multiplayerError.value = e.message || '加入房间失败';
+            } finally {
+                multiplayerBusy.value = false;
+            }
+        };
+
         const joinMultiplayerRoom = async (codeArg = '', roleOverride = '') => {
-            const code = String(codeArg || multiplayerJoinCode.value || '').trim().toUpperCase();
+            const explicitCode = codeArg && typeof codeArg === 'object' && 'type' in codeArg ? '' : codeArg;
+            const code = String(explicitCode || multiplayerJoinCode.value || '').trim().toUpperCase();
             if (!code) return;
             if (!requireMultiplayerAuth()) return;
             multiplayerBusy.value = true;
@@ -1272,7 +1313,6 @@ createApp({
             multiplayerError.value = '';
             multiplayerStatusMsg.value = '';
             showMultiplayerModal.value = true;
-            if (multiplayerRoom.value?.code && !multiplayerWsConnected.value) connectMultiplayerWs();
         };
         const openMenuMultiplayer = () => {
             multiplayerRoomName.value = selectedCampaignInfo.value
@@ -2067,12 +2107,25 @@ createApp({
             campaignImportProgressMessage.value = job.message || campaignImportProgressMessage.value;
         };
         const pollCampaignImportJob = async (jobId) => {
+            const startedAt = Date.now();
+            let lastProgressKey = '';
+            let lastProgressAt = startedAt;
             while (campaignImportBusy.value && jobId) {
+                if (Date.now() - startedAt > CAMPAIGN_IMPORT_POLL_TIMEOUT_MS) {
+                    throw new Error('剧本解析等待超时；请检查服务器日志，或在 config.json 中设置 campaign_import.use_ai_conversion=false 后重试');
+                }
                 const r = await fetch(`${API_BASE_URL}/api/campaigns/import/${encodeURIComponent(jobId)}`, { headers: accountHeaders() });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok || d.status !== 'success') throw new Error(d.detail || d.message || '读取解析进度失败');
                 const job = d.job || {};
                 syncCampaignImportJob(job);
+                const progressKey = `${job.status || ''}|${job.step || ''}|${job.progress || 0}|${job.message || ''}`;
+                if (progressKey !== lastProgressKey) {
+                    lastProgressKey = progressKey;
+                    lastProgressAt = Date.now();
+                } else if (Date.now() - lastProgressAt > CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS) {
+                    throw new Error(`剧本解析在「${job.message || job.step || '当前步骤'}」停留过久；请换 DOCX/TXT，或安装 PyMuPDF 并配置支持图片输入的 Chat 模型后重试扫描版 PDF`);
+                }
                 if (job.status === 'success') return job;
                 if (job.status === 'error') throw new Error(job.error || '剧本解析失败');
                 await sleep(700);
@@ -4024,7 +4077,7 @@ createApp({
             campaignImportPickAssets, importCampaign,
             // AI 模型
             aiModels, aiModelSearch, activeAiModel, aiModelDraft, openAiModelDropdownState, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, openAiModelDropdown, toggleAiModelDropdown, filteredAiModels, selectAiModel, selectFirstFilteredAiModel, applyAiModelDraft, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
-            showApiKeyPanel, openApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
+            showApiKeyPanel, openApiKeyPanel, apiAdminToken, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             tokenPolicy, isSavingTokenPolicy, activeTokenPolicyMode, tokenPolicySummary, setTokenPolicyMode,
             aiCache, aiCacheSummary, isSavingAiCache, fetchAiCacheStatus, setAiCacheEnabled, clearAiCache,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
@@ -4038,7 +4091,7 @@ createApp({
             multiplayerMaxPlayers, multiplayerPlayableCharacterLimit, multiplayerMaxPlayersUpper, multiplayerRoomMaxPlayers,
             multiplayerClaimedPlayerCount, multiplayerRoomSeatsRemaining, clampMultiplayerMaxPlayers,
             multiplayerAuthAccount, multiplayerAuthForm, multiplayerAuthBusy, multiplayerAuthMsg, submitMultiplayerAuth, logoutMultiplayerAuth,
-            openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, copyMultiplayerInvite, openMultiplayerTable,
+            openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, enterMultiplayerRoomByCode, copyMultiplayerInvite, openMultiplayerTable,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,
             showTlMemoryModal, tlMemoryTarget, tlMemoryContent,

@@ -287,7 +287,8 @@ def _call_ai(system_prompt: str, user_prompt: str,
              json_mode: bool = True,
              model_override: str | None = None,
              apply_token_policy: bool = True,
-             cacheable: bool = True) -> str:
+             cacheable: bool = True,
+             timeout: float = 120) -> str:
     """
     统一调用 AI 模型，返回完整文本。
     model_override：请求级模型覆盖（优先于服务器全局默认值）。
@@ -297,6 +298,7 @@ def _call_ai(system_prompt: str, user_prompt: str,
         system_prompt, user_prompt, temperature, max_tokens,
         json_mode, model, apply_token_policy=apply_token_policy,
         cacheable=cacheable,
+        timeout=timeout,
     )
 
 
@@ -305,7 +307,8 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
                             json_mode: bool = True,
                             model_id: str = "",
                             apply_token_policy: bool = True,
-                            cacheable: bool = True) -> str:
+                            cacheable: bool = True,
+                            timeout: float = 120) -> str:
     """调用当前 OpenAI 兼容端点。"""
     cache_metadata = None
     if cacheable:
@@ -335,7 +338,7 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
-            timeout=120,
+            timeout=timeout,
             apply_token_policy=apply_token_policy,
         )
         result = response.choices[0].message.content

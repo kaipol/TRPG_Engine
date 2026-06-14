@@ -162,6 +162,13 @@ def cleanup_managed_campaign_folder(folder_path: str) -> None:
         path = os.path.join(folder_path, filename)
         if os.path.isfile(path):
             os.remove(path)
+    if os.path.isdir(folder_path):
+        for filename in os.listdir(folder_path):
+            if not filename.startswith("mp_map_"):
+                continue
+            path = os.path.join(folder_path, filename)
+            if os.path.isfile(path):
+                os.remove(path)
     for dirname in ("assets", "knowledge"):
         path = os.path.join(folder_path, dirname)
         if os.path.isdir(path):
@@ -204,13 +211,41 @@ def resolve_campaign_asset(campaign_name: str, asset_name: str) -> str:
     _base_dir, campaigns_dir, _legacy_campaign_validator = _require_configured()
     if not campaign_name or "/" in campaign_name or "\\" in campaign_name:
         raise fastapi.HTTPException(status_code=400, detail="非法剧本名")
-    root = os.path.realpath(os.path.join(campaigns_dir, campaign_name, "assets"))
-    target = os.path.realpath(os.path.join(root, asset_name))
+    campaign_root = os.path.realpath(os.path.join(campaigns_dir, campaign_name))
     try:
-        if os.path.commonpath([root, target]) != root:
+        if os.path.commonpath([campaigns_dir, campaign_root]) != campaigns_dir:
             raise ValueError
     except ValueError:
         raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
-    if not os.path.isfile(target):
-        raise fastapi.HTTPException(status_code=404, detail="资源不存在")
-    return target
+
+    clean_asset_name = urllib.parse.unquote(asset_name or "").strip()
+    if (
+        not clean_asset_name
+        or os.path.isabs(clean_asset_name)
+        or "\x00" in clean_asset_name
+        or "/" in clean_asset_name
+        or "\\" in clean_asset_name
+        or clean_asset_name in {".", ".."}
+    ):
+        raise fastapi.HTTPException(status_code=400, detail="非法资源名")
+
+    direct_target = os.path.realpath(os.path.join(campaign_root, clean_asset_name))
+    try:
+        if os.path.commonpath([campaign_root, direct_target]) != campaign_root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
+    if os.path.isfile(direct_target):
+        return direct_target
+
+    legacy_assets_root = os.path.realpath(os.path.join(campaign_root, "assets"))
+    legacy_target = os.path.realpath(os.path.join(legacy_assets_root, clean_asset_name))
+    try:
+        if os.path.commonpath([legacy_assets_root, legacy_target]) != legacy_assets_root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
+    if os.path.isfile(legacy_target):
+        return legacy_target
+
+    raise fastapi.HTTPException(status_code=404, detail="资源不存在")

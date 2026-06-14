@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import io
 import json
+import base64
+import multiprocessing
 import os
+import queue
 import re
+import shutil
+import tempfile
 import zipfile
+from typing import Any
 
 import fastapi
 import json_repair
 
 from . import ai_provider
 from .campaign_storage import sanitize_asset_name, unique_path
+from .local_config import get_campaign_import_settings
 
 
 def decode_text_bytes(raw: bytes) -> str:
@@ -72,33 +79,217 @@ def extract_docx_images(raw: bytes, assets_dir: str) -> list[str]:
     return saved
 
 
+def _extract_pdf_in_process(
+    raw: bytes,
+    output_dir: str,
+    max_pages: int,
+    image_max_pages: int,
+    max_images: int,
+) -> tuple[str, list[str], list[str]]:
+    import pypdf
+
+    warnings: list[str] = []
+    saved: list[str] = []
+    reader = pypdf.PdfReader(io.BytesIO(raw), strict=False)
+    total_pages = len(reader.pages)
+    pages_to_read = min(total_pages, max_pages)
+    if total_pages > pages_to_read:
+        warnings.append(f"PDF 共 {total_pages} 页，仅提取前 {pages_to_read} 页；可在 config.json 调整 campaign_import.pdf_max_pages。")
+
+    text_parts: list[str] = []
+    for page_idx in range(pages_to_read):
+        try:
+            text_parts.append(reader.pages[page_idx].extract_text() or "")
+        except Exception as exc:
+            warnings.append(f"PDF 第 {page_idx + 1} 页文本提取失败：{type(exc).__name__}")
+
+    image_pages = min(pages_to_read, image_max_pages)
+    if image_pages < pages_to_read:
+        warnings.append(f"PDF 内嵌图片仅扫描前 {image_pages} 页；可在 config.json 调整 campaign_import.pdf_image_max_pages。")
+    for page_idx in range(image_pages):
+        if len(saved) >= max_images:
+            warnings.append(f"PDF 内嵌图片已达到 {max_images} 个上限；可在 config.json 调整 campaign_import.pdf_max_images。")
+            break
+        try:
+            images = getattr(reader.pages[page_idx], "images", []) or []
+        except Exception as exc:
+            warnings.append(f"PDF 第 {page_idx + 1} 页图片提取失败：{type(exc).__name__}")
+            continue
+        for img_idx, image in enumerate(images, start=1):
+            if len(saved) >= max_images:
+                break
+            data = getattr(image, "data", None)
+            if not data:
+                continue
+            raw_name = getattr(image, "name", "") or f"pdf_p{page_idx + 1}_{img_idx}.png"
+            safe = sanitize_asset_name(raw_name, ".png")
+            target = unique_path(output_dir, safe)
+            with open(target, "wb") as f:
+                f.write(data)
+            saved.append(os.path.basename(target))
+
+    return "\n".join(text_parts), saved, warnings
+
+
+def _pdf_extract_worker(
+    raw: bytes,
+    output_dir: str,
+    max_pages: int,
+    image_max_pages: int,
+    max_images: int,
+    result_queue: Any,
+) -> None:
+    try:
+        text, saved, warnings = _extract_pdf_in_process(raw, output_dir, max_pages, image_max_pages, max_images)
+        result_queue.put({"ok": True, "text": text, "saved": saved, "warnings": warnings})
+    except BaseException as exc:
+        result_queue.put({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "message": str(exc) or type(exc).__name__,
+        })
+
+
+def _run_pdf_extract_with_timeout(
+    raw: bytes,
+    output_dir: str,
+    *,
+    timeout_seconds: float,
+    max_pages: int,
+    image_max_pages: int,
+    max_images: int,
+) -> tuple[str, list[str], list[str]]:
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(
+        target=_pdf_extract_worker,
+        args=(raw, output_dir, max_pages, image_max_pages, max_images, result_queue),
+    )
+    process.daemon = True
+    process.start()
+    process.join(timeout_seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join(3)
+        if process.is_alive():
+            process.kill()
+            process.join(3)
+        raise TimeoutError(f"PDF 本地解析超过 {timeout_seconds:g} 秒，已停止本地解析")
+
+    try:
+        result = result_queue.get(timeout=2)
+    except queue.Empty as exc:
+        raise RuntimeError(f"PDF 解析进程无返回，退出码 {process.exitcode}") from exc
+    finally:
+        result_queue.close()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"{result.get('error_type')}: {result.get('message')}")
+    return str(result.get("text") or ""), list(result.get("saved") or []), list(result.get("warnings") or [])
+
+
+def _extract_pdf_text_with_multimodal(raw: bytes) -> tuple[str, list[str]]:
+    warnings: list[str] = []
+    settings = get_campaign_import_settings()
+    page_limit = int(settings.get("pdf_multimodal_pages") or 0)
+    if page_limit <= 0:
+        return "", warnings
+    if not settings["use_ai_conversion"] or not ai_provider.is_configured():
+        warnings.append("PDF 未提取到文本；未配置 OpenAI 兼容 Chat 模型，已跳过多模态读取。")
+        return "", warnings
+
+    try:
+        import fitz
+    except ImportError:
+        warnings.append("PDF 未提取到文本；如需扫描版 PDF 多模态读取，请安装 PyMuPDF 并选择支持图片输入的 Chat 模型。")
+        return "", warnings
+
+    try:
+        doc = fitz.open(stream=raw, filetype="pdf")
+        pages = min(len(doc), page_limit)
+        if pages <= 0:
+            return "", warnings
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": (
+                "请读取这些 PDF 页面截图中的中文/英文剧本文字，尽量保持章节、人物、地点、线索和选项结构。"
+                "只输出提取到的正文，不要解释。"
+            ),
+        }]
+        for page_idx in range(pages):
+            pix = doc.load_page(page_idx).get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+            png = pix.tobytes("png")
+            b64 = base64.b64encode(png).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+            })
+        response = ai_provider.chat_completion(
+            [
+                {"role": "system", "content": "你是高保真 OCR 与文档转写助手。"},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.0,
+            max_tokens=5000,
+            timeout=float(settings["ai_timeout_seconds"]),
+            apply_token_policy=False,
+        )
+        text = response.choices[0].message.content or ""
+        if text.strip():
+            warnings.append(f"本地 PDF 未提取到文本，已使用多模态 Chat 模型读取前 {pages} 页。")
+        return text, warnings
+    except Exception as exc:
+        warnings.append(f"多模态 PDF 读取失败，已继续生成保底剧本：{type(exc).__name__}: {exc}")
+        return "", warnings
+
+
 def extract_pdf(raw: bytes, assets_dir: str) -> tuple[str, list[str], list[str]]:
-    warnings = []
-    saved = []
+    warnings: list[str] = []
+    saved: list[str] = []
     try:
         import pypdf
     except ImportError as exc:
         raise fastapi.HTTPException(status_code=500, detail="PDF 解析需要安装 pypdf") from exc
 
+    _ = pypdf
+    settings = get_campaign_import_settings()
+    temp_dir = tempfile.mkdtemp(prefix=".pdf_extract_", dir=assets_dir)
     try:
-        reader = pypdf.PdfReader(io.BytesIO(raw))
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        for page_idx, page in enumerate(reader.pages, start=1):
-            for img_idx, image in enumerate(getattr(page, "images", []) or [], start=1):
-                data = getattr(image, "data", None)
-                if not data:
-                    continue
-                raw_name = getattr(image, "name", "") or f"pdf_p{page_idx}_{img_idx}.png"
-                safe = sanitize_asset_name(raw_name, ".png")
-                target = unique_path(assets_dir, safe)
-                with open(target, "wb") as f:
-                    f.write(data)
-                saved.append(os.path.basename(target))
-    except Exception as exc:
-        raise fastapi.HTTPException(status_code=400, detail=f"PDF 解析失败：{exc}") from exc
+        try:
+            text, temp_saved, pdf_warnings = _run_pdf_extract_with_timeout(
+                raw,
+                temp_dir,
+                timeout_seconds=float(settings["pdf_timeout_seconds"]),
+                max_pages=int(settings["pdf_max_pages"]),
+                image_max_pages=int(settings["pdf_image_max_pages"]),
+                max_images=int(settings["pdf_max_images"]),
+            )
+            warnings.extend(pdf_warnings)
+        except TimeoutError as exc:
+            text = ""
+            temp_saved = []
+            warnings.append(f"{exc}；已继续生成保底剧本。")
+        except Exception as exc:
+            text = ""
+            temp_saved = []
+            warnings.append(f"PDF 本地解析失败，已继续生成保底剧本：{exc}")
+
+        for filename in temp_saved:
+            source = os.path.join(temp_dir, filename)
+            if not os.path.isfile(source):
+                continue
+            target = unique_path(assets_dir, sanitize_asset_name(filename, ".png"))
+            shutil.move(source, target)
+            saved.append(os.path.basename(target))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     if not text.strip():
-        warnings.append("PDF 未提取到文本；扫描版 PDF 暂不支持 OCR，已生成空白保底剧本。")
+        multimodal_text, multimodal_warnings = _extract_pdf_text_with_multimodal(raw)
+        warnings.extend(multimodal_warnings)
+        text = multimodal_text.strip()
+    if not text.strip():
+        warnings.append("PDF 未提取到文本；已生成空白保底剧本。建议另存为 DOCX/TXT，或配置支持图片输入的 Chat 模型并安装 PyMuPDF 后重试扫描版 PDF。")
     return text, saved, warnings
 
 
@@ -198,6 +389,10 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
 
 def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[dict, dict, list[str]]:
     warnings = []
+    import_settings = get_campaign_import_settings()
+    if not import_settings["use_ai_conversion"]:
+        warnings.append("已跳过 AI 剧本转换，生成保底剧本。")
+        return fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
     if not ai_provider.is_configured():
         warnings.append("OpenAI 兼容端点尚未配置，已生成保底剧本。")
         return fallback_campaign(title, text, image_urls[0] if image_urls else ""), {"map_rooms": [], "map_edges": []}, warnings
@@ -239,6 +434,7 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
             temperature=0.35, max_tokens=6000, json_mode=True,
             apply_token_policy=False,
             cacheable=False,
+            timeout=float(import_settings["ai_timeout_seconds"]),
         )
         if raw.startswith("```"):
             raw = raw.split("```")[1]

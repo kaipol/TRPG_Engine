@@ -25,7 +25,6 @@ __pycache__/
 
 # Application runtime data
 .runtime/
-uploads/
 exports/
 **/exports/
 *.db
@@ -39,6 +38,7 @@ Z.R.I.C.log*
 .unified-server.*.log
 battle_report/
 temp_*.png
+campaigns/*/mp_map_*
 
 # Frontend/tooling output
 node_modules/
@@ -53,3 +53,6 @@ build/
 .omx/
 plan/
 old_version/
+
+# Development-only smoke and maintenance scripts
+scripts/

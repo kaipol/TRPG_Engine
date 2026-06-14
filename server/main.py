@@ -29,7 +29,14 @@ import webbrowser
 import threading
 import math
 from . import ai_provider
-from .local_config import get_server_bind, provider_store_path, resolve_base_dir
+from .local_config import (
+    get_allowed_origins,
+    get_auto_open_browser,
+    get_rag_settings,
+    get_server_bind,
+    provider_store_path,
+    resolve_base_dir,
+)
 
 
 
@@ -37,16 +44,8 @@ app = fastapi.FastAPI(title="RPG 桌游控制台 API - V5")
 BASE_DIR = resolve_base_dir()
 SERVER_HOST, SERVER_PORT = get_server_bind(BASE_DIR)
 
-# CORS 仅允许本地访问，部署时通过 ALLOWED_ORIGINS 环境变量配置
-# 示例：ALLOWED_ORIGINS=http://localhost:8000,http://192.168.1.100:8000
-_default_origins = [
-    f"http://127.0.0.1:{SERVER_PORT}",
-    f"http://localhost:{SERVER_PORT}",
-]
-if os.environ.get("ZRIC_ALLOW_FILE_ORIGIN", "").lower() in {"1", "true", "yes"}:
-    _default_origins.append("null")
-_env_origins = os.environ.get("ALLOWED_ORIGINS", "")
-_allowed_origins = [o.strip() for o in _env_origins.split(",") if o.strip()] if _env_origins else _default_origins
+# CORS 默认仅允许当前端口的本机访问；部署时可在 config.json 的 server.allowed_origins 中配置。
+_allowed_origins = get_allowed_origins(BASE_DIR, SERVER_PORT)
 
 app.add_middleware(
     CORSMiddleware,
@@ -149,7 +148,7 @@ app.include_router(config_router)
 # ---------------------------------------------------------
 # 【模块化】：托管前端静态页面和资源
 # ---------------------------------------------------------
-from .static_files import configure_static_files, static_router
+from .static_files import mount_asset_files, static_router
 from .campaign_storage import (
     account_id as _account_id,
     account_owner_metadata as _account_owner_metadata,
@@ -199,7 +198,8 @@ import os
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
-configure_static_files(WEB_DIR)
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+mount_asset_files(app, WEB_DIR, ASSETS_DIR)
 CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
 
 # 【安全】：AI 供应商和本地启动配置统一保存至 config.json。
@@ -207,7 +207,7 @@ ai_provider.configure_provider_store(str(provider_store_path(BASE_DIR)))
 
 DB_FILE = os.path.join(BASE_DIR, "rpg_game.db")
 os.makedirs(CAMPAIGNS_DIR, exist_ok=True)
-RAG_AUTO_REBUILD_EMBEDDINGS = os.environ.get("ZRIC_AUTO_REBUILD_RAG_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
+RAG_AUTO_REBUILD_EMBEDDINGS = bool(get_rag_settings(BASE_DIR).get("auto_rebuild_embeddings"))
 
 # 【模块化】：将 DB 路径注入地图模块
 map_set_db_file(DB_FILE)
@@ -547,7 +547,7 @@ def campaign_import_formats():
     return {
         "status": "success",
         "formats": [
-            {"ext": ".pdf", "label": "PDF", "notes": "支持文字型 PDF；扫描版暂不做 OCR"},
+            {"ext": ".pdf", "label": "PDF", "notes": "支持文字型 PDF；扫描版会在可用时尝试多模态读取"},
             {"ext": ".docx", "label": "Word DOCX", "notes": "支持正文、表格文本与内嵌图片"},
             {"ext": ".txt", "label": "TXT", "notes": "UTF-8 优先，GBK fallback"},
             {"ext": ".md", "label": "Markdown", "notes": "按纯文本导入"},
@@ -923,7 +923,7 @@ def load_campaign(req: LoadCampaignRequest, request: Request):
         elif raw_library:
             _log.info(
                 "跳过后台 RAG embedding 重建；运行时使用关键词检索。"
-                "如需重建，设置 ZRIC_AUTO_REBUILD_RAG_EMBEDDINGS=1 后重新载入剧本。"
+                "如需重建，在 config.json 的 rag.auto_rebuild_embeddings 设为 true 后重新载入剧本。"
             )
 
         conn.close()
@@ -2512,6 +2512,8 @@ if __name__ == "__main__":
     _log.info("=====================================================")
     _log.info("-Z.R.I.C 零界核心- 正在启动...")
     _log.info("当前工作目录: %s", BASE_DIR)
+    _log.info("前端静态目录: %s", WEB_DIR)
+    _log.info("前端资源目录: %s", ASSETS_DIR)
     _log.info("=====================================================")
     _log.info("请不要关闭此窗口！关闭窗口将停止游戏引擎。")
     
@@ -2521,7 +2523,8 @@ if __name__ == "__main__":
         open_host = "127.0.0.1" if SERVER_HOST in {"0.0.0.0", "::"} else SERVER_HOST
         webbrowser.open(f"http://{open_host}:{SERVER_PORT}")
 
-    threading.Thread(target=auto_open_browser, daemon=True).start()
+    if os.name == "nt" and get_auto_open_browser(BASE_DIR):
+        threading.Thread(target=auto_open_browser, daemon=True).start()
 
-    # 启动服务器 (使用 127.0.0.1 避免某些网络策略拦截)
+    # 启动服务器
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT, log_level="info")
