@@ -12,10 +12,12 @@ import re
 import sqlite3
 import threading
 from collections import OrderedDict
+import fastapi
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 from .logger import get_logger
 from . import ai_provider
+from .document_extraction import extract_text_document
 
 _log = get_logger("rag")
 
@@ -738,35 +740,22 @@ async def rag_upload(
     chunk_overlap: int        = Form(RAG_CHUNK_OVERLAP),
     hidden:        int        = Form(0),
 ):
-    """上传 .txt / .pdf 文件并导入知识库。"""
+    """上传 TXT / Markdown / PDF / Word 文件并导入知识库。"""
     t0 = time.time()
     filename = file.filename or "unknown"
     raw = await file.read()
 
-    # ── 提取文本 ──────────────────────────────────────────
-    if filename.lower().endswith(".pdf"):
-        try:
-            import io
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(raw))
-            text = "\n".join(p.extract_text() or "" for p in reader.pages)
-        except ImportError:
-            return {"status": "error", "message": "PDF 解析需要安装 pypdf：pip install pypdf"}
-        except Exception as e:
-            return {"status": "error", "message": f"PDF 解析失败：{e}"}
-    else:
-        # 尝试 UTF-8，fallback GBK
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                text = raw.decode("gbk")
-            except Exception:
-                return {"status": "error", "message": "文件编码无法识别，请转为 UTF-8 后重试"}
+    try:
+        text, extraction_warnings = extract_text_document(raw, filename)
+    except fastapi.HTTPException as exc:
+        return {"status": "error", "message": str(exc.detail)}
 
     text = text.strip()
     if not text:
-        return {"status": "error", "message": "文件内容为空"}
+        detail = "文件内容为空"
+        if extraction_warnings:
+            detail = f"{detail}；{extraction_warnings[-1]}"
+        return {"status": "error", "message": detail}
 
     doc_title  = (title.strip()  or filename)[:100]
     doc_source = (source.strip() or filename)[:200]
@@ -804,6 +793,7 @@ async def rag_upload(
         "chunk_count": len(chunks),
         "embedded":    embedded_count,
         "elapsed_sec": elapsed,
+        "warnings":    extraction_warnings,
     }
 
 

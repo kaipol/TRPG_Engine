@@ -42,15 +42,82 @@ bash ./start.sh 8010 0.0.0.0
 
 在 1Panel “网站 → 运行环境”这类部署方式中，运行目录应设置为项目根目录（如 `/home/TRPG_Engine`），并确保项目根目录下存在 `assets/`。所有前端 CSS/JS 统一从 `/assets/...` 访问，不再使用 `web/assets/` 或启动时复制兼容文件。
 
-剧本导入默认会尝试调用已配置的 Chat 模型把原始文档转换为可玩剧本。服务器无法访问模型端点时会在超时后自动生成保底剧本；如需跳过 AI 转换，可在 `config.json` 中设置 `campaign_import.use_ai_conversion=false`。PDF 本地解析运行在独立子进程内，默认 45 秒无结果会终止并继续导入，避免页面长期停在“抽取主剧本文本”。扫描版 PDF 没有文本层时，会在安装 `PyMuPDF` 且 Chat 模型支持图片输入的情况下尝试多模态读取前几页。
+如果 1Panel 的运行环境实际启动在 Docker 容器中，MinerU CLI 必须安装在运行 Z.R.I.C 的同一个容器内。宿主机上执行 `mineru-open-api version` 成功，不代表容器里的 FastAPI 进程也能访问该命令。可用下面的方式确认：
 
-可调整的 PDF 导入项：
+```bash
+docker exec -it <容器名或ID> sh -lc 'command -v mineru-open-api && mineru-open-api version'
+```
 
-- `campaign_import.pdf_timeout_seconds`：本地 PDF 文本/图片提取超时，默认 `45`。
-- `campaign_import.pdf_max_pages`：最多提取页数，默认 `80`。
-- `campaign_import.pdf_image_max_pages`：最多扫描内嵌图片页数，默认 `12`。
-- `campaign_import.pdf_max_images`：最多提取内嵌图片数量，默认 `40`。
-- `campaign_import.pdf_multimodal_pages`：本地无文本时多模态读取页数，默认 `4`；设为 `0` 可关闭。
+如果容器内找不到命令，需要在容器镜像/启动脚本中安装 MinerU CLI，或把宿主机的可执行文件挂载进容器后，将容器内路径写入 `config.json` 的 `campaign_import.mineru_command`，也可以设置环境变量 `ZRIC_MINERU_COMMAND=/容器内路径/mineru-open-api`。同理，`mineru-open-api auth` 写入的 `~/.mineru/config.yaml` 也必须存在于容器内；否则请通过容器环境变量 `MINERU_TOKEN` / `ZRIC_MINERU_TOKEN` 传入 token。
+
+剧本导入会先调用 MinerU 对 PDF/Word 执行解析，再使用前端配置面板里的“剧本解析模型”把正文转换为可玩剧本。导入界面提供 OCR 开关，默认启用；关闭后不会向 MinerU 传 `--ocr`。未配置剧本解析模型时会回退到 Chat Model；服务器无法访问模型端点时会自动生成保底剧本。MinerU 未提取到正文时，会尝试把文档页面或内嵌图片交给剧本解析模型做多模态识别；PDF 兜底需要服务器安装 `pdftoppm`（poppler-utils）、`mutool`、Ghostscript 或 ImageMagick 中任意一种页面渲染器。
+
+MinerU CLI 需要单独安装。官方推荐安装方式如下：
+
+```powershell
+irm https://cdn-mineru.openxlab.org.cn/open-api-cli/install.ps1 | iex
+mineru-open-api version
+```
+
+Linux/macOS：
+
+```bash
+curl -fsSL https://cdn-mineru.openxlab.org.cn/open-api-cli/install.sh | sh
+mineru-open-api version
+```
+
+如果你的环境已经使用本地 Agent Skill，也可以继续使用 Skill 文档中的 `npm install -g mineru-open-api` 或 Go 安装方式；本项目只要求运行 Z.R.I.C 的服务进程或容器内能执行 `mineru-open-api version`。
+
+完整的 `mineru-open-api extract` 模式需要 token，才能更稳定地处理大文件、VLM 模型、JSON 输出和图片导出；未配置 token 时服务会尝试 `flash-extract` 兜底，但该模式限制为小文件/短页数，且通常不导出内嵌图片。MinerU 默认会把文档内容发送到 MinerU API 进行服务端解析，导入敏感剧本前请先确认部署和数据策略。
+
+导入时会根据主文件大小自动选择 MinerU 模式：PDF/DOCX 小于等于 10MB 时优先使用免 token 的 `flash-extract`，失败后再尝试 `extract`；超过 10MB 或旧式 `.doc` 时直接使用需要 token 的 `extract`。
+
+MinerU 官方 CLI 的 token 查找顺序是：
+
+1. `--token`
+2. `MINERU_TOKEN`
+3. `~/.mineru/config.yaml`
+
+推荐优先使用官方配置：
+
+```powershell
+mineru-open-api auth
+mineru-open-api auth --show
+```
+
+自动化部署也可以设置环境变量：
+
+```powershell
+$env:MINERU_TOKEN="你的 MinerU token"
+```
+
+请求来源标识的官方查找顺序是 `MINERU_SOURCE`、`~/.mineru/config.yaml` 的 `source`、默认 `open-api-cli`。需要区分本应用流量时可执行：
+
+```powershell
+mineru-open-api set-source zric-trpg-engine
+```
+
+私有部署或代理地址使用官方 `--base-url` 能力；本项目也提供了对应配置项。
+
+`config.json` 默认只写入常用且需要本项目直接控制的 MinerU 项；token、私有部署地址、source 和 verbose 等高级项仅在显式填写或通过环境变量设置时生效。
+
+默认写入的 MinerU 导入项：
+
+- `campaign_import.mineru_command`：MinerU CLI 命令，默认 `mineru-open-api`。
+- `campaign_import.mineru_timeout_seconds`：单次 OCR/解析超时，默认 `300`。
+- `campaign_import.mineru_model`：`extract` 使用的模型，默认留空，交给官方 CLI 自动选择；可改为 `vlm`、`pipeline` 或 `html`。
+- `campaign_import.mineru_language`：OCR 语言包，默认 `ch`。
+- `campaign_import.mineru_pages`：可选页码范围，例如 `1-20`；留空表示全量。
+
+按需配置的 MinerU 导入项：
+
+- `campaign_import.mineru_token`：可选 token。留空时遵循官方 CLI 的 `MINERU_TOKEN` / `~/.mineru/config.yaml` 逻辑；如果填写，本项目会以子进程环境变量传递，不拼入命令行。
+- `campaign_import.mineru_base_url`：可选 MinerU API 基地址，用于私有部署或代理，会映射到官方 `--base-url`。
+- `campaign_import.mineru_source`：可选请求来源标识，会映射到官方 `MINERU_SOURCE`。
+- `campaign_import.mineru_verbose`：是否开启官方 `--verbose` 调试日志，默认 `false`。
+- `campaign_import.mineru_use_extract`：是否优先使用 token 模式 `extract`，默认 `true`；通常不需要写入，只有明确要禁用 `extract` 兜底策略时才设为 `false`。
+
+上述配置也支持环境变量覆盖：`ZRIC_MINERU_COMMAND`、`ZRIC_MINERU_TIMEOUT`、`ZRIC_MINERU_MODEL`、`ZRIC_MINERU_LANGUAGE`、`ZRIC_MINERU_PAGES`、`ZRIC_MINERU_USE_EXTRACT`、`ZRIC_MINERU_TOKEN`、`ZRIC_MINERU_BASE_URL`、`ZRIC_MINERU_SOURCE`、`ZRIC_MINERU_VERBOSE`。不要把 token 写入 README、提交记录或日志。
 
 Windows 本地启动后程序会自动打开主入口；Linux 服务器启动不会尝试打开浏览器，请从客户端访问服务器地址。主入口提供“单人游玩”和“多人游玩”：两者都由 AI-GM 主持，玩家选择剧中角色进行扮演；GM 控制台保留为高级管理视图。
 
@@ -67,11 +134,13 @@ Windows 本地启动后程序会自动打开主入口；Linux 服务器启动不
 
 `config.json` 是唯一的本地运行配置源。项目不再读取 `.env` 中的 `OPENAI_COMPAT_*` 配置，避免同一密钥和模型在两处漂移。首次启动或首次保存配置时会写出包含默认值和 `//` 注释的 `config.json`；旧版 `openai_providers.json` 如存在会被读取并迁移到新文件。
 
-远程部署时，更新 API Key、切换供应商、获取草稿模型、修改 Token 策略和 AI 缓存都受管理员保护。这个保护在 `server/config_api.py` 中实现：如果未配置 `config.json` 的 `security.admin_token`，只有本机回环地址（`127.0.0.1` / `localhost` / `::1`）可以写入 API Key。1Panel、Docker 或服务器公网访问通常不是回环地址，因此需要在 `config.json` 中设置 `security.admin_token`，重启服务后，在前端“OpenAI 兼容供应商”配置面板的“管理员令牌”输入框填写同一段令牌。前端会通过 `X-Admin-Token` 请求头发送该令牌，不会把管理员令牌保存到浏览器。
+远程部署时，更新 API Key、切换供应商、获取草稿模型、修改 Token 策略、AI 缓存，以及剧本导入/重新识别/删除/迁移包导入导出都受管理员账号保护。请在 `config.json` 的 `security.admin_username` 和 `security.admin_password` 中配置管理员账号，重启服务后在主页使用该账号登录。普通注册账号只能游玩单人或多人模式，不能修改系统设置。
 
-`config.json` 中新增的运行项只覆盖网页端不能直接配置的服务端设置，例如 `security.admin_token`、`campaign_import`、`rag`、`multiplayer` 限制和 `server.allowed_origins`。网页端已有入口的供应商、模型、Token 策略和 AI 缓存仍由前端配置面板保存，不需要手动改这些字段。
+剧本导入优先使用 MinerU。若 MinerU 未返回正文，系统会先尝试把 PDF 直接发给配置的“剧本解析模型”，要求模型识别 PDF 并输出结构化 JSON，用于写入场景、角色、百科、世界实体、地图和知识库；如果兼容端点不支持 PDF 文件输入，则退回本地提取文本与页面/内嵌图片，再一起发送给多模态模型兜底。
 
-模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding 和 Image 每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
+`config.json` 中新增的运行项只覆盖网页端不能直接配置的服务端设置，例如 `security.admin_username/admin_password`、`campaign_import`、`rag`、`multiplayer` 限制和 `server.allowed_origins`。网页端已有入口的供应商、模型、Token 策略和 AI 缓存仍由前端配置面板保存，不需要手动改这些字段。
+
+模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding、Image 和“剧本解析模型”每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
 
 如果兼容端点的 `/models` 请求失败，后端会保留当前已配置的模型作为兜底选项，避免前端列表为空。这种情况下下拉框可能只显示当前 active model，并会在接口响应的 `error` 字段中返回远端错误原因。
 
@@ -102,7 +171,8 @@ E:\TRPG_Engine
 ## 功能概览
 
 - AI 推演：OpenAI 兼容 chat 模型、模型列表获取、搜索、选择与多供应商切换。
-- 剧本导入：支持 PDF、DOCX、TXT、Markdown 导入，并尽量提取图片资源生成可玩剧本。
+- 剧本导入：支持 PDF、DOCX、DOC、TXT、Markdown 导入；PDF/Word 优先通过 MinerU 提取正文和图片资源，失败时启用剧本解析模型多模态兜底。
+- 剧本迁移：管理员可将已解析的 `campaigns/<剧本名>` 导出为 ZIP 迁移包，并在另一台服务器导入。
 - RAG 知识库：文档切片、embedding、关键词加向量混合检索。
 - 图像生成：统一使用 OpenAI 兼容供应商配置。
 - 记忆系统：短期工作区、长期记忆折叠、世界实体状态注入。
@@ -120,7 +190,7 @@ E:\TRPG_Engine
 - 公屏：房间级聊天消息持久化，并通过 WebSocket 实时同步。
 - 骰子：复用 `server.trpgdice.component.roll.dice` 与原生 `/api/dice/*` 服务，支持 `/r 1d20+5`、`/r 1d100` 等。
 - AI-KP 骰点反馈：骰子结果会写入房间事件流，并生成 AI 可读叙事反馈；无 API Key 时自动降级为确定性文本。
-- 剧本导入：房间设置中上传 TXT、Markdown、PDF，写入 ZRIC RAG 表，后续推演可检索。
+- 剧本导入：房间设置中上传 TXT、Markdown、PDF、Word，写入 ZRIC RAG 表，后续推演可检索。
 - VTT 地图：支持上传背景图、创建/拖拽 Token，坐标通过房间 WebSocket 多端同步。
 - ZRIC 原生能力保留：`index.html`、`player.html`、`phone.html`、RAG、记忆、NPC、地图拓扑、触发器、时间线等原模块继续可用。
 
@@ -177,7 +247,7 @@ E:\TRPG_Engine
 - 房间设置、地图背景上传、房间剧本导入需要 GM 令牌。
 - 令牌只适合本地或受信任局域网跑团；如果部署到公网，应额外加反向代理认证或访问控制。
 - OpenAI 兼容端点未配置时，多人骰点仍可用，AI-KP 反馈会降级为规则化文本。
-- PDF 剧本上传依赖 `pypdf`，扫描版 PDF 多模态读取依赖 `PyMuPDF`，表单上传依赖 `python-multipart`，均已写入 `requirements.txt`。
+- PDF/Word 剧本上传依赖 MinerU CLI；表单上传依赖 `python-multipart`，已写入 `requirements.txt`。
 - 当前房间 RAG 文档会写入全局 `rag_documents` / `rag_chunks`，并用 source 前缀标记房间代码；后续如需更强隔离，可进一步把 ZRIC 推演检索限定到当前房间文档。
 
 ## 发布前检查

@@ -5,6 +5,7 @@ config.json
 openai_provider.json
 openai_providers.json
 persona_mode.json
+DESIGN.md
 **/config.yaml
 !**/config.default.yaml
 
@@ -25,6 +26,9 @@ __pycache__/
 
 # Application runtime data
 .runtime/
+.mineru/
+.mineru-*/
+mineru_output/
 exports/
 **/exports/
 *.db

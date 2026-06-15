@@ -44,6 +44,7 @@ from .campaign_storage import (
     sanitize_asset_name,
     unique_path,
 )
+from .document_extraction import extract_text_document
 from .local_config import get_multiplayer_settings
 from .multiplayer_models import (
     AiEventRequest,
@@ -80,7 +81,6 @@ _MULTIPLAYER_SETTINGS = get_multiplayer_settings()
 MAX_SCENARIO_UPLOAD_BYTES = int(_MULTIPLAYER_SETTINGS["max_scenario_upload_bytes"])
 MAX_SCENARIO_CHARS = int(_MULTIPLAYER_SETTINGS["max_scenario_chars"])
 MAX_SCENARIO_CHUNKS = int(_MULTIPLAYER_SETTINGS["max_scenario_chunks"])
-MAX_SCENARIO_PDF_PAGES = int(_MULTIPLAYER_SETTINGS["max_scenario_pdf_pages"])
 MAX_MAP_UPLOAD_BYTES = int(_MULTIPLAYER_SETTINGS["max_map_upload_bytes"])
 MAX_ROOM_PLAYERS = int(_MULTIPLAYER_SETTINGS["max_room_players"])
 BGM_TRACKS: dict[str, str] = {
@@ -1825,31 +1825,15 @@ async def _extract_upload_text(file: UploadFile) -> tuple[str, str]:
     filename = file.filename or "scenario.txt"
     raw = await file.read()
     suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        try:
-            import pypdf
-        except ImportError as exc:
-            raise fastapi.HTTPException(status_code=500, detail="PDF 解析需要安装 pypdf") from exc
-        try:
-            import io
-
-            reader = pypdf.PdfReader(io.BytesIO(raw))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception as exc:
-            raise fastapi.HTTPException(status_code=400, detail=f"PDF 解析失败：{exc}") from exc
-    elif suffix in {".txt", ".md", ".markdown", ""}:
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                text = raw.decode("gbk")
-            except Exception as exc:
-                raise fastapi.HTTPException(status_code=400, detail="文件编码无法识别") from exc
-    else:
-        raise fastapi.HTTPException(status_code=400, detail="仅支持 TXT、Markdown、PDF 剧本")
+    if suffix not in {".txt", ".md", ".markdown", ".pdf", ".docx", ".doc", ""}:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持 TXT、Markdown、PDF、DOCX、DOC 剧本")
+    text, warnings = extract_text_document(raw, filename)
     text = text.strip()
     if not text:
-        raise fastapi.HTTPException(status_code=400, detail="文件内容为空")
+        detail = "文件内容为空"
+        if warnings:
+            detail = f"{detail}；{warnings[-1]}"
+        raise fastapi.HTTPException(status_code=400, detail=detail)
     return filename, text
 
 

@@ -96,6 +96,13 @@ echo "[2/3] Installing or updating dependencies..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 "$PYTHON_BIN" -m pip install -r requirements.txt
 
+if command -v mineru-open-api >/dev/null 2>&1; then
+    echo "[info] MinerU CLI found: $(command -v mineru-open-api)"
+else
+    echo "[warn] MinerU CLI was not found in this service environment PATH." >&2
+    echo "[warn] PDF/Word import needs mineru-open-api inside the same runtime/container, or ZRIC_MINERU_COMMAND must point to its absolute path." >&2
+fi
+
 echo
 echo "[3/3] Starting Z.R.I.C TRPG Engine..."
 echo "     Bind: $START_HOST:$START_PORT"

@@ -15,6 +15,8 @@ import fastapi
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from .local_config import get_admin_credentials
+
 
 auth_router = APIRouter(tags=["账号"])
 
@@ -82,6 +84,7 @@ def init_auth_tables() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_account ON auth_sessions(account_id)")
+        _sync_configured_admin_account(conn)
         conn.commit()
 
 
@@ -110,6 +113,18 @@ def _normalize_username(value: Any) -> str:
 
 def _username_key(username: str) -> str:
     return username.casefold()
+
+
+def _configured_admin_username_key() -> str:
+    username, password = get_admin_credentials()
+    if not username or not password:
+        return ""
+    return _username_key(username)
+
+
+def _is_configured_admin_username(username: str) -> bool:
+    admin_key = _configured_admin_username_key()
+    return bool(admin_key and _username_key(username) == admin_key)
 
 
 def _normalize_display_name(value: Any, fallback: str) -> str:
@@ -147,12 +162,49 @@ def account_player_id(account: sqlite3.Row | dict[str, Any] | None) -> str:
 
 def _serialize_account(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = dict(row)
+    is_admin = _is_configured_admin_username(str(data.get("username") or ""))
     return {
         "id": int(data["id"]),
         "username": data.get("username", ""),
         "display_name": data.get("display_name", "") or data.get("username", "玩家"),
         "player_id": account_player_id(data),
+        "is_admin": is_admin,
+        "role": "admin" if is_admin else "player",
     }
+
+
+def _sync_configured_admin_account(conn: sqlite3.Connection) -> None:
+    username, password = get_admin_credentials()
+    if not username or not password:
+        return
+    try:
+        username = _normalize_username(username)
+        password = _validate_password(password)
+    except fastapi.HTTPException:
+        return
+    username_key = _username_key(username)
+    salt = secrets.token_hex(16)
+    password_hash = _hash_password(password, salt)
+    now = _now()
+    row = conn.execute("SELECT id FROM auth_accounts WHERE username_key=?", (username_key,)).fetchone()
+    if row:
+        conn.execute(
+            """
+            UPDATE auth_accounts
+            SET username=?, display_name=?, password_salt=?, password_hash=?, updated_at=?
+            WHERE id=?
+            """,
+            (username, "管理员", salt, password_hash, now, int(row["id"])),
+        )
+        return
+    conn.execute(
+        """
+        INSERT INTO auth_accounts
+        (username, username_key, display_name, password_salt, password_hash, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        (username, username_key, "管理员", salt, password_hash, now, now),
+    )
 
 
 def _issue_session(conn: sqlite3.Connection, account_id: int) -> str:
@@ -207,9 +259,19 @@ def require_account_from_request(request: Request) -> dict[str, Any]:
     return account
 
 
+def is_admin_account(account: dict[str, Any] | None) -> bool:
+    return bool(account and account.get("is_admin"))
+
+
+def is_admin_request(request: Request) -> bool:
+    return is_admin_account(account_from_request(request))
+
+
 @auth_router.post("/api/auth/register")
 def register_account(req: AuthRequest):
     username = _normalize_username(req.username)
+    if _is_configured_admin_username(username):
+        raise fastapi.HTTPException(status_code=403, detail="管理员账号由 config.json 管理，不能在前端注册")
     password = _validate_password(req.password)
     display_name = _normalize_display_name(req.display_name, username)
     salt = secrets.token_hex(16)
@@ -237,6 +299,7 @@ def login_account(req: AuthRequest):
     username = _normalize_username(req.username)
     password = _validate_password(req.password)
     with safe_db() as conn:
+        _sync_configured_admin_account(conn)
         row = conn.execute("SELECT * FROM auth_accounts WHERE username_key=?", (_username_key(username),)).fetchone()
         if not row or not hmac.compare_digest(_hash_password(password, row["password_salt"]), row["password_hash"]):
             raise fastapi.HTTPException(status_code=401, detail="账号或密码不正确")

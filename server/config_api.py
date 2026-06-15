@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
-import ipaddress
 from typing import Any
 
 import fastapi
@@ -13,7 +11,8 @@ from pydantic import BaseModel
 from . import ai_cache, ai_provider
 from .agent import configure_agent as _configure_agent
 from .agent import reset_active_model
-from .local_config import get_admin_token
+from .auth import is_admin_request
+from .local_config import get_admin_credentials
 
 
 config_router = APIRouter(tags=["Config"])
@@ -29,6 +28,7 @@ class ApiKeysUpdateRequest(BaseModel):
     chat_model: str | None = None
     embedding_model: str | None = None
     image_model: str | None = None
+    campaign_model: str | None = None
     image_size: str | None = None
     token_policy_mode: str | None = None
     make_active: bool = True
@@ -52,6 +52,7 @@ class ModelListRequest(BaseModel):
     chat_model: str | None = None
     embedding_model: str | None = None
     image_model: str | None = None
+    campaign_model: str | None = None
 
 
 class TokenPolicyUpdateRequest(BaseModel):
@@ -125,32 +126,33 @@ def _token_policy_status() -> dict:
     return {"mode": active["mode"], "active": active, "modes": modes}
 
 
-def _is_loopback_client(request: Request) -> bool:
-    host = request.client.host if request.client else ""
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return host in {"localhost", "127.0.0.1", "::1"}
+def _admin_credentials_configured() -> bool:
+    username, password = get_admin_credentials()
+    return bool(username and password)
 
 
 def _require_admin_config_access(request: Request):
-    admin_token = get_admin_token()
-    provided = request.headers.get("X-Admin-Token", "").strip()
-    auth = request.headers.get("Authorization", "").strip()
-    if auth.lower().startswith("bearer "):
-        provided = auth[7:].strip()
-    if admin_token:
-        if not provided or not hmac.compare_digest(provided, admin_token):
-            raise fastapi.HTTPException(status_code=403, detail="管理员令牌无效")
-        return
-    if not _is_loopback_client(request):
+    if not _admin_credentials_configured():
         raise fastapi.HTTPException(
             status_code=403,
-            detail=(
-                "未配置 config.json 的 security.admin_token 时，仅允许本机回环地址更新 API Key。"
-                "远程部署请设置 security.admin_token，并在前端配置面板填写管理员令牌。"
-            ),
+            detail="尚未在 config.json 配置 security.admin_username / security.admin_password，系统设置修改已禁用。",
         )
+    if is_admin_request(request):
+        return
+    raise fastapi.HTTPException(status_code=403, detail="请先在主页登录管理员账号")
+
+
+def require_admin_config_access(request: Request) -> None:
+    _require_admin_config_access(request)
+
+
+@config_router.get("/api/config/admin/status")
+def get_admin_status(request: Request):
+    return {
+        "status": "success",
+        "configured": _admin_credentials_configured(),
+        "authenticated": is_admin_request(request),
+    }
 
 
 @config_router.get("/api/config/keys")
@@ -178,6 +180,7 @@ def get_api_keys_status():
             "chat_model": ai_provider.get_active_model("chat") or cfg.chat_model,
             "embedding_model": ai_provider.get_active_model("embedding") or cfg.embedding_model,
             "image_model": ai_provider.get_active_model("image") or cfg.image_model,
+            "campaign_model": ai_provider.get_active_model("campaign") or cfg.campaign_model,
             "image_size": cfg.image_size,
         },
     }
@@ -200,6 +203,7 @@ def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
             chat_model=req.chat_model,
             embedding_model=req.embedding_model,
             image_model=req.image_model,
+            campaign_model=req.campaign_model,
             image_size=req.image_size,
             make_active=req.make_active,
         )
@@ -212,6 +216,8 @@ def update_api_keys(req: ApiKeysUpdateRequest, request: Request):
         ai_provider.set_active_model(req.embedding_model.strip(), "embedding")
     if req.image_model and req.make_active:
         ai_provider.set_active_model(req.image_model.strip(), "image")
+    if req.campaign_model and req.make_active:
+        ai_provider.set_active_model(req.campaign_model.strip(), "campaign")
     if req.token_policy_mode:
         ai_provider.set_token_policy_mode(req.token_policy_mode)
 
@@ -327,6 +333,7 @@ def _config_model_response(req: ModelListRequest, *, allow_draft_endpoint: bool 
         "chat": req.chat_model or "",
         "embedding": req.embedding_model or "",
         "image": req.image_model or "",
+        "campaign": req.campaign_model or "",
     }
 
     if allow_draft_endpoint and (draft_key or not provider_id):

@@ -117,6 +117,14 @@ def account_owner_metadata(account: dict) -> dict:
 
 
 def save_visible_to_account(manifest: dict, account: dict | None) -> bool:
+    visibility = str(manifest.get("visibility") or manifest.get("scope") or "").strip().lower()
+    if visibility == "public":
+        return True
+    if (
+        not manifest.get("exported_at")
+        and (manifest.get("imported_at") or manifest.get("source_filename") or manifest.get("parse_version"))
+    ):
+        return True
     owner_id = manifest_owner_id(manifest)
     if owner_id is None:
         return True

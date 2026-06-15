@@ -23,19 +23,23 @@ DEFAULT_AI_CACHE_ENABLED = True
 DEFAULT_AI_CACHE_MAX_ENTRIES = 512
 DEFAULT_AUTO_OPEN_BROWSER = True
 DEFAULT_ALLOW_FILE_ORIGIN = False
-DEFAULT_ADMIN_TOKEN = ""
-DEFAULT_CAMPAIGN_IMPORT_USE_AI = True
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = ""
 DEFAULT_CAMPAIGN_IMPORT_AI_TIMEOUT_SECONDS = 45.0
-DEFAULT_CAMPAIGN_IMPORT_PDF_TIMEOUT_SECONDS = 45.0
-DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_PAGES = 80
-DEFAULT_CAMPAIGN_IMPORT_PDF_IMAGE_MAX_PAGES = 12
-DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_IMAGES = 40
-DEFAULT_CAMPAIGN_IMPORT_PDF_MULTIMODAL_PAGES = 4
+DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND = "mineru-open-api"
+DEFAULT_CAMPAIGN_IMPORT_MINERU_TIMEOUT_SECONDS = 900.0
+DEFAULT_CAMPAIGN_IMPORT_MINERU_MODEL = ""
+DEFAULT_CAMPAIGN_IMPORT_MINERU_LANGUAGE = "ch"
+DEFAULT_CAMPAIGN_IMPORT_MINERU_PAGES = ""
+DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT = True
+DEFAULT_CAMPAIGN_IMPORT_MINERU_TOKEN = ""
+DEFAULT_CAMPAIGN_IMPORT_MINERU_BASE_URL = ""
+DEFAULT_CAMPAIGN_IMPORT_MINERU_SOURCE = ""
+DEFAULT_CAMPAIGN_IMPORT_MINERU_VERBOSE = False
 DEFAULT_RAG_AUTO_REBUILD_EMBEDDINGS = False
 DEFAULT_MAX_SCENARIO_UPLOAD_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_SCENARIO_CHARS = 400000
 DEFAULT_MAX_SCENARIO_CHUNKS = 800
-DEFAULT_MAX_SCENARIO_PDF_PAGES = 80
 DEFAULT_MAX_MAP_UPLOAD_BYTES = 12 * 1024 * 1024
 DEFAULT_MAX_ROOM_PLAYERS = 24
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -49,6 +53,7 @@ DEFAULT_PROVIDER_RECORD = {
     "chat_model": "",
     "embedding_model": "",
     "image_model": "",
+    "campaign_model": "",
     "image_size": DEFAULT_IMAGE_SIZE,
 }
 
@@ -62,16 +67,21 @@ DEFAULT_LOCAL_CONFIG = {
         "allow_file_origin": DEFAULT_ALLOW_FILE_ORIGIN,
     },
     "security": {
-        "admin_token": DEFAULT_ADMIN_TOKEN,
+        "admin_username": DEFAULT_ADMIN_USERNAME,
+        "admin_password": DEFAULT_ADMIN_PASSWORD,
     },
     "campaign_import": {
-        "use_ai_conversion": DEFAULT_CAMPAIGN_IMPORT_USE_AI,
         "ai_timeout_seconds": DEFAULT_CAMPAIGN_IMPORT_AI_TIMEOUT_SECONDS,
-        "pdf_timeout_seconds": DEFAULT_CAMPAIGN_IMPORT_PDF_TIMEOUT_SECONDS,
-        "pdf_max_pages": DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_PAGES,
-        "pdf_image_max_pages": DEFAULT_CAMPAIGN_IMPORT_PDF_IMAGE_MAX_PAGES,
-        "pdf_max_images": DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_IMAGES,
-        "pdf_multimodal_pages": DEFAULT_CAMPAIGN_IMPORT_PDF_MULTIMODAL_PAGES,
+        "mineru_command": DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND,
+        "mineru_timeout_seconds": DEFAULT_CAMPAIGN_IMPORT_MINERU_TIMEOUT_SECONDS,
+        "mineru_model": DEFAULT_CAMPAIGN_IMPORT_MINERU_MODEL,
+        "mineru_language": DEFAULT_CAMPAIGN_IMPORT_MINERU_LANGUAGE,
+        "mineru_pages": DEFAULT_CAMPAIGN_IMPORT_MINERU_PAGES,
+        "mineru_use_extract": DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT,
+        "mineru_token": DEFAULT_CAMPAIGN_IMPORT_MINERU_TOKEN,
+        "mineru_base_url": DEFAULT_CAMPAIGN_IMPORT_MINERU_BASE_URL,
+        "mineru_source": DEFAULT_CAMPAIGN_IMPORT_MINERU_SOURCE,
+        "mineru_verbose": DEFAULT_CAMPAIGN_IMPORT_MINERU_VERBOSE,
     },
     "rag": {
         "auto_rebuild_embeddings": DEFAULT_RAG_AUTO_REBUILD_EMBEDDINGS,
@@ -80,7 +90,6 @@ DEFAULT_LOCAL_CONFIG = {
         "max_scenario_upload_bytes": DEFAULT_MAX_SCENARIO_UPLOAD_BYTES,
         "max_scenario_chars": DEFAULT_MAX_SCENARIO_CHARS,
         "max_scenario_chunks": DEFAULT_MAX_SCENARIO_CHUNKS,
-        "max_scenario_pdf_pages": DEFAULT_MAX_SCENARIO_PDF_PAGES,
         "max_map_upload_bytes": DEFAULT_MAX_MAP_UPLOAD_BYTES,
         "max_room_players": DEFAULT_MAX_ROOM_PLAYERS,
     },
@@ -174,6 +183,7 @@ def _normalize_provider_record(raw: Any, fallback_id: str = DEFAULT_PROVIDER_ID)
         "chat_model": str(raw.get("chat_model") or "").strip(),
         "embedding_model": str(raw.get("embedding_model") or "").strip(),
         "image_model": str(raw.get("image_model") or "").strip(),
+        "campaign_model": str(raw.get("campaign_model") or "").strip(),
         "image_size": str(raw.get("image_size") or DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
     })
     return record
@@ -249,49 +259,42 @@ def normalize_server_settings(raw: Any) -> dict[str, Any]:
 def normalize_security_settings(raw: Any) -> dict[str, Any]:
     security = raw if isinstance(raw, dict) else {}
     return {
-        "admin_token": str(security.get("admin_token") or DEFAULT_ADMIN_TOKEN).strip(),
+        "admin_username": str(security.get("admin_username") or DEFAULT_ADMIN_USERNAME).strip() or DEFAULT_ADMIN_USERNAME,
+        "admin_password": str(security.get("admin_password") or DEFAULT_ADMIN_PASSWORD),
     }
 
 
 def normalize_campaign_import_settings(raw: Any) -> dict[str, Any]:
     settings = raw if isinstance(raw, dict) else {}
     return {
-        "use_ai_conversion": normalize_bool(settings.get("use_ai_conversion"), DEFAULT_CAMPAIGN_IMPORT_USE_AI),
         "ai_timeout_seconds": normalize_float(
             settings.get("ai_timeout_seconds"),
             DEFAULT_CAMPAIGN_IMPORT_AI_TIMEOUT_SECONDS,
             minimum=5.0,
             maximum=300.0,
         ),
-        "pdf_timeout_seconds": normalize_float(
-            settings.get("pdf_timeout_seconds"),
-            DEFAULT_CAMPAIGN_IMPORT_PDF_TIMEOUT_SECONDS,
-            minimum=5.0,
-            maximum=300.0,
+        "mineru_command": str(settings.get("mineru_command") or DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND).strip()
+        or DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND,
+        "mineru_timeout_seconds": normalize_float(
+            settings.get("mineru_timeout_seconds"),
+            DEFAULT_CAMPAIGN_IMPORT_MINERU_TIMEOUT_SECONDS,
+            minimum=30.0,
+            maximum=1200.0,
         ),
-        "pdf_max_pages": normalize_int(
-            settings.get("pdf_max_pages"),
-            DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_PAGES,
-            minimum=1,
-            maximum=1000,
+        "mineru_model": str(settings.get("mineru_model") or DEFAULT_CAMPAIGN_IMPORT_MINERU_MODEL).strip(),
+        "mineru_language": str(settings.get("mineru_language") or DEFAULT_CAMPAIGN_IMPORT_MINERU_LANGUAGE).strip()
+        or DEFAULT_CAMPAIGN_IMPORT_MINERU_LANGUAGE,
+        "mineru_pages": str(settings.get("mineru_pages") or DEFAULT_CAMPAIGN_IMPORT_MINERU_PAGES).strip(),
+        "mineru_use_extract": normalize_bool(
+            settings.get("mineru_use_extract"),
+            DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT,
         ),
-        "pdf_image_max_pages": normalize_int(
-            settings.get("pdf_image_max_pages"),
-            DEFAULT_CAMPAIGN_IMPORT_PDF_IMAGE_MAX_PAGES,
-            minimum=0,
-            maximum=1000,
-        ),
-        "pdf_max_images": normalize_int(
-            settings.get("pdf_max_images"),
-            DEFAULT_CAMPAIGN_IMPORT_PDF_MAX_IMAGES,
-            minimum=0,
-            maximum=1000,
-        ),
-        "pdf_multimodal_pages": normalize_int(
-            settings.get("pdf_multimodal_pages"),
-            DEFAULT_CAMPAIGN_IMPORT_PDF_MULTIMODAL_PAGES,
-            minimum=0,
-            maximum=20,
+        "mineru_token": str(settings.get("mineru_token") or DEFAULT_CAMPAIGN_IMPORT_MINERU_TOKEN).strip(),
+        "mineru_base_url": str(settings.get("mineru_base_url") or DEFAULT_CAMPAIGN_IMPORT_MINERU_BASE_URL).strip(),
+        "mineru_source": str(settings.get("mineru_source") or DEFAULT_CAMPAIGN_IMPORT_MINERU_SOURCE).strip(),
+        "mineru_verbose": normalize_bool(
+            settings.get("mineru_verbose"),
+            DEFAULT_CAMPAIGN_IMPORT_MINERU_VERBOSE,
         ),
     }
 
@@ -326,12 +329,6 @@ def normalize_multiplayer_settings(raw: Any) -> dict[str, Any]:
             DEFAULT_MAX_SCENARIO_CHUNKS,
             minimum=1,
             maximum=10000,
-        ),
-        "max_scenario_pdf_pages": normalize_int(
-            settings.get("max_scenario_pdf_pages"),
-            DEFAULT_MAX_SCENARIO_PDF_PAGES,
-            minimum=1,
-            maximum=1000,
         ),
         "max_map_upload_bytes": normalize_int(
             settings.get("max_map_upload_bytes"),
@@ -384,6 +381,7 @@ def _json_block(value: Any, indent: int = 2) -> str:
 
 def _config_jsonc_text(data: dict[str, Any]) -> str:
     cfg = normalize_local_config(data)
+    campaign_import = _campaign_import_config_for_write(cfg["campaign_import"])
     providers = json.dumps(cfg["providers"], ensure_ascii=False, indent=4).replace("\n", "\n  ")
     return (
         "{\n"
@@ -392,11 +390,13 @@ def _config_jsonc_text(data: dict[str, Any]) -> str:
         "  // FastAPI 服务运行配置；修改后需要重新启动。\n"
         "  // allowed_origins 为空时自动允许当前端口的 localhost / 127.0.0.1。\n"
         f"  \"server\": {_json_block(cfg['server'])},\n\n"
-        "  // 管理员保护配置。远程部署建议填写 admin_token，并在前端配置面板输入同一令牌。\n"
-        "  // 留空时仅允许本机回环地址写入 API Key。\n"
+        "  // 管理员保护配置。填写 admin_username/admin_password 后，该账号可在主页登录并修改系统配置。\n"
+        "  // admin_password 留空时系统设置修改会被禁用。\n"
         f"  \"security\": {_json_block(cfg['security'])},\n\n"
-        "  // 剧本导入配置。use_ai_conversion=false 时跳过 AI 剧本转换，直接生成保底剧本。\n"
-        f"  \"campaign_import\": {_json_block(cfg['campaign_import'])},\n\n"
+        "  // 剧本导入配置。MinerU 会先 OCR/提取图片，然后调用剧本解析模型转换为可玩剧本。\n"
+        "  // mineru_model 留空时使用官方 CLI 自动模型选择；mineru_token/base_url/source/verbose 仅在显式配置时写入。\n"
+        "  // mineru_token 属于敏感凭据，优先建议用 mineru-open-api auth 或 MINERU_TOKEN；如填写到此文件，不要提交到 Git。\n"
+        f"  \"campaign_import\": {_json_block(campaign_import)},\n\n"
         "  // RAG 运行配置。auto_rebuild_embeddings=true 会在载入剧本时后台补建 embedding。\n"
         f"  \"rag\": {_json_block(cfg['rag'])},\n\n"
         "  // 多人联机运行限制，单位为字节/字符/数量。\n"
@@ -409,7 +409,7 @@ def _config_jsonc_text(data: dict[str, Any]) -> str:
         "  // 非流式 AI 响应缓存设置；max_entries 范围 16-10000。\n"
         f"  \"ai_cache\": {_json_block(cfg['ai_cache'])},\n\n"
         "  // OpenAI 兼容供应商列表。api_key 留空时该供应商不可用；base_url 需包含 /v1。\n"
-        "  // chat_model / embedding_model / image_model 留空时需在前端选择或手动填入。\n"
+        "  // chat_model / embedding_model / image_model / campaign_model 留空时需在前端选择或手动填入。\n"
         f"  \"providers\": {providers}\n"
         "}\n"
     )
@@ -436,6 +436,72 @@ def write_local_config(data: dict[str, Any], base_dir: str | None = None) -> Non
     path.write_text(_config_jsonc_text(data), encoding="utf-8")
 
 
+def _campaign_import_config_for_write(settings: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ai_timeout_seconds": settings["ai_timeout_seconds"],
+        "mineru_command": settings["mineru_command"],
+        "mineru_timeout_seconds": settings["mineru_timeout_seconds"],
+        "mineru_model": settings["mineru_model"],
+        "mineru_language": settings["mineru_language"],
+        "mineru_pages": settings["mineru_pages"],
+    }
+
+    token = str(settings.get("mineru_token") or "").strip()
+    if token:
+        result["mineru_token"] = token
+
+    base_url = str(settings.get("mineru_base_url") or "").strip()
+    if base_url:
+        result["mineru_base_url"] = base_url
+
+    source = str(settings.get("mineru_source") or "").strip()
+    if source:
+        result["mineru_source"] = source
+
+    if settings.get("mineru_verbose"):
+        result["mineru_verbose"] = True
+
+    if not settings.get("mineru_use_extract", DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT):
+        result["mineru_use_extract"] = False
+
+    return result
+
+
+def _campaign_import_needs_rewrite(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return True
+
+    required_keys = (
+        "ai_timeout_seconds",
+        "mineru_command",
+        "mineru_timeout_seconds",
+        "mineru_model",
+        "mineru_language",
+        "mineru_pages",
+    )
+    if any(key not in raw for key in required_keys):
+        return True
+
+    if "use_ai_conversion" in raw:
+        return True
+
+    if "mineru_token" in raw and not str(raw.get("mineru_token") or "").strip():
+        return True
+    if "mineru_base_url" in raw and not str(raw.get("mineru_base_url") or "").strip():
+        return True
+    if "mineru_source" in raw and not str(raw.get("mineru_source") or "").strip():
+        return True
+    if "mineru_verbose" in raw and not normalize_bool(raw.get("mineru_verbose"), DEFAULT_CAMPAIGN_IMPORT_MINERU_VERBOSE):
+        return True
+    if "mineru_use_extract" in raw and normalize_bool(
+        raw.get("mineru_use_extract"),
+        DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT,
+    ) == DEFAULT_CAMPAIGN_IMPORT_MINERU_USE_EXTRACT:
+        return True
+
+    return False
+
+
 def ensure_local_config(base_dir: str | None = None) -> Path:
     path = provider_store_path(base_dir)
     if not path.exists():
@@ -449,7 +515,14 @@ def ensure_local_config(base_dir: str | None = None) -> Path:
                 isinstance(raw.get("server"), dict)
                 and any(key not in raw["server"] for key in ("auto_open_browser", "allowed_origins", "allow_file_origin"))
             )
-            if missing_section or missing_server_keys:
+            missing_security_keys = (
+                isinstance(raw.get("security"), dict)
+                and any(key not in raw["security"] for key in ("admin_username", "admin_password"))
+            )
+            rewrite_campaign_import = _campaign_import_needs_rewrite(raw.get("campaign_import"))
+            providers = raw.get("providers") if isinstance(raw.get("providers"), list) else []
+            missing_provider_keys = any(isinstance(p, dict) and "campaign_model" not in p for p in providers)
+            if missing_section or missing_server_keys or missing_security_keys or rewrite_campaign_import or missing_provider_keys:
                 write_local_config(normalize_local_config(raw), base_dir)
         except Exception:
             write_local_config(read_local_config(base_dir), base_dir)
@@ -545,23 +618,25 @@ def get_auto_open_browser(base_dir: str | None = None) -> bool:
 def get_security_settings(base_dir: str | None = None) -> dict[str, Any]:
     data = read_local_config(base_dir)
     settings = normalize_security_settings(data.get("security"))
-    env_admin_token = os.environ.get("ZRIC_ADMIN_TOKEN", "").strip()
-    if env_admin_token:
-        settings["admin_token"] = env_admin_token
+    env_admin_username = os.environ.get("ZRIC_ADMIN_USERNAME", "").strip()
+    if env_admin_username:
+        settings["admin_username"] = env_admin_username
+    env_admin_password = os.environ.get("ZRIC_ADMIN_PASSWORD", "")
+    if env_admin_password:
+        settings["admin_password"] = env_admin_password
     return settings
 
-
-def get_admin_token(base_dir: str | None = None) -> str:
-    return str(get_security_settings(base_dir).get("admin_token") or "").strip()
+def get_admin_credentials(base_dir: str | None = None) -> tuple[str, str]:
+    settings = get_security_settings(base_dir)
+    return (
+        str(settings.get("admin_username") or "").strip(),
+        str(settings.get("admin_password") or ""),
+    )
 
 
 def get_campaign_import_settings(base_dir: str | None = None) -> dict[str, Any]:
     data = read_local_config(base_dir)
     settings = normalize_campaign_import_settings(data.get("campaign_import"))
-
-    env_use_ai = os.environ.get("ZRIC_CAMPAIGN_IMPORT_AI", "").strip()
-    if env_use_ai:
-        settings["use_ai_conversion"] = normalize_bool(env_use_ai, settings["use_ai_conversion"])
 
     env_timeout = os.environ.get("ZRIC_CAMPAIGN_IMPORT_AI_TIMEOUT", "").strip()
     if env_timeout:
@@ -571,21 +646,50 @@ def get_campaign_import_settings(base_dir: str | None = None) -> dict[str, Any]:
             minimum=5.0,
             maximum=300.0,
         )
-    env_overrides = {
-        "pdf_timeout_seconds": ("ZRIC_CAMPAIGN_IMPORT_PDF_TIMEOUT", 5.0, 300.0),
-        "pdf_max_pages": ("ZRIC_CAMPAIGN_IMPORT_PDF_MAX_PAGES", 1, 1000),
-        "pdf_image_max_pages": ("ZRIC_CAMPAIGN_IMPORT_PDF_IMAGE_MAX_PAGES", 0, 1000),
-        "pdf_max_images": ("ZRIC_CAMPAIGN_IMPORT_PDF_MAX_IMAGES", 0, 1000),
-        "pdf_multimodal_pages": ("ZRIC_CAMPAIGN_IMPORT_PDF_MULTIMODAL_PAGES", 0, 20),
-    }
-    for key, (env_name, minimum, maximum) in env_overrides.items():
-        raw = os.environ.get(env_name, "").strip()
-        if not raw:
-            continue
-        if isinstance(minimum, float) or isinstance(maximum, float):
-            settings[key] = normalize_float(raw, settings[key], minimum=minimum, maximum=maximum)
-        else:
-            settings[key] = normalize_int(raw, settings[key], minimum=minimum, maximum=maximum)
+    env_mineru_command = os.environ.get("ZRIC_MINERU_COMMAND", "").strip()
+    if env_mineru_command:
+        settings["mineru_command"] = env_mineru_command
+
+    env_mineru_timeout = os.environ.get("ZRIC_MINERU_TIMEOUT", "").strip()
+    if env_mineru_timeout:
+        settings["mineru_timeout_seconds"] = normalize_float(
+            env_mineru_timeout,
+            settings["mineru_timeout_seconds"],
+            minimum=30.0,
+            maximum=1200.0,
+        )
+
+    env_mineru_model = os.environ.get("ZRIC_MINERU_MODEL", "").strip()
+    if env_mineru_model:
+        settings["mineru_model"] = env_mineru_model
+
+    env_mineru_language = os.environ.get("ZRIC_MINERU_LANGUAGE", "").strip()
+    if env_mineru_language:
+        settings["mineru_language"] = env_mineru_language
+
+    env_mineru_pages = os.environ.get("ZRIC_MINERU_PAGES", "").strip()
+    if env_mineru_pages:
+        settings["mineru_pages"] = env_mineru_pages
+
+    env_mineru_use_extract = os.environ.get("ZRIC_MINERU_USE_EXTRACT", "").strip()
+    if env_mineru_use_extract:
+        settings["mineru_use_extract"] = normalize_bool(env_mineru_use_extract, settings["mineru_use_extract"])
+
+    env_mineru_token = os.environ.get("ZRIC_MINERU_TOKEN", "").strip()
+    if env_mineru_token:
+        settings["mineru_token"] = env_mineru_token
+
+    env_mineru_base_url = os.environ.get("ZRIC_MINERU_BASE_URL", "").strip()
+    if env_mineru_base_url:
+        settings["mineru_base_url"] = env_mineru_base_url
+
+    env_mineru_source = os.environ.get("ZRIC_MINERU_SOURCE", "").strip()
+    if env_mineru_source:
+        settings["mineru_source"] = env_mineru_source
+
+    env_mineru_verbose = os.environ.get("ZRIC_MINERU_VERBOSE", "").strip()
+    if env_mineru_verbose:
+        settings["mineru_verbose"] = normalize_bool(env_mineru_verbose, settings["mineru_verbose"])
     return settings
 
 
@@ -608,7 +712,6 @@ def get_multiplayer_settings(base_dir: str | None = None) -> dict[str, Any]:
         "max_scenario_upload_bytes": ("ZRIC_MAX_SCENARIO_UPLOAD_BYTES", 1024, 100 * 1024 * 1024),
         "max_scenario_chars": ("ZRIC_MAX_SCENARIO_CHARS", 1000, 5_000_000),
         "max_scenario_chunks": ("ZRIC_MAX_SCENARIO_CHUNKS", 1, 10000),
-        "max_scenario_pdf_pages": ("ZRIC_MAX_SCENARIO_PDF_PAGES", 1, 1000),
         "max_map_upload_bytes": ("ZRIC_MAX_MAP_UPLOAD_BYTES", 1024, 100 * 1024 * 1024),
         "max_room_players": ("ZRIC_MAX_ROOM_PLAYERS", 1, 200),
     }

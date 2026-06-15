@@ -1,7 +1,9 @@
 const { createApp, ref, onMounted, watch, computed, nextTick } = Vue;
 const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : "http://localhost:8000";
-const CAMPAIGN_IMPORT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
-const CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS = 3 * 60 * 1000;
+const CAMPAIGN_IMPORT_POLL_TIMEOUT_MS = 35 * 60 * 1000;
+const CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS = 10 * 60 * 1000;
+const MINERU_FLASH_MAX_BYTES = 10 * 1024 * 1024;
+const CONFIG_MODEL_OPTIONS_CACHE_KEY = 'zric-config-model-options-v1';
 
 createApp({
     setup() {
@@ -24,6 +26,9 @@ createApp({
             return id;
         };
         const isLoading = ref(false);
+        const isDeletingCampaign = ref(false);
+        const campaignPackageImportBusy = ref(false);
+        const campaignPackageExportBusy = ref(false);
         const dbConnected = ref(false);
         const campaignFiles = ref([]);
         const campaignLoadSummary = ref('');
@@ -37,24 +42,78 @@ createApp({
         const campaignImportName = ref('');
         const campaignImportMainFile = ref(null);
         const campaignImportAssets = ref([]);
+        const campaignImportOcrEnabled = ref(true);
         const campaignImportBusy = ref(false);
         const campaignImportResult = ref(null);
+        const campaignImportWarnings = ref([]);
+        const campaignImportErrorText = ref('');
         const campaignImportJobId = ref('');
         const campaignImportProgress = ref(0);
         const campaignImportProgressStep = ref('等待');
         const campaignImportProgressMessage = ref('等待上传剧本文档');
+        const campaignImportVerifiedNotice = ref(null);
+        const campaignImportOutcome = ref(null);
+        let campaignImportNoticeTimer = null;
         const campaignImportFormats = ref([]);
         const campaignImportFormatsText = computed(() => {
             const exts = (campaignImportFormats.value || []).map(f => f.ext).filter(Boolean);
-            return (exts.length ? exts.join(' / ') : '.pdf / .docx / .txt / .md') + '，旧式 .doc 请另存为 .docx';
+            return (exts.length ? exts.join(' / ') : '.pdf / .docx / .doc / .txt / .md') + '，PDF/Word 使用 MinerU 解析';
         });
+        const formatCampaignImportSize = (bytes) => {
+            const n = Number(bytes || 0);
+            if (n <= 0) return '0 B';
+            if (n < 1024) return `${n} B`;
+            if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+            return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        };
+        const campaignImportFileExt = computed(() => {
+            const name = campaignImportMainFile.value?.name || '';
+            const match = name.toLowerCase().match(/\.[^.]+$/);
+            return match ? match[0] : '';
+        });
+        const campaignImportUsesMinerU = computed(() => ['.pdf', '.docx', '.doc'].includes(campaignImportFileExt.value));
+        const campaignImportMinerUModeText = computed(() => {
+            const file = campaignImportMainFile.value;
+            if (!file) return '选择文件后自动判断 MinerU 模式';
+            if (!campaignImportUsesMinerU.value) return 'TXT/Markdown 按纯文本导入，不调用 MinerU';
+            const sizeText = formatCampaignImportSize(file.size);
+            if (campaignImportFileExt.value === '.doc') return `${sizeText}，DOC 仅支持 extract，需要 MinerU token`;
+            if ((file.size || 0) > MINERU_FLASH_MAX_BYTES) {
+                return `${sizeText}，超过 flash-extract 10MB 限制，将使用 extract（需要 token）`;
+            }
+            return `${sizeText}，优先使用 flash-extract（免 token），失败时尝试 extract`;
+        });
+        const campaignImportVisibleWarnings = computed(() => {
+            return (campaignImportWarnings.value || []).filter(Boolean).slice(-6);
+        });
+        const formatCampaignImportError = (value, fallback = '剧本解析失败') => {
+            if (!value) return fallback;
+            if (typeof value === 'string') return value;
+            if (Array.isArray(value)) {
+                return value.map(item => formatCampaignImportError(item, '')).filter(Boolean).join('；') || fallback;
+            }
+            if (typeof value === 'object') {
+                if (value.msg || value.message || value.detail) {
+                    return [value.loc ? `${Array.isArray(value.loc) ? value.loc.join('.') : value.loc}` : '', value.msg || value.message || value.detail]
+                        .filter(Boolean)
+                        .join('：');
+                }
+                try {
+                    return JSON.stringify(value);
+                } catch(e) {
+                    return fallback;
+                }
+            }
+            return String(value);
+        };
 
         // ── API 供应商配置 ──
         const showApiKeyPanel = ref(false);
-        const apiAdminToken = ref('');
         const openApiKeyPanel = () => {
             showGameSettingsModal.value = false;
             showApiKeyPanel.value = true;
+            loadModelOptionsCache();
+            syncConfiguredModelState();
         };
         const apiKeyStatus = ref({ openai: false });
         const apiProviders = ref([]);
@@ -75,16 +134,18 @@ createApp({
             if (active?.name) return active.name;
             return apiProviders.value.find(p => p.id === activeProviderId.value)?.name || '';
         });
-        const blankConfigModelSearches = () => ({ chat: '', embedding: '', image: '' });
+        const blankConfigModelSearches = () => ({ chat: '', embedding: '', image: '', campaign: '' });
         const dropdownModelSearches = ref(blankConfigModelSearches());
         const openModelDropdownCapability = ref('');
-        const modelOptions = ref({ chat: [], embedding: [], image: [] });
+        const blankModelOptions = () => ({ chat: [], embedding: [], image: [], campaign: [] });
+        const modelOptions = ref(blankModelOptions());
         const isFetchingConfigModels = ref(false);
         const fetchingConfigCapability = ref('');
         const modelConfigFields = [
             { key: 'chatModel', capability: 'chat', label: 'Chat Model', placeholder: 'gpt-4.1 / qwen-plus / custom-chat-model' },
             { key: 'embeddingModel', capability: 'embedding', label: 'Embedding Model', placeholder: 'text-embedding-3-small / bge-m3' },
             { key: 'imageModel', capability: 'image', label: 'Image Model', placeholder: 'gpt-image-1 / flux-kontext' },
+            { key: 'campaignModel', capability: 'campaign', label: '剧本解析模型', placeholder: 'gpt-4.1 / qwen-long / vision-capable-model' },
         ];
         const blankApiKeyInputs = (providerName = '') => ({
             providerId: '',
@@ -94,6 +155,7 @@ createApp({
             chatModel: '',
             embeddingModel: '',
             imageModel: '',
+            campaignModel: '',
             imageSize: '1024x1024',
         });
         const apiKeyInputs = ref({
@@ -115,9 +177,14 @@ createApp({
 
         const configRequestHeaders = () => {
             const headers = { 'Content-Type': 'application/json' };
-            const adminToken = apiAdminToken.value.trim();
-            if (adminToken) headers['X-Admin-Token'] = adminToken;
+            if (multiplayerAuthToken.value) headers['X-Auth-Token'] = multiplayerAuthToken.value;
             return headers;
+        };
+        const requireAdminUi = () => {
+            if (multiplayerAuthAccount.value?.is_admin) return true;
+            apiKeySaveOk.value = false;
+            apiKeySaveMsg.value = '请先登录管理员账号';
+            return false;
         };
 
         const applyTokenPolicyPayload = (payload) => {
@@ -201,6 +268,7 @@ createApp({
                     chatModel: d.config.chat_model || '',
                     embeddingModel: d.config.embedding_model || '',
                     imageModel: d.config.image_model || '',
+                    campaignModel: d.config.campaign_model || '',
                     imageSize: d.config.image_size || '1024x1024',
                 };
                 imgModel.value = d.config.image_model || imgModel.value;
@@ -220,16 +288,18 @@ createApp({
                 chatModel: provider.chat_model || '',
                 embeddingModel: provider.embedding_model || '',
                 imageModel: provider.image_model || '',
+                campaignModel: provider.campaign_model || '',
                 imageSize: provider.image_size || '1024x1024',
             };
             imgModel.value = provider.image_model || imgModel.value;
         };
 
         const newApiProvider = () => {
+            if (!requireAdminUi()) return;
             activeProviderId.value = '';
             apiKeyStatus.value = { openai: false };
             apiKeyInputs.value = blankApiKeyInputs(`Provider ${apiProviders.value.length + 1}`);
-            modelOptions.value = { chat: [], embedding: [], image: [] };
+            modelOptions.value = blankModelOptions();
             dropdownModelSearches.value = blankConfigModelSearches();
             openModelDropdownCapability.value = '';
             apiKeySaveMsg.value = '';
@@ -241,6 +311,7 @@ createApp({
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
+                    loadModelOptionsCache();
                     syncConfiguredModelState();
                 }
             } catch(e) {}
@@ -249,6 +320,7 @@ createApp({
         const setTokenPolicyMode = async (mode) => {
             const targetMode = (mode || '').trim();
             if (!targetMode || isSavingTokenPolicy.value || tokenPolicy.value.mode === targetMode) return;
+            if (!requireAdminUi()) return;
             isSavingTokenPolicy.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -285,6 +357,7 @@ createApp({
 
         const setAiCacheEnabled = async (enabled) => {
             if (isSavingAiCache.value) return;
+            if (!requireAdminUi()) return;
             isSavingAiCache.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -313,6 +386,7 @@ createApp({
 
         const clearAiCache = async () => {
             if (isSavingAiCache.value || !aiCache.value.entries) return;
+            if (!requireAdminUi()) return;
             isSavingAiCache.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -340,11 +414,14 @@ createApp({
 
         const switchApiProvider = async (providerId) => {
             if (!providerId) return;
+            if (!requireAdminUi()) return;
             const localProfile = apiProviders.value.find(p => p.id === providerId);
             if (localProfile) fillProviderInputs(localProfile);
-            modelOptions.value = { chat: [], embedding: [], image: [] };
+            modelOptions.value = blankModelOptions();
             dropdownModelSearches.value = blankConfigModelSearches();
             openModelDropdownCapability.value = '';
+            loadModelOptionsCache();
+            syncConfiguredModelState();
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/switch`, {
                     method: 'POST',
@@ -354,6 +431,7 @@ createApp({
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
+                    loadModelOptionsCache();
                     syncConfiguredModelState();
                 } else {
                     apiKeySaveOk.value = false;
@@ -367,6 +445,7 @@ createApp({
 
         const deleteApiProvider = async (providerId) => {
             if (!providerId || !confirm('删除这个 OpenAI 兼容供应商配置？')) return;
+            if (!requireAdminUi()) return;
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/delete`, {
                     method: 'POST',
@@ -377,7 +456,9 @@ createApp({
                 if (d.status === 'success') {
                     apiKeySaveOk.value = true;
                     apiKeySaveMsg.value = '已删除';
+                    removeModelOptionsCacheByProviderId(providerId);
                     applyApiConfigPayload(d);
+                    loadModelOptionsCache();
                     syncConfiguredModelState();
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 2500);
                 } else {
@@ -416,6 +497,89 @@ createApp({
                 merged.push({ ...model, key, model_id: model.model_id || key, label: model.label || key });
             });
             return merged;
+        };
+
+        const modelCacheProviderKey = (provider = null) => {
+            const providerInfo = provider || activeAiProvider.value || {};
+            const providerId = (apiKeyInputs.value.providerId || providerInfo.id || activeProviderId.value || 'draft').trim();
+            const baseUrl = (apiKeyInputs.value.baseUrl || providerInfo.base_url || '').trim().toLowerCase();
+            return `${providerId || 'draft'}|${baseUrl || 'no-base-url'}`;
+        };
+
+        const compactCachedModel = (model) => {
+            const key = (model?.key || model?.model_id || '').trim();
+            if (!key) return null;
+            return {
+                key,
+                model_id: model.model_id || key,
+                label: model.label || key,
+                available: model.available !== false,
+                provider: model.provider || activeProviderName.value || '',
+                provider_id: model.provider_id || activeProviderId.value || '',
+            };
+        };
+
+        const readModelOptionsCache = () => {
+            const data = readStoredJson(CONFIG_MODEL_OPTIONS_CACHE_KEY, {});
+            return data && typeof data === 'object' ? data : {};
+        };
+
+        const writeModelOptionsCache = (cache) => {
+            try {
+                localStorage.setItem(CONFIG_MODEL_OPTIONS_CACHE_KEY, JSON.stringify(cache));
+            } catch(e) {}
+        };
+
+        const saveModelOptionsCache = (provider = null) => {
+            const options = {};
+            modelConfigFields.forEach(field => {
+                options[field.capability] = (modelOptions.value[field.capability] || [])
+                    .map(compactCachedModel)
+                    .filter(Boolean);
+            });
+            if (!Object.values(options).some(list => Array.isArray(list) && list.length)) return;
+            const cache = readModelOptionsCache();
+            cache[modelCacheProviderKey(provider)] = {
+                updated_at: new Date().toISOString(),
+                provider: {
+                    id: (apiKeyInputs.value.providerId || provider?.id || activeProviderId.value || '').trim(),
+                    name: (apiKeyInputs.value.providerName || provider?.name || activeProviderName.value || '').trim(),
+                    base_url: (apiKeyInputs.value.baseUrl || provider?.base_url || '').trim(),
+                },
+                options,
+            };
+            const entries = Object.entries(cache)
+                .sort((a, b) => String(b[1]?.updated_at || '').localeCompare(String(a[1]?.updated_at || '')))
+                .slice(0, 12);
+            writeModelOptionsCache(Object.fromEntries(entries));
+        };
+
+        const loadModelOptionsCache = (provider = null) => {
+            const entry = readModelOptionsCache()[modelCacheProviderKey(provider)];
+            if (!entry?.options) return false;
+            const nextOptions = { ...modelOptions.value };
+            modelConfigFields.forEach(field => {
+                const cached = entry.options[field.capability] || [];
+                if (Array.isArray(cached) && cached.length) {
+                    nextOptions[field.capability] = mergeModelOptions(cached);
+                }
+            });
+            modelOptions.value = nextOptions;
+            return true;
+        };
+
+        const removeModelOptionsCacheByProviderId = (providerId) => {
+            const targetId = (providerId || '').trim();
+            if (!targetId) return;
+            const cache = readModelOptionsCache();
+            let changed = false;
+            Object.keys(cache).forEach(key => {
+                if (key.startsWith(`${targetId}|`) || cache[key]?.provider?.id === targetId) {
+                    delete cache[key];
+                    changed = true;
+                }
+            });
+            if (changed) writeModelOptionsCache(cache);
         };
 
         const syncConfigModelOptions = (models, { provider = null, capabilities = null } = {}) => {
@@ -465,6 +629,7 @@ createApp({
             chat_model: apiKeyInputs.value.chatModel || '',
             embedding_model: apiKeyInputs.value.embeddingModel || '',
             image_model: apiKeyInputs.value.imageModel || '',
+            campaign_model: apiKeyInputs.value.campaignModel || '',
         });
 
         const requestConfigModels = async (capability) => {
@@ -478,6 +643,7 @@ createApp({
 
         const fetchConfigModels = async (capability = 'chat') => {
             if (isFetchingConfigModels.value) return;
+            if (!requireAdminUi()) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = capability;
             apiKeySaveMsg.value = '';
@@ -492,6 +658,7 @@ createApp({
                         [capability]: models
                     };
                     syncConfigModelOptions(models, { provider: d.provider, capabilities: [capability] });
+                    saveModelOptionsCache(d.provider);
                     dropdownModelSearches.value = { ...dropdownModelSearches.value, [capability]: '' };
                     if (field?.key === 'chatModel' && apiKeyInputs.value.chatModel) {
                         syncChatModelSelection(apiKeyInputs.value.chatModel, { models, provider: d.provider });
@@ -522,6 +689,7 @@ createApp({
 
         const fetchAllConfigModels = async () => {
             if (isFetchingConfigModels.value) return;
+            if (!requireAdminUi()) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = 'all';
             apiKeySaveMsg.value = '';
@@ -558,6 +726,7 @@ createApp({
                 });
                 modelOptions.value = nextOptions;
                 syncConfigModelOptions(allModels, { provider: activeAiProvider.value });
+                saveModelOptionsCache(activeAiProvider.value);
                 dropdownModelSearches.value = nextDropdownSearches;
                 if (!apiKeySaveMsg.value) {
                     apiKeySaveOk.value = true;
@@ -586,6 +755,7 @@ createApp({
         };
 
         const saveApiKeys = async () => {
+            if (!requireAdminUi()) return;
             isSavingKeys.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -600,6 +770,7 @@ createApp({
                         chat_model: apiKeyInputs.value.chatModel || null,
                         embedding_model: apiKeyInputs.value.embeddingModel || null,
                         image_model: apiKeyInputs.value.imageModel || null,
+                        campaign_model: apiKeyInputs.value.campaignModel || null,
                         image_size: apiKeyInputs.value.imageSize || null,
                         token_policy_mode: tokenPolicy.value.mode || 'full',
                         make_active: true,
@@ -612,6 +783,7 @@ createApp({
                     apiKeyInputs.value.openaiApiKey = '';
                     applyApiConfigPayload(d);
                     syncConfiguredModelState();
+                    saveModelOptionsCache(activeAiProvider.value);
                     setTimeout(() => { apiKeySaveMsg.value = ''; }, 3000);
                 } else {
                     apiKeySaveOk.value = false;
@@ -663,19 +835,23 @@ createApp({
             };
             const chatModel = (apiKeyInputs.value.chatModel || '').trim();
             if (chatModel) {
-                syncChatModelSelection(chatModel, { models: [], provider: providerInfo });
+                const existingChatOptions = (modelOptions.value.chat || []).length ? modelOptions.value.chat : aiModels.value;
+                syncChatModelSelection(chatModel, { models: existingChatOptions, provider: providerInfo });
             } else {
                 activeAiModel.value = '';
                 aiModelDraft.value = '';
-                aiModels.value = [];
-                modelOptions.value = { ...modelOptions.value, chat: [] };
+                if (!(modelOptions.value.chat || []).length) aiModels.value = [];
             }
-            const embeddingModel = (apiKeyInputs.value.embeddingModel || '').trim();
-            const imageModel = (apiKeyInputs.value.imageModel || '').trim();
+            const preserveOptions = (capability, fieldKey) => {
+                const currentOptions = modelOptions.value[capability] || [];
+                const model = (apiKeyInputs.value[fieldKey] || '').trim();
+                return model ? ensureModelOption(currentOptions, model, providerInfo) : currentOptions;
+            };
             modelOptions.value = {
                 ...modelOptions.value,
-                embedding: embeddingModel ? ensureModelOption([], embeddingModel, providerInfo) : [],
-                image: imageModel ? ensureModelOption([], imageModel, providerInfo) : []
+                embedding: preserveOptions('embedding', 'embeddingModel'),
+                image: preserveOptions('image', 'imageModel'),
+                campaign: preserveOptions('campaign', 'campaignModel')
             };
             aiModelError.value = '';
             openAiModelDropdownState.value = false;
@@ -1052,6 +1228,11 @@ createApp({
         const requireMultiplayerAuth = () => {
             if (multiplayerAuthAccount.value && multiplayerAuthToken.value) return true;
             multiplayerAuthMsg.value = '请先登录账号';
+            return false;
+        };
+        const requireAdminAuth = () => {
+            if (requireMultiplayerAuth() && multiplayerAuthAccount.value?.is_admin) return true;
+            multiplayerAuthMsg.value = '请先登录管理员账号';
             return false;
         };
 
@@ -1847,8 +2028,8 @@ createApp({
             const f = e.dataTransfer.files[0];
             if (!f) return;
             const ext = f.name.split('.').pop().toLowerCase();
-            if (!['txt','pdf'].includes(ext)) {
-                ragIngestResult.value = { ok: false, msg: '仅支持 .txt 和 .pdf 文件' };
+            if (!['txt','md','markdown','pdf','docx','doc'].includes(ext)) {
+                ragIngestResult.value = { ok: false, msg: '仅支持 .txt、.md、.pdf、.docx、.doc 文件' };
                 return;
             }
             ragUploadFile.value = f;
@@ -2060,7 +2241,8 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/campaigns`, { headers: accountHeaders() });
                 const d = await r.json();
-                let raw = d.files || d.files_legacy || [];
+                if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '获取剧本列表失败');
+                let raw = Array.isArray(d.files) ? d.files : (Array.isArray(d.files_legacy) ? d.files_legacy : []);
                 if (raw.length > 0 && typeof raw[0] === 'string') raw = raw.map(f => ({name:f, type:'legacy', path:f}));
                 campaignFiles.value = raw;
                 const currentPath = currentSaveFolder.value ? `campaigns/${currentSaveFolder.value}` : '';
@@ -2068,7 +2250,151 @@ createApp({
                 const current = raw.find(f => f.path === currentPath || f.name === currentSaveFolder.value);
                 const def = raw.find(f => f.name === 'campaign_settings.json' || f.name === 'campaign_settings');
                 selectedCampaign.value = (stillSelected || current || def || raw[0] || {}).path || '';
-            } catch(e) {}
+                return raw;
+            } catch(e) {
+                return null;
+            }
+        };
+        const deleteSelectedCampaign = async () => {
+            const selected = selectedCampaignInfo.value;
+            if (!requireAdminAuth()) return;
+            if (!selected?.deletable || !selected.name || isDeletingCampaign.value) return;
+            const label = selected.name || selected.path || '当前剧本';
+            if (!confirm(`删除剧本「${label}」？\n\n会删除该 campaigns 文件夹内的剧本、知识库、地图和图片资源。`)) return;
+            isDeletingCampaign.value = true;
+            campaignLoadSummary.value = '';
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/game/saves/${encodeURIComponent(selected.name)}`, {
+                    method: 'DELETE',
+                    headers: accountHeaders(),
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '删除失败');
+                if (currentSaveFolder.value === selected.name) currentSaveFolder.value = '';
+                if (selectedCampaign.value === selected.path) selectedCampaign.value = '';
+                await fetchCampaigns();
+                campaignLoadSummary.value = d.message || `已删除剧本：${label}`;
+            } catch(e) {
+                campaignLoadSummary.value = e?.message || '删除失败';
+            } finally {
+                isDeletingCampaign.value = false;
+            }
+        };
+        const exportCampaignPackage = async (campaign = selectedCampaignInfo.value) => {
+            if (!requireAdminAuth()) return;
+            if (!campaign?.package_export_url || campaignPackageExportBusy.value) return;
+            campaignPackageExportBusy.value = true;
+            campaignLoadSummary.value = '';
+            try {
+                const r = await fetch(`${API_BASE_URL}${campaign.package_export_url}`, { headers: accountHeaders() });
+                if (!r.ok) {
+                    const d = await r.json().catch(() => ({}));
+                    throw new Error(d.message || d.detail || '导出迁移包失败');
+                }
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${campaign.name || 'zric-campaign'}_campaign_package.zip`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                campaignLoadSummary.value = `已导出迁移包：${campaign.name || campaign.path}`;
+            } catch(e) {
+                campaignLoadSummary.value = e?.message || '导出迁移包失败';
+            } finally {
+                campaignPackageExportBusy.value = false;
+            }
+        };
+        const importCampaignPackageFile = async (file) => {
+            if (!file || campaignPackageImportBusy.value) return;
+            if (!requireAdminAuth()) return;
+            campaignPackageImportBusy.value = true;
+            campaignLoadSummary.value = '';
+            try {
+                const fd = new FormData();
+                fd.append('package_file', file);
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/package/import`, {
+                    method: 'POST',
+                    headers: accountHeaders(),
+                    body: fd,
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '导入迁移包失败');
+                await fetchCampaigns();
+                selectedCampaign.value = d.campaign_path || d.path || selectedCampaign.value;
+                campaignLoadSummary.value = d.message || `已导入迁移包：${d.name || file.name}`;
+                showCampaignImportOutcome({
+                    ok: true,
+                    title: '迁移包导入成功',
+                    message: `已导入「${d.name || file.name}」，可在启动页剧本列表中选择。`,
+                    path: d.campaign_path || d.path || '',
+                    stats: {
+                        scenes: d.nodes_count || 0,
+                        characters: d.characters_count || 0,
+                        rooms: d.map_rooms_count || 0,
+                        knowledge: d.knowledge_count || 0,
+                        assets: d.assets_count || 0,
+                    },
+                });
+            } catch(e) {
+                campaignLoadSummary.value = e?.message || '导入迁移包失败';
+                showCampaignImportOutcome({
+                    ok: false,
+                    title: '迁移包导入失败',
+                    message: campaignLoadSummary.value,
+                });
+            } finally {
+                campaignPackageImportBusy.value = false;
+            }
+        };
+        const campaignPackagePickImport = async (e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file) await importCampaignPackageFile(file);
+        };
+        const findImportedCampaign = (files, result) => {
+            const expectedPath = String(result?.campaign_path || '').replace(/\\/g, '/');
+            const expectedName = String(result?.name || expectedPath.split('/').pop() || '');
+            return (files || []).find(f => {
+                const path = String(f.path || '').replace(/\\/g, '/');
+                return (expectedPath && path === expectedPath) || (expectedName && f.name === expectedName);
+            });
+        };
+        const showCampaignImportVerifiedNotice = (payload) => {
+            campaignImportVerifiedNotice.value = payload;
+            if (campaignImportNoticeTimer) clearTimeout(campaignImportNoticeTimer);
+            campaignImportNoticeTimer = setTimeout(() => {
+                campaignImportVerifiedNotice.value = null;
+                campaignImportNoticeTimer = null;
+            }, 12000);
+        };
+        const showCampaignImportOutcome = (payload) => {
+            campaignImportOutcome.value = {
+                ok: !!payload?.ok,
+                title: payload?.title || (payload?.ok ? '剧本解析成功' : '剧本解析失败'),
+                message: payload?.message || '',
+                path: payload?.path || '',
+                stats: payload?.stats || null,
+                warnings: Array.isArray(payload?.warnings) ? payload.warnings.filter(Boolean).slice(-10) : [],
+            };
+        };
+        const verifyCampaignImportVisible = async (result) => {
+            campaignImportProgress.value = 100;
+            campaignImportProgressStep.value = 'verify';
+            campaignImportProgressMessage.value = '正在确认剧本已加入启动页列表';
+            const files = await fetchCampaigns();
+            if (!Array.isArray(files)) {
+                throw new Error('剧本文件已生成，但刷新剧本列表失败，无法确认是否已加入启动页');
+            }
+            const imported = findImportedCampaign(files, result);
+            if (!imported) {
+                const target = result?.campaign_path || result?.name || '新剧本';
+                throw new Error(`剧本文件已生成，但刷新剧本列表后未找到「${target}」。请检查账号可见性、campaigns 目录权限或服务缓存。`);
+            }
+            selectedCampaign.value = imported.path || result?.campaign_path || selectedCampaign.value;
+            return imported;
         };
         const fetchCampaignImportFormats = async () => {
             try {
@@ -2078,15 +2404,20 @@ createApp({
             } catch(e) {}
         };
         const openCampaignImportModal = () => {
-            if (!requireMultiplayerAuth()) return;
+            if (!requireAdminAuth()) return;
             campaignImportName.value = '';
             campaignImportMainFile.value = null;
             campaignImportAssets.value = [];
+            campaignImportOcrEnabled.value = true;
             campaignImportResult.value = null;
+            campaignImportWarnings.value = [];
+            campaignImportErrorText.value = '';
             campaignImportJobId.value = '';
             campaignImportProgress.value = 0;
             campaignImportProgressStep.value = '等待';
             campaignImportProgressMessage.value = '等待上传剧本文档';
+            campaignImportVerifiedNotice.value = null;
+            campaignImportOutcome.value = null;
             showCampaignImportModal.value = true;
             fetchCampaignImportFormats();
         };
@@ -2105,6 +2436,8 @@ createApp({
             campaignImportProgress.value = Number.isFinite(job.progress) ? Math.max(0, Math.min(100, job.progress)) : campaignImportProgress.value;
             campaignImportProgressStep.value = job.step || campaignImportProgressStep.value;
             campaignImportProgressMessage.value = job.message || campaignImportProgressMessage.value;
+            campaignImportWarnings.value = Array.isArray(job.warnings) ? job.warnings.filter(Boolean) : [];
+            if (job.error) campaignImportErrorText.value = formatCampaignImportError(job.error);
         };
         const pollCampaignImportJob = async (jobId) => {
             const startedAt = Date.now();
@@ -2112,11 +2445,17 @@ createApp({
             let lastProgressAt = startedAt;
             while (campaignImportBusy.value && jobId) {
                 if (Date.now() - startedAt > CAMPAIGN_IMPORT_POLL_TIMEOUT_MS) {
-                    throw new Error('剧本解析等待超时；请检查服务器日志，或在 config.json 中设置 campaign_import.use_ai_conversion=false 后重试');
+                    const msg = '剧本解析等待超时；请检查服务器日志、MinerU token/网络配置，或降低导入文件复杂度后重试';
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
                 }
                 const r = await fetch(`${API_BASE_URL}/api/campaigns/import/${encodeURIComponent(jobId)}`, { headers: accountHeaders() });
                 const d = await r.json().catch(() => ({}));
-                if (!r.ok || d.status !== 'success') throw new Error(d.detail || d.message || '读取解析进度失败');
+                if (!r.ok || d.status !== 'success') {
+                    const msg = formatCampaignImportError(d.detail || d.message, '读取解析进度失败');
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
+                }
                 const job = d.job || {};
                 syncCampaignImportJob(job);
                 const progressKey = `${job.status || ''}|${job.step || ''}|${job.progress || 0}|${job.message || ''}`;
@@ -2124,19 +2463,28 @@ createApp({
                     lastProgressKey = progressKey;
                     lastProgressAt = Date.now();
                 } else if (Date.now() - lastProgressAt > CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS) {
-                    throw new Error(`剧本解析在「${job.message || job.step || '当前步骤'}」停留过久；请换 DOCX/TXT，或安装 PyMuPDF 并配置支持图片输入的 Chat 模型后重试扫描版 PDF`);
+                    const msg = `剧本解析在「${job.message || job.step || '当前步骤'}」停留过久；请检查 MinerU CLI/token、网络连接，或降低文件页数后重试`;
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
                 }
                 if (job.status === 'success') return job;
-                if (job.status === 'error') throw new Error(job.error || '剧本解析失败');
+                if (job.status === 'error') {
+                    const msg = formatCampaignImportError(job.error, '剧本解析失败');
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
+                }
                 await sleep(700);
             }
+            campaignImportErrorText.value = '剧本解析已中断';
             throw new Error('剧本解析已中断');
         };
         const importCampaign = async () => {
             if (!campaignImportMainFile.value || campaignImportBusy.value) return;
-            if (!requireMultiplayerAuth()) return;
+            if (!requireAdminAuth()) return;
             campaignImportBusy.value = true;
             campaignImportResult.value = null;
+            campaignImportWarnings.value = [];
+            campaignImportErrorText.value = '';
             campaignImportJobId.value = '';
             campaignImportProgress.value = 2;
             campaignImportProgressStep.value = 'upload';
@@ -2144,29 +2492,160 @@ createApp({
             try {
                 const fd = new FormData();
                 fd.append('name', campaignImportName.value.trim());
+                fd.append('ocr_enabled', campaignImportOcrEnabled.value ? 'true' : 'false');
                 fd.append('main_file', campaignImportMainFile.value);
                 for (const asset of campaignImportAssets.value) fd.append('assets', asset);
                 const r = await fetch(`${API_BASE_URL}/api/campaigns/import`, { method: 'POST', headers: accountHeaders(), body: fd });
                 const d = await r.json().catch(() => ({}));
-                if (!r.ok) throw new Error(d.detail || d.message || '导入接口返回错误');
+                if (!r.ok) {
+                    const msg = formatCampaignImportError(d.detail || d.message, '导入接口返回错误');
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
+                }
                 if (d.status === 'accepted' && d.job_id) {
                     campaignImportJobId.value = d.job_id;
                     syncCampaignImportJob(d.job);
                     const job = await pollCampaignImportJob(d.job_id);
                     const result = job.result || {};
+                    const imported = await verifyCampaignImportVisible(result);
+                    const importedName = imported.name || result.name || '新剧本';
+                    const importedPath = imported.path || result.campaign_path || '';
+                    const backendStatus = result.import_verified ? '后端文件校验通过' : '后端已返回完成状态';
                     campaignImportResult.value = {
                         ok: true,
-                        title: '解析完成',
-                        message: `已生成「${result.name || '新剧本'}」：${result.nodes_count || 0} 个场景，${result.map_rooms_count || 0} 个地图房间，${result.assets_count || 0} 个图片资源。`,
+                        title: '导入已确认',
+                        message: `${backendStatus}，并已确认「${importedName}」出现在启动页剧本列表，已自动选中。\n路径：${importedPath}\n内容：${result.nodes_count || 0} 个场景，${result.characters_count || 0} 个角色，${result.lore_count || 0} 条百科，${result.map_rooms_count || 0} 个地图房间，${result.knowledge_count || 0} 个知识库文档，${result.assets_count || 0} 个图片资源。`,
                         warnings: job.warnings || []
                     };
-                    await fetchCampaigns();
-                    if (result.campaign_path) selectedCampaign.value = result.campaign_path;
+                    showCampaignImportOutcome({
+                        ok: true,
+                        title: '剧本导入成功',
+                        message: `已确认「${importedName}」写入本地并出现在启动页列表。`,
+                        path: importedPath,
+                        stats: {
+                            scenes: result.nodes_count || 0,
+                            characters: result.characters_count || 0,
+                            lore: result.lore_count || 0,
+                            entities: result.entities_count || 0,
+                            rooms: result.map_rooms_count || 0,
+                            knowledge: result.knowledge_count || 0,
+                            assets: result.assets_count || 0,
+                        },
+                        warnings: job.warnings || [],
+                    });
+                    showCampaignImportVerifiedNotice({
+                        title: '导入成功，已确认可选择',
+                        message: `「${importedName}」已写入并出现在剧本列表。`,
+                        path: importedPath,
+                    });
                 } else {
-                    campaignImportResult.value = { ok: false, title: '解析失败', message: d.detail || d.message || '导入接口返回错误', warnings: [] };
+                    const msg = formatCampaignImportError(d.detail || d.message, '导入接口返回错误');
+                    campaignImportErrorText.value = msg;
+                    campaignImportResult.value = { ok: false, title: '解析失败', message: msg, warnings: campaignImportWarnings.value || [] };
+                    showCampaignImportOutcome({
+                        ok: false,
+                        title: '剧本导入失败',
+                        message: msg,
+                        warnings: campaignImportWarnings.value || [],
+                    });
                 }
             } catch(e) {
-                campaignImportResult.value = { ok: false, title: '解析失败', message: e?.message || '网络错误或服务器不可用', warnings: [] };
+                const msg = formatCampaignImportError(e?.message, '网络错误或服务器不可用');
+                campaignImportErrorText.value = msg;
+                campaignImportResult.value = {
+                    ok: false,
+                    title: '解析失败',
+                    message: msg,
+                    warnings: campaignImportWarnings.value || []
+                };
+                showCampaignImportOutcome({
+                    ok: false,
+                    title: '剧本导入失败',
+                    message: msg,
+                    warnings: campaignImportWarnings.value || [],
+                });
+            } finally {
+                campaignImportBusy.value = false;
+            }
+        };
+        const reparseSelectedCampaign = async () => {
+            if (campaignImportBusy.value) return;
+            if (!requireAdminAuth()) return;
+            const selected = selectedCampaignInfo.value;
+            if (!selectedCampaign.value || selected?.type !== 'folder') {
+                showCampaignImportOutcome({
+                    ok: false,
+                    title: '无法重新识别',
+                    message: '请选择一个 campaigns/<剧本名> 文件夹剧本后再重新识别。',
+                });
+                return;
+            }
+            if (!confirm('重新识别会覆盖该剧本的结构化结果（campaign.json、map.json 和导入器生成的知识库分段），会保留原始文本与图片。继续？')) {
+                return;
+            }
+            campaignImportBusy.value = true;
+            campaignImportResult.value = null;
+            campaignImportWarnings.value = [];
+            campaignImportErrorText.value = '';
+            campaignImportJobId.value = '';
+            campaignImportOutcome.value = null;
+            campaignImportProgress.value = 4;
+            campaignImportProgressStep.value = 'reparse';
+            campaignImportProgressMessage.value = '正在提交重新识别任务';
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/reparse`, {
+                    method: 'POST',
+                    headers: accountHeaders(true),
+                    body: JSON.stringify({ campaign_path: selectedCampaign.value }),
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    const msg = formatCampaignImportError(d.detail || d.message, '重新识别接口返回错误');
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
+                }
+                if (d.status !== 'accepted' || !d.job_id) {
+                    const msg = formatCampaignImportError(d.detail || d.message, '重新识别接口返回错误');
+                    campaignImportErrorText.value = msg;
+                    throw new Error(msg);
+                }
+                campaignImportJobId.value = d.job_id;
+                syncCampaignImportJob(d.job);
+                const job = await pollCampaignImportJob(d.job_id);
+                const result = job.result || {};
+                const imported = await verifyCampaignImportVisible(result);
+                const importedName = imported.name || result.name || '当前剧本';
+                const importedPath = imported.path || result.campaign_path || selectedCampaign.value;
+                showCampaignImportOutcome({
+                    ok: true,
+                    title: '剧本重新识别成功',
+                    message: `已重新生成「${importedName}」的场景、角色、地图与分段知识库，并确认仍在启动页列表中。`,
+                    path: importedPath,
+                    stats: {
+                        scenes: result.nodes_count || 0,
+                        characters: result.characters_count || 0,
+                        lore: result.lore_count || 0,
+                        entities: result.entities_count || 0,
+                        rooms: result.map_rooms_count || 0,
+                        knowledge: result.knowledge_count || 0,
+                        assets: result.assets_count || 0,
+                    },
+                    warnings: job.warnings || [],
+                });
+                showCampaignImportVerifiedNotice({
+                    title: '重新识别成功',
+                    message: `「${importedName}」已更新，可重新载入游玩。`,
+                    path: importedPath,
+                });
+            } catch(e) {
+                const msg = formatCampaignImportError(e?.message, '重新识别失败');
+                campaignImportErrorText.value = msg;
+                showCampaignImportOutcome({
+                    ok: false,
+                    title: '剧本重新识别失败',
+                    message: msg,
+                    warnings: campaignImportWarnings.value || [],
+                });
             } finally {
                 campaignImportBusy.value = false;
             }
@@ -2236,13 +2715,17 @@ createApp({
         const switchAiModel = async (modelKey) => {
             const targetModel = (modelKey || '').trim();
             if (!targetModel) return;
+            if (!multiplayerAuthAccount.value?.is_admin) {
+                alert('请先登录管理员账号');
+                return;
+            }
             if (targetModel === activeAiModel.value) {
                 syncChatModelSelection(targetModel);
                 return;
             }
             try {
                 const r = await fetch(`${API_BASE_URL}/api/ai/models/switch`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    method: 'POST', headers: accountHeaders(true),
                     body: JSON.stringify({ model: targetModel })
                 });
                 const d = await r.json();
@@ -2405,6 +2888,7 @@ createApp({
             }
         };
         const deleteSave = async (save) => {
+            if (!requireAdminAuth()) return;
             if (!save?.deletable || !save.name) return;
             if (!confirm(`删除存档「${save.name}」？`)) return;
             try {
@@ -4068,16 +4552,19 @@ createApp({
         const dossierMapOnTouchEnd = () => dossierMapEndPan();
 
         return {
-            appState, playSurface, pendingLaunchMode, isLoading, dbConnected, campaignFiles, selectedCampaign, selectedCampaignInfo, campaignLoadSummary,
+            appState, playSurface, pendingLaunchMode, isLoading, isDeletingCampaign, campaignPackageImportBusy, campaignPackageExportBusy, dbConnected, campaignFiles, selectedCampaign, selectedCampaignInfo, campaignLoadSummary,
             showGameSettingsModal, showAdvancedSettings, openGameSettingsModal, returnToAdvancedSettings,
             showCampaignImportModal, campaignImportName, campaignImportMainFile,
-            campaignImportAssets, campaignImportBusy, campaignImportResult,
+            campaignImportAssets, campaignImportOcrEnabled, campaignImportBusy, campaignImportResult,
+            campaignImportWarnings, campaignImportErrorText, campaignImportVisibleWarnings, campaignImportVerifiedNotice,
+            campaignImportOutcome,
             campaignImportProgress, campaignImportProgressStep, campaignImportProgressMessage,
-            campaignImportFormatsText, openCampaignImportModal, campaignImportPickMain,
-            campaignImportPickAssets, importCampaign,
+            campaignImportFormatsText, campaignImportUsesMinerU, campaignImportMinerUModeText,
+            openCampaignImportModal, campaignImportPickMain,
+            campaignImportPickAssets, importCampaign, reparseSelectedCampaign,
             // AI 模型
             aiModels, aiModelSearch, activeAiModel, aiModelDraft, openAiModelDropdownState, isFetchingAiModels, aiModelError, activeProviderName, fetchAiModels, switchAiModel, openAiModelDropdown, toggleAiModelDropdown, filteredAiModels, selectAiModel, selectFirstFilteredAiModel, applyAiModelDraft, modelAccentColor, modelAccentRgb, modelIcon, cycleModel,
-            showApiKeyPanel, openApiKeyPanel, apiAdminToken, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
+            showApiKeyPanel, openApiKeyPanel, apiKeyStatus, apiKeyInputs, apiProviders, activeProviderId, apiKeysMissing,
             tokenPolicy, isSavingTokenPolicy, activeTokenPolicyMode, tokenPolicySummary, setTokenPolicyMode,
             aiCache, aiCacheSummary, isSavingAiCache, fetchAiCacheStatus, setAiCacheEnabled, clearAiCache,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
@@ -4108,7 +4595,7 @@ createApp({
             ragUploadFile, ragDragOver, ragChunkSize, ragChunkOverlap, ragTopK,
             openRagModal, ragImport, ragIngest, ragDeleteDoc, ragToggleHidden, ragSearch,
             ragHandleFileSelect, ragHandleDrop,
-            fetchCampaigns, loadAndStart, enterCurrentGame: enterCurrentGameWithTl, exportSave, doExportOverwrite, doExportNew,
+            fetchCampaigns, deleteSelectedCampaign, exportCampaignPackage, campaignPackagePickImport, loadAndStart, enterCurrentGame: enterCurrentGameWithTl, exportSave, doExportOverwrite, doExportNew,
             showExportModal, exportShowNameInput, exportNewName, currentSaveFolder,
             isExportingSave, saveManagerMsg, saveManagerOk, saveSearch, currentSaveItem, filteredSaveItems,
             saveStatsText, downloadSave, deleteSave, loadSaveFromManager,

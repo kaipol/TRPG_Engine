@@ -52,7 +52,7 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Admin-Token", "X-Room-Token", "X-Member-Token"],
+    allow_headers=["Content-Type", "Authorization", "X-Auth-Token", "X-Room-Token", "X-Member-Token"],
 )
 
 # ---------------------------------------------------------
@@ -142,7 +142,7 @@ app.include_router(dice_router)
 # ---------------------------------------------------------
 # 【模块化】：挂载配置管理接口
 # ---------------------------------------------------------
-from .config_api import config_router, configure_config_api
+from .config_api import config_router, configure_config_api, require_admin_config_access
 app.include_router(config_router)
 
 # ---------------------------------------------------------
@@ -172,16 +172,19 @@ from .campaign_storage import (
 )
 from .campaign_import_converters import (
     ai_convert_campaign,
+    build_knowledge_documents,
+    build_structured_knowledge_documents,
+    convert_structured_campaign_payload,
     decode_text_bytes,
-    extract_docx_images,
-    extract_docx_text,
-    extract_pdf,
+    extract_campaign_document,
+    multimodal_extract_campaign_document,
 )
+from .document_extraction import MINERU_FLASH_MAX_BYTES
 
 # ---------------------------------------------------------
 # 【模块化】：挂载全局账号认证
 # ---------------------------------------------------------
-from .auth import account_from_request, auth_router, configure_auth, init_auth_tables, require_account_from_request
+from .auth import account_from_request, auth_router, configure_auth, init_auth_tables, is_admin_account, require_account_from_request
 app.include_router(auth_router)
 
 # ---------------------------------------------------------
@@ -201,6 +204,9 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 mount_asset_files(app, WEB_DIR, ASSETS_DIR)
 CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
+CAMPAIGN_PACKAGE_MAX_BYTES = 500 * 1024 * 1024
+CAMPAIGN_PACKAGE_MAX_UNCOMPRESSED_BYTES = 750 * 1024 * 1024
+CAMPAIGN_PACKAGE_MAX_FILES = 3000
 
 # 【安全】：AI 供应商和本地启动配置统一保存至 config.json。
 ai_provider.configure_provider_store(str(provider_store_path(BASE_DIR)))
@@ -337,6 +343,7 @@ class NodeUpdateRequest(BaseModel): name: str; summary: str; content: str
 class OptionCreateRequest(BaseModel): node_id: int; text: str; next_node_id: int
 class StringContentRequest(BaseModel): content: str
 class LoadCampaignRequest(BaseModel): filename: str
+class ReparseCampaignRequest(BaseModel): campaign_path: str
 class LorebookRequest(BaseModel): keywords: str; content: str
 class CharCreateRequest(BaseModel):
     name: str
@@ -420,6 +427,133 @@ def _is_legacy_campaign_file(path: str) -> bool:
 configure_campaign_storage(BASE_DIR, CAMPAIGNS_DIR, _is_legacy_campaign_file)
 
 
+def _campaign_json_data_valid(data: object) -> bool:
+    return isinstance(data, dict) and isinstance(data.get("nodes"), list)
+
+
+def _safe_zip_member_name(name: str) -> str:
+    normalized = (name or "").replace("\\", "/").strip()
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or "\x00" in normalized
+        or re.match(r"^[A-Za-z]:", normalized)
+    ):
+        raise fastapi.HTTPException(status_code=400, detail=f"迁移包包含非法路径：{name}")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        raise fastapi.HTTPException(status_code=400, detail=f"迁移包包含越权路径：{name}")
+    if any(re.search(r"[<>:\"|?*\x00-\x1f]", part) for part in parts):
+        raise fastapi.HTTPException(status_code=400, detail=f"迁移包包含非法文件名：{name}")
+    return "/".join(parts)
+
+
+def _zip_info_is_symlink(info: zipfile.ZipInfo) -> bool:
+    return ((info.external_attr >> 16) & 0o170000) == 0o120000
+
+
+def _validated_campaign_package_infos(zf: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, str]]:
+    infos: list[tuple[zipfile.ZipInfo, str]] = []
+    seen_names: set[str] = set()
+    total = 0
+    for info in zf.infolist():
+        if _zip_info_is_symlink(info):
+            raise fastapi.HTTPException(status_code=400, detail="迁移包包含符号链接，已拒绝导入")
+        normalized = _safe_zip_member_name(info.filename)
+        if not normalized or info.is_dir():
+            continue
+        name_key = normalized.casefold()
+        if name_key in seen_names:
+            raise fastapi.HTTPException(status_code=400, detail=f"迁移包包含重复路径：{normalized}")
+        seen_names.add(name_key)
+        total += int(info.file_size or 0)
+        if total > CAMPAIGN_PACKAGE_MAX_UNCOMPRESSED_BYTES:
+            raise fastapi.HTTPException(status_code=413, detail="迁移包解压后体积过大")
+        infos.append((info, normalized))
+        if len(infos) > CAMPAIGN_PACKAGE_MAX_FILES:
+            raise fastapi.HTTPException(status_code=413, detail="迁移包文件数量过多")
+    return infos
+
+
+def _locate_campaign_package_root(
+    zf: zipfile.ZipFile,
+    infos: list[tuple[zipfile.ZipInfo, str]],
+) -> tuple[str, dict]:
+    candidates = []
+    for info, normalized in infos:
+        if normalized.lower().endswith("campaign.json"):
+            parts = normalized.split("/")
+            try:
+                with zf.open(info) as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if _campaign_json_data_valid(data):
+                root = "/".join(parts[:-1])
+                candidates.append((len(parts), root, data))
+    if not candidates:
+        raise fastapi.HTTPException(status_code=400, detail="迁移包中未找到有效 campaign.json")
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1], candidates[0][2]
+
+
+def _zip_read_json_at(
+    zf: zipfile.ZipFile,
+    infos: list[tuple[zipfile.ZipInfo, str]],
+    normalized_name: str,
+) -> dict:
+    for info, normalized in infos:
+        if normalized == normalized_name:
+            try:
+                with zf.open(info) as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                return {}
+    return {}
+
+
+def _unique_campaign_folder_name(base_name: str) -> tuple[str, str]:
+    base = _sanitize_campaign_name(base_name)
+    candidate = base
+    suffix = 1
+    while os.path.exists(os.path.join(CAMPAIGNS_DIR, candidate)):
+        trimmed = base[: max(1, 56 - len(str(suffix)))]
+        candidate = f"{trimmed}_{suffix}"
+        suffix += 1
+    return candidate, os.path.join(CAMPAIGNS_DIR, candidate)
+
+
+def _copy_campaign_package_root(
+    zf: zipfile.ZipFile,
+    infos: list[tuple[zipfile.ZipInfo, str]],
+    root: str,
+    target_folder: str,
+) -> int:
+    copied = 0
+    target_root = os.path.realpath(target_folder)
+    for info, normalized in infos:
+        if root:
+            if normalized != root and not normalized.startswith(root + "/"):
+                continue
+            rel = normalized[len(root):].lstrip("/")
+        else:
+            rel = normalized
+        if not rel or rel.endswith("/"):
+            continue
+        target_path = os.path.realpath(os.path.join(target_root, *rel.split("/")))
+        try:
+            if os.path.commonpath([target_root, target_path]) != target_root:
+                raise ValueError
+        except ValueError:
+            raise fastapi.HTTPException(status_code=400, detail=f"迁移包包含非法目标路径：{rel}") from None
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with zf.open(info) as src, open(target_path, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
+        copied += 1
+    return copied
+
+
 @app.get("/api/campaigns")
 def list_campaigns(request: Request):
     """列出所有可加载的剧本（兼容旧版单文件 + 新版文件夹结构）"""
@@ -457,6 +591,11 @@ def list_campaigns(request: Request):
                     continue
                 owner_id = _manifest_owner_id(manifest)
                 owned_by_me = owner_id is not None and owner_id == _account_id(account)
+                visibility = str(manifest.get("visibility") or manifest.get("scope") or "").strip().lower()
+                is_public = visibility == "public" or owner_id is None or (
+                    not manifest.get("exported_at")
+                    and (manifest.get("imported_at") or manifest.get("source_filename") or manifest.get("parse_version"))
+                )
                 has_map = os.path.exists(os.path.join(folder, "map.json"))
                 kb_dir = os.path.join(folder, "knowledge")
                 assets_dir = os.path.join(folder, "assets")
@@ -470,7 +609,7 @@ def list_campaigns(request: Request):
                 results.append({
                     "name": d, "type": "folder",
                     "path": f"campaigns/{d}",
-                    "scope": "private" if owner_id is not None else "public",
+                    "scope": "public" if is_public else "private",
                     "owned_by_me": owned_by_me,
                     "owner_account_id": owner_id,
                     "owner_username": manifest.get("owner_username", ""),
@@ -480,7 +619,8 @@ def list_campaigns(request: Request):
                     "updated_at": _format_mtime(campaign_json),
                     "size_bytes": _folder_size_bytes(folder),
                     "download_url": f"/api/game/saves/{urllib.parse.quote(d)}/download" if owned_by_me else "",
-                    "deletable": owned_by_me,
+                    "package_export_url": f"/api/campaigns/package/{urllib.parse.quote(d)}/export" if is_admin_account(account) else "",
+                    "deletable": owned_by_me and is_admin_account(account),
                     **limits,
                     **_campaign_summary(campaign_json),
                 })
@@ -533,11 +673,13 @@ _campaign_import_workflow = CampaignImportWorkflow(
     unique_path=_unique_path,
     campaign_asset_url=_campaign_asset_url,
     decode_text_bytes=decode_text_bytes,
-    extract_docx_text=extract_docx_text,
-    extract_docx_images=extract_docx_images,
-    extract_pdf=extract_pdf,
+    extract_campaign_document=extract_campaign_document,
     ai_convert_campaign=ai_convert_campaign,
     logger=_log,
+    multimodal_extract_campaign_document=multimodal_extract_campaign_document,
+    convert_structured_campaign_payload=convert_structured_campaign_payload,
+    build_knowledge_documents=build_knowledge_documents,
+    build_structured_knowledge_documents=build_structured_knowledge_documents,
 )
 _campaign_import_job_owners: dict[str, dict] = {}
 
@@ -547,12 +689,14 @@ def campaign_import_formats():
     return {
         "status": "success",
         "formats": [
-            {"ext": ".pdf", "label": "PDF", "notes": "支持文字型 PDF；扫描版会在可用时尝试多模态读取"},
-            {"ext": ".docx", "label": "Word DOCX", "notes": "支持正文、表格文本与内嵌图片"},
+            {"ext": ".pdf", "label": "PDF", "notes": "使用 MinerU 提取文字、表格与图片；OCR 可在导入时开关"},
+            {"ext": ".docx", "label": "Word DOCX", "notes": "使用 MinerU 提取正文、表格与图片；OCR 可在导入时开关"},
+            {"ext": ".doc", "label": "Word DOC", "notes": "需配置 MinerU extract token；无 token 时可能无法解析"},
             {"ext": ".txt", "label": "TXT", "notes": "UTF-8 优先，GBK fallback"},
             {"ext": ".md", "label": "Markdown", "notes": "按纯文本导入"},
         ],
-        "asset_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+        "asset_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"],
+        "mineru_flash_max_bytes": MINERU_FLASH_MAX_BYTES,
     }
 
 
@@ -560,16 +704,16 @@ def campaign_import_formats():
 async def import_campaign_from_document(
     request: Request,
     name: str = Form(""),
+    ocr_enabled: bool = Form(True),
     main_file: UploadFile = File(...),
     assets: list[UploadFile] | None = File(None),
 ):
+    require_admin_config_access(request)
     account = require_account_from_request(request)
     filename = main_file.filename or "scenario.txt"
     suffix = os.path.splitext(filename)[1].lower()
-    if suffix == ".doc":
-        raise fastapi.HTTPException(status_code=400, detail="暂不支持旧式 .doc，请在 Word 中另存为 .docx 后导入")
-    if suffix not in {".pdf", ".docx", ".txt", ".md", ".markdown"}:
-        raise fastapi.HTTPException(status_code=400, detail="仅支持 PDF、DOCX、TXT、Markdown 剧本文件")
+    if suffix not in {".pdf", ".docx", ".doc", ".txt", ".md", ".markdown"}:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持 PDF、DOCX、DOC、TXT、Markdown 剧本文件")
 
     raw = await main_file.read()
     if not raw:
@@ -585,7 +729,12 @@ async def import_campaign_from_document(
         suffix=suffix,
         raw=raw,
         assets=buffered_assets,
-        metadata=_account_owner_metadata(account),
+        ocr_enabled=ocr_enabled,
+        metadata={
+            **_account_owner_metadata(account),
+            "ocr_enabled": bool(ocr_enabled),
+            "main_file_size": len(raw),
+        },
     )
     _campaign_import_job_owners[job.id] = _account_owner_metadata(account)
     return {"status": "accepted", "job_id": job.id, "job": job.to_dict()}
@@ -601,6 +750,166 @@ def get_campaign_import_job(job_id: str, request: Request):
     if not job:
         raise fastapi.HTTPException(status_code=404, detail="导入任务不存在或已过期")
     return {"status": "success", "job": job}
+
+
+@app.post("/api/campaigns/reparse")
+def reparse_imported_campaign(req: ReparseCampaignRequest, request: Request):
+    require_admin_config_access(request)
+    account = require_account_from_request(request)
+    target, is_folder, _campaign_path, _map_path, _kb_dir = _resolve_campaign_load_target(req.campaign_path)
+    if not is_folder:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持重新识别 campaigns/<剧本名> 文件夹剧本")
+    manifest = _require_private_save_owner(target, account)
+    campaign_name = os.path.basename(target)
+    metadata = {
+        **manifest,
+        **_account_owner_metadata(account),
+        "reparse_requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    job = _campaign_import_workflow.create_reparse_job(
+        campaign_name=campaign_name,
+        folder_path=target,
+        metadata=metadata,
+    )
+    _campaign_import_job_owners[job.id] = _account_owner_metadata(account)
+    return {"status": "accepted", "job_id": job.id, "job": job.to_dict()}
+
+
+@app.get("/api/campaigns/package/{campaign_name}/export")
+def export_campaign_package(campaign_name: str, request: Request):
+    """导出已解析剧本迁移包，用于跨服务器迁移 campaigns/<name>。"""
+    require_admin_config_access(request)
+    require_account_from_request(request)
+    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"zric_campaign_{_sanitize_asset_name(name, '.zip')}_",
+        suffix=".zip",
+        delete=False,
+    )
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(folder):
+                for filename in files:
+                    path = os.path.join(root, filename)
+                    rel = os.path.relpath(path, folder).replace("\\", "/")
+                    zf.write(path, arcname=f"{name}/{rel}")
+    except Exception as exc:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise fastapi.HTTPException(status_code=500, detail=f"导出迁移包失败：{exc}") from exc
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"{name}_campaign_package.zip",
+        background=BackgroundTask(lambda p: os.path.exists(p) and os.remove(p), tmp_path),
+    )
+
+
+@app.post("/api/campaigns/package/import")
+async def import_campaign_package(
+    request: Request,
+    package_file: UploadFile = File(...),
+    name: str = Form(""),
+):
+    """导入已解析剧本迁移包。仅管理员可用。"""
+    require_admin_config_access(request)
+    account = require_account_from_request(request)
+    filename = package_file.filename or "campaign_package.zip"
+    if os.path.splitext(filename)[1].lower() != ".zip":
+        raise fastapi.HTTPException(status_code=400, detail="迁移包必须是 ZIP 文件")
+    raw = await package_file.read(CAMPAIGN_PACKAGE_MAX_BYTES + 1)
+    if not raw:
+        raise fastapi.HTTPException(status_code=400, detail="迁移包为空")
+    if len(raw) > CAMPAIGN_PACKAGE_MAX_BYTES:
+        raise fastapi.HTTPException(status_code=413, detail="迁移包体积过大")
+
+    target_folder = ""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            infos = _validated_campaign_package_infos(zf)
+            root, campaign_data = _locate_campaign_package_root(zf, infos)
+            root_manifest = _zip_read_json_at(zf, infos, f"{root}/manifest.json" if root else "manifest.json")
+            root_name = os.path.basename(root.strip("/")) if root else ""
+            requested_name = (name or "").strip()
+            package_stem = os.path.splitext(os.path.basename(filename))[0]
+            source_name = (
+                requested_name
+                or str(root_manifest.get("name") or "").strip()
+                or root_name
+                or package_stem
+                or "导入迁移包"
+            )
+            campaign_name, target_folder = _unique_campaign_folder_name(source_name)
+            os.makedirs(target_folder, exist_ok=False)
+            copied_count = _copy_campaign_package_root(zf, infos, root, target_folder)
+
+        campaign_json = os.path.join(target_folder, "campaign.json")
+        valid, limits = _campaign_player_limits(campaign_json)
+        if not valid:
+            raise fastapi.HTTPException(status_code=400, detail="迁移包中的 campaign.json 格式无效")
+        map_path = os.path.join(target_folder, "map.json")
+        map_data = {}
+        if os.path.isfile(map_path):
+            try:
+                with open(map_path, "r", encoding="utf-8") as f:
+                    map_data = json.load(f)
+                if not isinstance(map_data, dict):
+                    map_data = {}
+            except (OSError, json.JSONDecodeError):
+                map_data = {}
+        kb_dir = os.path.join(target_folder, "knowledge")
+        assets_dir = os.path.join(target_folder, "assets")
+        knowledge_count = 0
+        if os.path.isdir(kb_dir):
+            knowledge_count = len(glob.glob(os.path.join(kb_dir, "*.txt")) + glob.glob(os.path.join(kb_dir, "*.md")))
+        asset_count = len(glob.glob(os.path.join(assets_dir, "*"))) if os.path.isdir(assets_dir) else 0
+        manifest = _write_save_manifest(target_folder, {
+            "name": campaign_name,
+            "path": f"campaigns/{campaign_name}",
+            "visibility": "public",
+            "package_imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_package_filename": filename,
+            "source_package_root": root,
+            "copied_files": copied_count,
+            "node_count": len(campaign_data.get("nodes", [])),
+            "character_count": len(campaign_data.get("characters", [])),
+            "lore_count": len(campaign_data.get("lorebook", [])),
+            "map_room_count": len(map_data.get("map_rooms") or []),
+            "asset_count": asset_count,
+            "knowledge_count": knowledge_count,
+            **_account_owner_metadata(account),
+        })
+        return {
+            "status": "success",
+            "name": campaign_name,
+            "campaign_path": f"campaigns/{campaign_name}",
+            "path": f"campaigns/{campaign_name}",
+            "copied_files": copied_count,
+            "nodes_count": len(campaign_data.get("nodes", [])),
+            "characters_count": len(campaign_data.get("characters", [])),
+            "map_rooms_count": len(map_data.get("map_rooms") or []),
+            "knowledge_count": knowledge_count,
+            "assets_count": asset_count,
+            "manifest": manifest,
+            **limits,
+            "message": f"已导入迁移包：{campaign_name}",
+        }
+    except zipfile.BadZipFile as exc:
+        raise fastapi.HTTPException(status_code=400, detail="迁移包不是有效 ZIP 文件") from exc
+    except Exception:
+        if target_folder:
+            root = os.path.realpath(CAMPAIGNS_DIR)
+            target = os.path.realpath(target_folder)
+            try:
+                if os.path.commonpath([root, target]) == root and target != root and os.path.isdir(target):
+                    shutil.rmtree(target, ignore_errors=True)
+            except ValueError:
+                pass
+        raise
 
 @app.post("/api/game/load")
 def load_campaign(req: LoadCampaignRequest, request: Request):
@@ -1134,6 +1443,7 @@ def download_save_archive(campaign_name: str, request: Request):
 @app.delete("/api/game/saves/{campaign_name}")
 def delete_save_folder(campaign_name: str, request: Request):
     """删除 campaigns/<name> 文件夹存档。旧版根目录 JSON 不允许通过此接口删除。"""
+    require_admin_config_access(request)
     account = require_account_from_request(request)
     name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
     _require_private_save_owner(folder, account)
@@ -2492,7 +2802,7 @@ def serve_campaign_asset(campaign_name: str, asset_name: str):
     if not campaign_name or "/" in campaign_name or "\\" in campaign_name:
         raise fastapi.HTTPException(status_code=400, detail="非法剧本名")
     ext = os.path.splitext(asset_name)[1].lower()
-    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
         raise fastapi.HTTPException(status_code=404, detail="资源不存在")
     path = _resolve_campaign_asset(campaign_name, asset_name)
     return FileResponse(path)

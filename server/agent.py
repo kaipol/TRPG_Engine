@@ -11,7 +11,7 @@ import re
 import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -19,6 +19,8 @@ from .logger import get_logger
 from .entity import apply_emotion_delta, tick_emotion_decay
 from . import ai_provider
 from . import ai_cache
+from .auth import is_admin_request
+from .local_config import get_admin_credentials
 
 _log = get_logger("agent")
 
@@ -263,9 +265,12 @@ def list_models(search: str = ""):
     }
 
 @agent_router.post("/api/ai/models/switch")
-def switch_model(req: ModelSwitchRequest):
+def switch_model(req: ModelSwitchRequest, request: Request):
     """切换当前激活的 AI 模型。"""
     global _active_model
+    admin_username, admin_password = get_admin_credentials()
+    if not (admin_username and admin_password) or not is_admin_request(request):
+        return {"status": "error", "message": "请先在主页登录管理员账号"}
     if req.capability != "chat":
         try:
             active = ai_provider.set_active_model(req.model, req.capability)

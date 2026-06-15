@@ -32,6 +32,7 @@ MODEL_CAPABILITY_FIELDS = {
     "chat": "chat_model",
     "embedding": "embedding_model",
     "image": "image_model",
+    "campaign": "campaign_model",
 }
 
 TOKEN_POLICY_MODES = {
@@ -101,6 +102,7 @@ class OpenAICompatibleConfig:
     chat_model: str
     embedding_model: str
     image_model: str
+    campaign_model: str
     image_size: str
 
     @property
@@ -127,6 +129,7 @@ def _default_record() -> dict:
         "chat_model": "",
         "embedding_model": "",
         "image_model": "",
+        "campaign_model": "",
         "image_size": DEFAULT_IMAGE_SIZE,
     }
 
@@ -155,6 +158,7 @@ def _normalize_record(raw: dict, fallback_id: str = DEFAULT_PROVIDER_ID) -> dict
         "chat_model": str(raw.get("chat_model") or "").strip(),
         "embedding_model": str(raw.get("embedding_model") or "").strip(),
         "image_model": str(raw.get("image_model") or "").strip(),
+        "campaign_model": str(raw.get("campaign_model") or "").strip(),
         "image_size": str(raw.get("image_size") or DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
     }
 
@@ -193,6 +197,7 @@ def _config_from_record(record: dict | None) -> OpenAICompatibleConfig:
         chat_model=record["chat_model"],
         embedding_model=record["embedding_model"],
         image_model=record["image_model"],
+        campaign_model=record["campaign_model"],
         image_size=record["image_size"],
     )
 
@@ -227,6 +232,7 @@ def list_provider_profiles() -> list[dict]:
             "chat_model": cfg.chat_model,
             "embedding_model": cfg.embedding_model,
             "image_model": cfg.image_model,
+            "campaign_model": cfg.campaign_model,
             "image_size": cfg.image_size,
         })
     return profiles
@@ -287,6 +293,7 @@ def upsert_provider_profile(
     chat_model: str | None = None,
     embedding_model: str | None = None,
     image_model: str | None = None,
+    campaign_model: str | None = None,
     image_size: str | None = None,
     make_active: bool = True,
 ) -> OpenAICompatibleConfig:
@@ -311,6 +318,7 @@ def upsert_provider_profile(
     existing["chat_model"] = pick(chat_model, existing["chat_model"])
     existing["embedding_model"] = pick(embedding_model, existing["embedding_model"])
     existing["image_model"] = pick(image_model, existing["image_model"])
+    existing["campaign_model"] = pick(campaign_model, existing["campaign_model"])
     existing["image_size"] = pick(image_size, existing["image_size"] or DEFAULT_IMAGE_SIZE)
 
     if make_active:
@@ -367,6 +375,7 @@ def get_active_model(capability: str = "chat") -> str:
         "chat": cfg.chat_model,
         "embedding": cfg.embedding_model,
         "image": cfg.image_model,
+        "campaign": cfg.campaign_model,
     }
     return defaults.get(capability, "")
 

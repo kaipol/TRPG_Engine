@@ -59,7 +59,10 @@
                             <i class="ph ph-user-circle" style="font-size:14px"></i> 当前账号
                         </div>
                         <div style="font-size:14px;color:#f5edd8;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ multiplayerAuthAccount.display_name }}</div>
-                        <div style="font-size:12px;color:#6b7280;font-family:'JetBrains Mono',monospace">@{{ multiplayerAuthAccount.username }}</div>
+                        <div style="font-size:12px;color:#6b7280;font-family:'JetBrains Mono',monospace">
+                            @{{ multiplayerAuthAccount.username }}
+                            <span v-if="multiplayerAuthAccount.is_admin" style="margin-left:6px;color:#e8b44b">管理员</span>
+                        </div>
                     </div>
                     <button @click="logoutMultiplayerAuth" :disabled="multiplayerAuthBusy" class="btn btn-ghost btn-sm" style="flex:0 0 auto">
                         <i class="ph ph-sign-out"></i> 退出
@@ -91,11 +94,41 @@
                             {{ f.type==='folder' ? '📁 ' : '📄 ' }}{{ f.scope==='private' ? '🔒 ' : '' }}{{ f.name }}{{ f.has_map ? ' 🗺️' : '' }}{{ f.kb_count ? ` 📚${f.kb_count}` : '' }}
                         </option>
                     </select>
-                    <button @click="openCampaignImportModal" :disabled="!multiplayerAuthAccount" class="btn btn-info btn-icon" title="添加剧本">
+                    <button @click="openCampaignImportModal" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-info btn-icon" title="添加剧本">
                         <i class="ph ph-plus" style="font-size:16px"></i>
+                    </button>
+                    <button @click="reparseSelectedCampaign"
+                            :disabled="!selectedCampaign || selectedCampaignInfo?.type!=='folder' || campaignImportBusy || !multiplayerAuthAccount?.is_admin"
+                            class="btn btn-ghost btn-icon"
+                            title="重新识别当前剧本">
+                        <i class="ph ph-sparkle" style="font-size:16px"></i>
+                    </button>
+                    <button @click="deleteSelectedCampaign"
+                            :disabled="!selectedCampaignInfo?.deletable || !multiplayerAuthAccount?.is_admin || isDeletingCampaign || isLoading || campaignImportBusy"
+                            class="btn btn-ghost btn-icon"
+                            title="删除当前剧本"
+                            style="color:#e05c5c">
+                        <i :class="isDeletingCampaign ? 'ph ph-circle-notch ph-spin' : 'ph ph-trash'" style="font-size:16px"></i>
                     </button>
                     <button @click="fetchCampaigns" class="btn btn-ghost btn-icon" title="刷新">
                         <i class="ph ph-arrows-clockwise" style="font-size:16px"></i>
+                    </button>
+                </div>
+                <div v-if="multiplayerAuthAccount?.is_admin" style="display:flex;gap:8px;margin-top:8px">
+                    <input ref="campaignPackageImportInput" type="file" accept=".zip" style="display:none" @change="campaignPackagePickImport">
+                    <button @click="$refs.campaignPackageImportInput.click()"
+                            :disabled="campaignPackageImportBusy || campaignImportBusy || isLoading"
+                            class="btn btn-ghost btn-sm"
+                            style="flex:1;justify-content:center">
+                        <i :class="campaignPackageImportBusy ? 'ph ph-circle-notch ph-spin' : 'ph ph-upload-simple'" style="font-size:14px"></i>
+                        导入迁移包
+                    </button>
+                    <button @click="exportCampaignPackage(selectedCampaignInfo)"
+                            :disabled="!selectedCampaignInfo?.package_export_url || campaignPackageExportBusy || campaignImportBusy || isLoading"
+                            class="btn btn-ghost btn-sm"
+                            style="flex:1;justify-content:center">
+                        <i :class="campaignPackageExportBusy ? 'ph ph-circle-notch ph-spin' : 'ph ph-package'" style="font-size:14px"></i>
+                        导出迁移包
                     </button>
                 </div>
             </div>
@@ -195,11 +228,21 @@
                 </div>
             </div>
 
+            <div style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:#0b0e17">
+                <label style="display:flex;align-items:center;gap:9px;color:#c9cdd6;font-size:13px;font-weight:600">
+                    <input type="checkbox" v-model="campaignImportOcrEnabled" :disabled="campaignImportBusy || !campaignImportUsesMinerU" style="width:15px;height:15px;accent-color:#5b9cf5">
+                    <span>启用 OCR</span>
+                </label>
+                <div style="font-size:11px;color:#6b7280;line-height:1.55">
+                    {{ campaignImportMinerUModeText }}
+                </div>
+            </div>
+
             <div>
                 <label class="tag" style="display:block;margin-bottom:7px">图片资源（可选）</label>
                 <input type="file" multiple accept="image/*" :disabled="campaignImportBusy" class="inp" style="font-size:12px" @change="campaignImportPickAssets">
                 <div style="font-size:11px;color:#4b5563;margin-top:6px">
-                    已选择 {{ campaignImportAssets.length }} 个图片；DOCX / PDF 内嵌图片也会尽量提取。
+                    已选择 {{ (campaignImportAssets || []).length }} 个图片；DOCX / PDF 内嵌图片也会尽量提取。
                 </div>
             </div>
 
@@ -209,9 +252,9 @@
                     <i :class="campaignImportResult.ok?'ph ph-check-circle':'ph ph-warning-circle'" style="margin-right:5px"></i>
                     {{ campaignImportResult.title }}
                 </div>
-                <div>{{ campaignImportResult.message }}</div>
-                <div v-if="campaignImportResult.warnings&&campaignImportResult.warnings.length" style="margin-top:8px;color:#e8b44b">
-                    <div v-for="w in campaignImportResult.warnings" :key="w">· {{ w }}</div>
+                <div style="white-space:pre-wrap;word-break:break-word">{{ campaignImportResult.message }}</div>
+                <div v-if="(campaignImportResult.warnings || []).length" style="margin-top:8px;color:#e8b44b">
+                    <div v-for="w in (campaignImportResult.warnings || [])" :key="w" style="white-space:pre-wrap;word-break:break-word">· {{ w }}</div>
                 </div>
             </div>
         </div>
@@ -248,6 +291,98 @@
             <span>{{ campaignImportProgressStep }}</span>
             <span>解析期间已锁定其他操作</span>
         </div>
+        <div v-if="campaignImportErrorText"
+             style="margin-top:14px;padding:11px 12px;border-radius:6px;border:1px solid rgba(224,92,92,.28);background:rgba(224,92,92,.08);color:#ffb3b3;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:130px;overflow:auto">
+            <div style="font-weight:650;color:#ffc7c7;margin-bottom:4px">当前错误</div>
+            {{ campaignImportErrorText }}
+        </div>
+        <div v-if="(campaignImportVisibleWarnings || []).length"
+             style="margin-top:14px;padding:11px 12px;border-radius:6px;border:1px solid rgba(232,180,75,.24);background:rgba(232,180,75,.07);color:#e8b44b;font-size:12px;line-height:1.55;max-height:150px;overflow:auto">
+            <div style="font-weight:650;color:#f0c66b;margin-bottom:4px">解析提示</div>
+            <div v-for="w in (campaignImportVisibleWarnings || [])" :key="w" style="white-space:pre-wrap;word-break:break-word">· {{ w }}</div>
+        </div>
+    </div>
+</div>
+
+<div v-if="campaignImportOutcome"
+     style="position:fixed;inset:0;z-index:10090;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72);backdrop-filter:blur(5px)">
+    <div class="panel" style="width:min(620px,92vw);border-radius:10px;box-shadow:0 34px 90px rgba(0,0,0,.72);overflow:hidden"
+         :style="{borderColor: campaignImportOutcome.ok ? 'rgba(79,201,138,.48)' : 'rgba(224,92,92,.48)'}">
+        <div style="padding:22px 24px 16px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:flex-start;gap:12px">
+            <div style="width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:0 0 auto"
+                 :style="campaignImportOutcome.ok ? {background:'rgba(79,201,138,.12)',border:'1px solid rgba(79,201,138,.35)'} : {background:'rgba(224,92,92,.12)',border:'1px solid rgba(224,92,92,.35)'}">
+                <i :class="campaignImportOutcome.ok ? 'ph ph-check-circle' : 'ph ph-warning-circle'"
+                   :style="{fontSize:'22px', color: campaignImportOutcome.ok ? '#4fc98a' : '#f87171'}"></i>
+            </div>
+            <div style="min-width:0;flex:1">
+                <div style="font-size:18px;font-weight:750;margin-bottom:5px"
+                     :style="{color: campaignImportOutcome.ok ? '#bdf4d3' : '#ffc7c7'}">{{ campaignImportOutcome.title }}</div>
+                <div style="font-size:13px;color:#d8dde8;line-height:1.65;white-space:pre-wrap;word-break:break-word">{{ campaignImportOutcome.message }}</div>
+                <div v-if="campaignImportOutcome.path" style="margin-top:8px;font-family:'JetBrains Mono';font-size:11px;color:#8aa0c8;word-break:break-all">{{ campaignImportOutcome.path }}</div>
+            </div>
+            <button @click="campaignImportOutcome=null" class="btn btn-ghost btn-icon" title="关闭" style="width:30px;height:30px;padding:0;flex:0 0 auto">
+                <i class="ph ph-x"></i>
+            </button>
+        </div>
+        <div style="padding:16px 24px 22px;display:flex;flex-direction:column;gap:12px">
+            <div v-if="campaignImportOutcome.stats"
+                 style="display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:8px">
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.scenes || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">场景</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.characters || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">角色</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.lore || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">百科</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.entities || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">实体</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.rooms || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">地图房间</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.knowledge || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">知识库</div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:9px 10px;background:#090b10">
+                    <div style="font-family:'JetBrains Mono';font-size:15px;color:#d8dde8">{{ campaignImportOutcome.stats.assets || 0 }}</div>
+                    <div style="font-size:11px;color:#6b7280;margin-top:2px">图片</div>
+                </div>
+            </div>
+            <div v-if="(campaignImportOutcome.warnings || []).length"
+                 style="padding:10px 12px;border-radius:8px;border:1px solid rgba(232,180,75,.24);background:rgba(232,180,75,.07);color:#e8b44b;font-size:12px;line-height:1.55;max-height:150px;overflow:auto">
+                <div style="font-weight:650;color:#f0c66b;margin-bottom:4px">提示</div>
+                <div v-for="w in (campaignImportOutcome.warnings || [])" :key="w" style="white-space:pre-wrap;word-break:break-word">· {{ w }}</div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px">
+                <button @click="campaignImportOutcome=null" class="btn" :class="campaignImportOutcome.ok ? 'btn-accent' : 'btn-ghost'">知道了</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div v-if="campaignImportVerifiedNotice"
+     class="toast-box"
+     style="top:24px;left:50%;transform:translateX(-50%);width:min(560px,92vw);z-index:10080;background:rgba(5,24,18,.98);border-color:rgba(79,201,138,.55);box-shadow:0 22px 70px rgba(0,0,0,.55)">
+    <div style="display:flex;align-items:flex-start;gap:12px">
+        <div style="width:34px;height:34px;border-radius:8px;background:rgba(79,201,138,.14);border:1px solid rgba(79,201,138,.35);display:flex;align-items:center;justify-content:center;flex:0 0 auto">
+            <i class="ph ph-check-circle" style="font-size:18px;color:#4fc98a"></i>
+        </div>
+        <div style="min-width:0;flex:1">
+            <div style="font-size:15px;font-weight:700;color:#bdf4d3;margin-bottom:4px">{{ campaignImportVerifiedNotice.title }}</div>
+            <div style="font-size:13px;color:#d8dde8;line-height:1.55;white-space:pre-wrap;word-break:break-word">{{ campaignImportVerifiedNotice.message }}</div>
+            <div v-if="campaignImportVerifiedNotice.path" style="margin-top:6px;font-family:'JetBrains Mono';font-size:11px;color:#8bd8ad;word-break:break-all">{{ campaignImportVerifiedNotice.path }}</div>
+        </div>
+        <button @click="campaignImportVerifiedNotice=null" class="btn btn-ghost btn-icon" title="关闭提示" style="width:28px;height:28px;padding:0;flex:0 0 auto">
+            <i class="ph ph-x"></i>
+        </button>
     </div>
 </div>
 
@@ -276,13 +411,14 @@
             <aside style="border-right:1px solid rgba(255,255,255,.06);padding:16px;overflow-y:auto">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
                     <span class="tag">供应商</span>
-                    <button @click="newApiProvider" class="btn btn-ghost btn-icon" title="新增供应商" style="width:28px;height:28px;padding:0">
+                    <button @click="newApiProvider" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-ghost btn-icon" title="新增供应商" style="width:28px;height:28px;padding:0">
                         <i class="ph ph-plus" style="font-size:14px"></i>
                     </button>
                 </div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     <div v-for="p in apiProviders" :key="p.id" style="display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:6px">
                         <button @click="switchApiProvider(p.id)"
+                                :disabled="!multiplayerAuthAccount?.is_admin"
                                 class="btn btn-sm" style="justify-content:flex-start;text-align:left;padding:9px 10px;min-width:0"
                                 :style="activeProviderId===p.id
                                     ? {background:'rgba(79,201,138,.1)',borderColor:'rgba(79,201,138,.32)',color:'#b8f5d2'}
@@ -291,7 +427,7 @@
                                :style="{color:p.configured?'#4fc98a':'#e05c5c'}"></i>
                             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.name || p.id }}</span>
                         </button>
-                        <button v-if="apiProviders.length>1" @click="deleteApiProvider(p.id)" class="btn btn-ghost btn-icon" title="删除供应商" style="width:28px;height:100%;padding:0">
+                        <button v-if="apiProviders.length>1" @click="deleteApiProvider(p.id)" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-ghost btn-icon" title="删除供应商" style="width:28px;height:100%;padding:0">
                             <i class="ph ph-trash" style="font-size:12px;color:#6b7280"></i>
                         </button>
                     </div>
@@ -301,13 +437,18 @@
             <div style="padding:18px 22px;overflow-y:auto;display:flex;flex-direction:column;gap:14px">
                 <div>
                     <label class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
-                        管理员令牌
-                        <span style="font-size:10px;color:#6b7280">远程部署并配置 security.admin_token 时填写</span>
+                        管理员权限
+                        <span v-if="multiplayerAuthAccount?.is_admin" style="font-size:10px;color:#e8b44b">已登录</span>
+                        <span v-else style="font-size:10px;color:#e05c5c">未登录</span>
                     </label>
-                    <input v-model.trim="apiAdminToken" type="password" class="inp inp-mono"
-                           placeholder="与服务器 config.json 的 security.admin_token 一致；本机回环访问可留空"
-                           autocomplete="off"
-                           style="font-size:12px">
+                    <div style="font-size:12px;line-height:1.6;color:#7c8494;border:1px solid rgba(255,255,255,.07);background:#090b10;border-radius:6px;padding:9px 10px">
+                        <template v-if="multiplayerAuthAccount?.is_admin">
+                            当前账号 @{{ multiplayerAuthAccount.username }} 可以修改系统配置。
+                        </template>
+                        <template v-else>
+                            请先在主页登录 config.json 中配置的管理员账号。
+                        </template>
+                    </div>
                 </div>
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -343,7 +484,7 @@
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
                         <button v-for="mode in tokenPolicy.modes" :key="'token-policy-'+mode.mode"
                                 @click="setTokenPolicyMode(mode.mode)"
-                                :disabled="isSavingTokenPolicy || tokenPolicy.mode===mode.mode"
+                                :disabled="!multiplayerAuthAccount?.is_admin || isSavingTokenPolicy || tokenPolicy.mode===mode.mode"
                                 class="btn btn-sm"
                                 :title="tokenPolicySummary(mode)"
                                 :style="tokenPolicy.mode===mode.mode
@@ -362,7 +503,7 @@
                     </div>
                     <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center">
                         <button @click="setAiCacheEnabled(!aiCache.enabled)"
-                                :disabled="isSavingAiCache"
+                                :disabled="!multiplayerAuthAccount?.is_admin || isSavingAiCache"
                                 class="btn btn-sm"
                                 :style="aiCache.enabled
                                     ? {background:'rgba(79,201,138,.1)',borderColor:'rgba(79,201,138,.32)',color:'#b8f5d2'}
@@ -370,7 +511,7 @@
                             <i :class="aiCache.enabled ? 'ph ph-toggle-right' : 'ph ph-toggle-left'" style="font-size:16px"></i>
                             <span>{{ aiCache.enabled ? '已启用' : '已关闭' }}</span>
                         </button>
-                        <button @click="clearAiCache" :disabled="isSavingAiCache || !aiCache.entries" class="btn btn-ghost btn-sm">
+                        <button @click="clearAiCache" :disabled="!multiplayerAuthAccount?.is_admin || isSavingAiCache || !aiCache.entries" class="btn btn-ghost btn-sm">
                             <i :class="isSavingAiCache ? 'ph ph-circle-notch' : 'ph ph-broom'" :style="isSavingAiCache ? 'animation:spin 1s linear infinite' : ''"></i>
                             清空
                         </button>
@@ -379,7 +520,7 @@
 
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
                     <span class="tag">模型配置</span>
-                    <button @click="fetchAllConfigModels" :disabled="isFetchingConfigModels" class="btn btn-ghost btn-sm">
+                    <button @click="fetchAllConfigModels" :disabled="!multiplayerAuthAccount?.is_admin || isFetchingConfigModels" class="btn btn-ghost btn-sm">
                         <i :class="isFetchingConfigModels&&fetchingConfigCapability==='all'?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingConfigModels&&fetchingConfigCapability==='all'?'animation:spin 1s linear infinite':''"></i>
                         获取全部模型
                     </button>
@@ -419,7 +560,7 @@
         </div>
 
         <div style="padding:16px 24px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px;flex-shrink:0">
-            <button @click="saveApiKeys" :disabled="isSavingKeys" class="btn btn-ok" style="flex:1">
+            <button @click="saveApiKeys" :disabled="!multiplayerAuthAccount?.is_admin || isSavingKeys" class="btn btn-ok" style="flex:1">
                 <i v-if="isSavingKeys" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
                 <i v-else class="ph ph-floppy-disk"></i>
                 {{ isSavingKeys ? '保存中…' : '保存供应商并生效' }}
@@ -2942,19 +3083,19 @@
                     <div>
                         <label class="tag" style="display:block;margin-bottom:8px">
                             <i class="ph ph-file-arrow-up" style="font-size:13px;margin-right:4px"></i>
-                            上传文件 <span style="font-size:10px;color:#4b5563;font-weight:400;margin-left:6px">支持 .txt / .pdf（几十万字均可）</span>
+                            上传文件 <span style="font-size:10px;color:#4b5563;font-weight:400;margin-left:6px">支持 .txt / .md / .pdf / .docx / .doc</span>
                         </label>
                         <div @dragover.prevent @drop.prevent="ragHandleDrop"
                              @click="$refs.ragFileInput.click()"
                              style="border:2px dashed rgba(129,140,248,.25);border-radius:8px;padding:24px 16px;text-align:center;cursor:pointer;transition:all .15s;background:#0b0e17"
                              :style="ragDragOver?{borderColor:'rgba(129,140,248,.6)',background:'rgba(129,140,248,.05)'}:{}"
                              @dragenter="ragDragOver=true" @dragleave="ragDragOver=false">
-                            <input ref="ragFileInput" type="file" accept=".txt,.pdf" style="display:none"
+                            <input ref="ragFileInput" type="file" accept=".txt,.md,.markdown,.pdf,.docx,.doc" style="display:none"
                                    @change="ragHandleFileSelect">
                             <i class="ph ph-cloud-arrow-up" style="font-size:36px;color:#4b5563;display:block;margin-bottom:10px"></i>
                             <div v-if="!ragUploadFile" style="font-size:13px;color:#6b7280;line-height:1.8">
                                 拖拽文件至此，或点击选择<br>
-                                <span style="font-size:11px;color:#4b5563">.txt（UTF-8/GBK）· .pdf（可选文字型）</span>
+                                <span style="font-size:11px;color:#4b5563">.txt/.md（UTF-8/GBK）· PDF/Word（MinerU OCR）</span>
                             </div>
                             <div v-else style="display:flex;align-items:center;justify-content:center;gap:10px">
                                 <i :class="ragUploadFile.name.endsWith('.pdf')?'ph ph-file-pdf':'ph ph-file-text'"
