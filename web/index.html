@@ -23,7 +23,7 @@
     <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 50% 40%,rgba(232,180,75,.04) 0%,transparent 65%)"></div>
     
     <div class="panel launch-card">
-        <div style="padding:32px 36px 24px;border-bottom:1px solid rgba(255,255,255,.06)">
+        <div class="launch-card-head" style="padding:18px 28px 14px;border-bottom:1px solid rgba(255,255,255,.06)">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
                 
                 <div style="width:36px;height:36px;background:rgba(88,166,255,.15);border:1px solid rgba(88,166,255,.3);border-radius:8px;display:flex;align-items:center;justify-content:center">
@@ -39,17 +39,17 @@
                     </svg>
                 </div>
                 
-                <div>
-                    <div style="font-family:'JetBrains Mono';font-size:20px;font-weight:700;color:#58a6ff;letter-spacing:.08em">Z.R.I.C</div>
-                    <div style="font-size:11px;color:#6b7280;letter-spacing:.1em;text-transform:uppercase;margin-top:-1px">Zero-boundary Roleplay Intelligence Core</div>
+                <div class="launch-brand">
+                    <div class="launch-brand-title" style="font-family:'JetBrains Mono';font-size:20px;font-weight:700;color:#58a6ff;letter-spacing:0">Z.R.I.C</div>
+                    <div class="launch-brand-subtitle" style="font-size:11px;color:#6b7280;letter-spacing:0;text-transform:uppercase;margin-top:-1px">Zero-boundary Roleplay Intelligence Core</div>
                 </div>
             </div>
         </div>
 
 
         <!-- 正文 -->
-        <div style="padding:28px 36px 32px">
-            <div style="margin-bottom:18px;border:1px solid rgba(125,211,252,.16);background:#090b10;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px">
+        <div class="launch-card-body" style="padding:18px 28px 22px">
+            <div class="launch-section launch-account-section" style="margin-bottom:18px;border:1px solid rgba(125,211,252,.16);background:#090b10;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px">
                 <div class="tag" style="display:flex;align-items:center;gap:6px;color:#7dd3fc">
                     <i class="ph ph-key" style="font-size:14px"></i> 账号登录 / 注册
                 </div>
@@ -61,7 +61,6 @@
                         <div style="font-size:14px;color:#f5edd8;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ multiplayerAuthAccount.display_name }}</div>
                         <div style="font-size:12px;color:#6b7280;font-family:'JetBrains Mono',monospace">
                             @{{ multiplayerAuthAccount.username }}
-                            <span v-if="multiplayerAuthAccount.is_admin" style="margin-left:6px;color:#e8b44b">管理员</span>
                         </div>
                     </div>
                     <button @click="logoutMultiplayerAuth" :disabled="multiplayerAuthBusy" class="btn btn-ghost btn-sm" style="flex:0 0 auto">
@@ -69,12 +68,12 @@
                     </button>
                 </div>
                 <div v-else style="display:flex;flex-direction:column;gap:8px">
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                    <div class="launch-auth-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
                         <input v-model.trim="multiplayerAuthForm.username" class="inp" placeholder="账号">
                         <input v-model="multiplayerAuthForm.password" type="password" class="inp" placeholder="密码">
                     </div>
                     <input v-model.trim="multiplayerAuthForm.display_name" class="inp" placeholder="注册显示名">
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                    <div class="launch-auth-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
                         <button @click="submitMultiplayerAuth('login')" :disabled="multiplayerAuthBusy || !multiplayerAuthForm.username.trim() || !multiplayerAuthForm.password" class="btn btn-info">
                             登录
                         </button>
@@ -85,36 +84,84 @@
                 </div>
                 <div v-if="multiplayerAuthMsg" style="font-size:12px;line-height:1.6" :style="{color: multiplayerAuthMsg.includes('失败') || multiplayerAuthMsg.includes('请先') || multiplayerAuthMsg.includes('失效') ? '#f87171' : '#4fc98a'}">{{ multiplayerAuthMsg }}</div>
             </div>
-            <div style="margin-bottom:24px">
-                <label class="tag" style="display:block;margin-bottom:8px">选择剧本 / 存档</label>
-                <div style="display:flex;gap:10px">
-                    <select v-model="selectedCampaign" class="inp" style="flex:1" data-testid="campaign-select">
+            <div class="launch-section launch-campaign-section" style="margin-bottom:24px">
+                <div class="launch-campaign-header">
+                    <div>
+                        <label class="tag" style="display:block;margin-bottom:6px">选择剧本</label>
+                        <div class="launch-campaign-title">
+                            {{ selectedCampaignInfo?.name || '选择或导入一个剧本' }}
+                        </div>
+                    </div>
+                    <span class="launch-campaign-badge" :class="{private:selectedCampaignInfo?.scope==='private'}">
+                        {{ selectedCampaignInfo ? (selectedCampaignInfo.scope==='private' ? '我的剧本' : '公共剧本') : '未选择' }}
+                    </span>
+                </div>
+                <div class="launch-campaign-hint">
+                    <template v-if="selectedCampaignInfo">
+                        {{ selectedCampaignInfo.owned_by_me ? '可进入游玩、创建多人房间、重新识别或删除。' : '可进入游玩或创建多人房间；编辑操作仅限剧本拥有者。' }}
+                    </template>
+                    <template v-else>
+                        登录后可上传剧本；多人房间会使用房主的供应商配置。
+                    </template>
+                </div>
+                <div class="launch-campaign-row" style="display:flex;gap:10px">
+                    <select v-model="selectedCampaign" @change="onCampaignSelectionChanged" class="inp" style="flex:1" data-testid="campaign-select">
                         <option value="" disabled>-- 请选择剧本 --</option>
                         <option v-for="f in campaignFiles" :key="f.path" :value="f.path">
                             {{ f.type==='folder' ? '📁 ' : '📄 ' }}{{ f.scope==='private' ? '🔒 ' : '' }}{{ f.name }}{{ f.has_map ? ' 🗺️' : '' }}{{ f.kb_count ? ` 📚${f.kb_count}` : '' }}
                         </option>
                     </select>
-                    <button @click="openCampaignImportModal" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-info btn-icon" title="添加剧本">
+                </div>
+                <div class="launch-campaign-meta">
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.node_count || 0 }}</strong>
+                        <span>场景</span>
+                    </div>
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.character_count || 0 }}</strong>
+                        <span>角色</span>
+                    </div>
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.rag_count || selectedCampaignInfo?.kb_count || 0 }}</strong>
+                        <span>知识</span>
+                    </div>
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.asset_count || 0 }}</strong>
+                        <span>图片</span>
+                    </div>
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.max_players || 1 }}</strong>
+                        <span>人数</span>
+                    </div>
+                    <div>
+                        <strong>{{ selectedCampaignInfo?.has_map ? 'ON' : 'OFF' }}</strong>
+                        <span>地图</span>
+                    </div>
+                </div>
+                <div class="launch-campaign-actions">
+                    <button @click="openCampaignImportModal" :disabled="!multiplayerAuthAccount" class="btn btn-info">
                         <i class="ph ph-plus" style="font-size:16px"></i>
+                        添加剧本
                     </button>
                     <button @click="reparseSelectedCampaign"
-                            :disabled="!selectedCampaign || selectedCampaignInfo?.type!=='folder' || campaignImportBusy || !multiplayerAuthAccount?.is_admin"
-                            class="btn btn-ghost btn-icon"
-                            title="重新识别当前剧本">
+                            :disabled="!selectedCampaign || selectedCampaignInfo?.type!=='folder' || campaignImportBusy || !multiplayerAuthAccount || !selectedCampaignInfo?.owned_by_me"
+                            class="btn btn-ghost">
                         <i class="ph ph-sparkle" style="font-size:16px"></i>
+                        重新识别
+                    </button>
+                    <button @click="fetchCampaigns" class="btn btn-ghost">
+                        <i class="ph ph-arrows-clockwise" style="font-size:16px"></i>
+                        刷新列表
                     </button>
                     <button @click="deleteSelectedCampaign"
-                            :disabled="!selectedCampaignInfo?.deletable || !multiplayerAuthAccount?.is_admin || isDeletingCampaign || isLoading || campaignImportBusy"
-                            class="btn btn-ghost btn-icon"
-                            title="删除当前剧本"
+                            :disabled="!selectedCampaignInfo?.deletable || !multiplayerAuthAccount || isDeletingCampaign || isLoading || campaignImportBusy"
+                            class="btn btn-ghost"
                             style="color:#e05c5c">
                         <i :class="isDeletingCampaign ? 'ph ph-circle-notch ph-spin' : 'ph ph-trash'" style="font-size:16px"></i>
-                    </button>
-                    <button @click="fetchCampaigns" class="btn btn-ghost btn-icon" title="刷新">
-                        <i class="ph ph-arrows-clockwise" style="font-size:16px"></i>
+                        删除剧本
                     </button>
                 </div>
-                <div v-if="multiplayerAuthAccount?.is_admin" style="display:flex;gap:8px;margin-top:8px">
+                <div v-if="multiplayerAuthAccount" class="launch-package-actions" style="display:flex;gap:8px;margin-top:8px">
                     <input ref="campaignPackageImportInput" type="file" accept=".zip" style="display:none" @change="campaignPackagePickImport">
                     <button @click="$refs.campaignPackageImportInput.click()"
                             :disabled="campaignPackageImportBusy || campaignImportBusy || isLoading"
@@ -133,7 +180,7 @@
                 </div>
             </div>
 
-            <div style="margin-bottom:24px;border:1px solid rgba(255,255,255,.06);background:#090b10;border-radius:10px;padding:11px 12px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <div class="launch-section launch-provider-section" style="margin-bottom:24px;border:1px solid rgba(255,255,255,.06);background:#090b10;border-radius:10px;padding:11px 12px;display:flex;align-items:center;justify-content:space-between;gap:12px">
                 <div style="min-width:0">
                     <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
                         <i class="ph ph-plugs-connected" style="font-size:14px"></i> AI 供应商
@@ -147,33 +194,100 @@
                 </button>
             </div>
 
-            <div class="launch-mode-grid">
-                <button @click="loadAndStart('solo')" :disabled="!selectedCampaign||isLoading||campaignImportBusy" class="btn btn-accent launch-mode-btn" data-testid="solo-entry">
-                    <i v-if="isLoading&&pendingLaunchMode==='solo'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
-                    <i v-else class="ph ph-user-circle"></i>
-                    <span class="launch-mode-title">单人游玩</span>
-                    <span class="launch-mode-desc">AI-GM 主持，选择剧中角色后开始行动。</span>
-                </button>
-                <button @click="openMenuMultiplayer" :disabled="isLoading||campaignImportBusy" class="btn btn-info launch-mode-btn" data-testid="multiplayer-entry">
-                    <i class="ph ph-users-three"></i>
-                    <span class="launch-mode-title">多人游玩</span>
-                    <span class="launch-mode-desc">创建或加入房间，玩家各自选择角色扮演。</span>
-                </button>
+            <div class="launch-section launch-save-section" style="border:1px solid rgba(255,255,255,.06);background:#090b10;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px;min-height:0">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                    <div class="tag" style="display:flex;align-items:center;gap:6px;color:#e8b44b">
+                        <i class="ph ph-clock-counter-clockwise" style="font-size:14px"></i> 恢复存档
+                    </div>
+                    <button @click="fetchSaves" class="btn btn-ghost btn-icon" title="刷新存档" style="width:30px;height:30px;padding:0">
+                        <i class="ph ph-arrows-clockwise" style="font-size:14px"></i>
+                    </button>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px">
+                    <button @click="menuSaveModeFilter='all'" class="btn btn-ghost btn-sm" :style="menuSaveModeFilter==='all'?{borderColor:'rgba(232,180,75,.35)',background:'rgba(232,180,75,.07)',color:'#e8b44b'}:{}">全部 {{ menuSaveModeCounts.all }}</button>
+                    <button @click="menuSaveModeFilter='solo'" class="btn btn-ghost btn-sm" :style="menuSaveModeFilter==='solo'?{borderColor:'rgba(91,156,245,.35)',background:'rgba(91,156,245,.07)',color:'#93c5fd'}:{}">单人 {{ menuSaveModeCounts.solo }}</button>
+                    <button @click="menuSaveModeFilter='multiplayer'" class="btn btn-ghost btn-sm" :style="menuSaveModeFilter==='multiplayer'?{borderColor:'rgba(79,201,138,.35)',background:'rgba(79,201,138,.07)',color:'#86efac'}:{}">多人 {{ menuSaveModeCounts.multiplayer }}</button>
+                    <button @click="menuSaveModeFilter='general'" class="btn btn-ghost btn-sm" :style="menuSaveModeFilter==='general'?{borderColor:'rgba(167,139,250,.35)',background:'rgba(167,139,250,.07)',color:'#c4b5fd'}:{}">通用 {{ menuSaveModeCounts.general }}</button>
+                </div>
+                <div v-if="menuSaveItems.length" style="display:flex;flex-direction:column;gap:7px;max-height:260px;overflow:auto;padding-right:2px">
+                    <div v-for="save in menuSaveItems" :key="'menu-save-'+save.path"
+                         style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border:1px solid rgba(255,255,255,.07);background:#0b0e17;border-radius:8px;padding:8px 9px">
+                        <div style="min-width:0">
+                            <div v-if="renamingSaveName===save.path" style="display:flex;gap:6px;align-items:center">
+                                <input v-model.trim="renameSaveDraft" @keyup.enter="renameSave(save)" class="inp" placeholder="新存档名" style="font-size:12px;min-width:0;padding:7px 9px">
+                                <button @click.stop="renameSave(save)" :disabled="isRenamingSave" class="btn btn-accent btn-icon" title="保存名称" style="width:30px;height:30px;padding:0;flex:0 0 auto">
+                                    <i :class="isRenamingSave?'ph ph-circle-notch':'ph ph-check'" :style="isRenamingSave?'animation:spin 1s linear infinite':''"></i>
+                                </button>
+                                <button @click.stop="cancelRenameSave" :disabled="isRenamingSave" class="btn btn-ghost btn-icon" title="取消" style="width:30px;height:30px;padding:0;flex:0 0 auto">
+                                    <i class="ph ph-x"></i>
+                                </button>
+                            </div>
+                            <button v-else @click="restoreSaveFromMenu(save)"
+                                    :disabled="!multiplayerAuthAccount || isLoading || campaignImportBusy"
+                                    class="btn btn-ghost"
+                                    style="width:100%;justify-content:flex-start;text-align:left;padding:5px 4px;min-height:0;border-color:transparent;background:transparent">
+                                <i :class="save.play_mode==='multiplayer'?'ph ph-users-three':'ph ph-folder-open'" style="font-size:15px;flex:0 0 auto;color:#e8b44b"></i>
+                                <span style="min-width:0">
+                                    <span style="display:flex;align-items:center;gap:6px;min-width:0">
+                                        <span style="font-size:13px;font-weight:650;color:#c9cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ saveDisplayName(save) }}</span>
+                                        <span style="font-size:10px;color:#e8b44b;border:1px solid rgba(232,180,75,.22);border-radius:999px;padding:1px 5px;flex:0 0 auto">{{ savePlayModeLabel(save) }}</span>
+                                    </span>
+                                    <span style="display:block;font-size:10px;color:#6b7280;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                                        {{ save.campaign_name || '未知剧本' }} · {{ saveStatsText(save) }}
+                                    </span>
+                                </span>
+                            </button>
+                        </div>
+                        <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end">
+                            <button @click.stop="startRenameSave(save)" :disabled="!save.renamable || renamingSaveName===save.path" class="btn btn-ghost btn-icon" title="重命名" style="width:30px;height:30px;padding:0">
+                                <i class="ph ph-pencil-simple" style="font-size:13px"></i>
+                            </button>
+                            <button @click.stop="downloadSave(save)" :disabled="!save.download_url" class="btn btn-ghost btn-icon" title="导出 ZIP" style="width:30px;height:30px;padding:0">
+                                <i class="ph ph-download-simple" style="font-size:13px"></i>
+                            </button>
+                            <button @click.stop="deleteSave(save)" :disabled="!save.deletable" class="btn btn-ghost btn-icon" title="删除存档" style="width:30px;height:30px;padding:0">
+                                <i class="ph ph-trash" style="font-size:13px;color:#e05c5c"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div v-else style="font-size:12px;color:#4b5563;line-height:1.6;border:1px dashed rgba(255,255,255,.08);border-radius:8px;padding:12px;text-align:center">
+                    暂无可恢复存档
+                </div>
+                <div v-if="saveManagerMsg" style="font-size:11px;line-height:1.55;padding:7px 8px;border-radius:6px"
+                     :style="saveManagerOk
+                        ? {color:'#b8f5d2',background:'rgba(79,201,138,.07)',border:'1px solid rgba(79,201,138,.18)'}
+                        : {color:'#fecaca',background:'rgba(224,92,92,.08)',border:'1px solid rgba(224,92,92,.18)'}">
+                    {{ saveManagerMsg }}
+                </div>
             </div>
 
-            <button @click="loadAndStart('gm')" :disabled="!selectedCampaign||isLoading||campaignImportBusy" class="btn btn-ghost" style="width:100%;margin-bottom:14px;font-size:13px" data-testid="gm-entry">
-                <i v-if="isLoading&&pendingLaunchMode==='gm'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
-                <i v-else class="ph ph-game-controller"></i>
-                {{ isLoading&&pendingLaunchMode==='gm' ? '正在初始化...' : '载入到 GM 控制台' }}
-            </button>
+            <div class="launch-section launch-actions-section">
+                <div class="launch-mode-grid">
+                    <button @click="loadAndStart('solo')" :disabled="!selectedCampaign||!multiplayerAuthAccount||isLoading||campaignImportBusy" class="btn btn-accent launch-mode-btn" data-testid="solo-entry">
+                        <i v-if="isLoading&&pendingLaunchMode==='solo'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+                        <i v-else class="ph ph-user-circle"></i>
+                        <span class="launch-mode-title">单人游玩</span>
+                        <span class="launch-mode-desc">AI-GM 主持，选择剧中角色后开始行动。</span>
+                    </button>
+                    <button @click="openMenuMultiplayer" :disabled="isLoading||campaignImportBusy" class="btn btn-info launch-mode-btn" data-testid="multiplayer-entry">
+                        <i class="ph ph-users-three"></i>
+                        <span class="launch-mode-title">多人游玩</span>
+                        <span class="launch-mode-desc">创建或加入房间，玩家各自选择角色扮演。</span>
+                    </button>
+                </div>
 
-            <div v-if="campaignLoadSummary" style="font-size:12px;color:#4fc98a;line-height:1.6;margin:-4px 0 12px;padding:8px 10px;background:rgba(79,201,138,.06);border:1px solid rgba(79,201,138,.18);border-radius:6px">
-                {{ campaignLoadSummary }}
+                <button @click="loadAndStart('gm')" :disabled="!selectedCampaign||!multiplayerAuthAccount||isLoading||campaignImportBusy" class="btn btn-ghost" style="width:100%;margin-bottom:14px;font-size:13px" data-testid="gm-entry">
+                    <i v-if="isLoading&&pendingLaunchMode==='gm'" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
+                    <i v-else class="ph ph-game-controller"></i>
+                    {{ isLoading&&pendingLaunchMode==='gm' ? '正在初始化...' : '载入到 GM 控制台' }}
+                </button>
+
+                <div v-if="campaignLoadSummary" style="font-size:12px;color:#4fc98a;line-height:1.6;margin:-4px 0 12px;padding:8px 10px;background:rgba(79,201,138,.06);border:1px solid rgba(79,201,138,.18);border-radius:6px">
+                    {{ campaignLoadSummary }}
+                </div>
+
             </div>
-
-            <button @click="enterCurrentGame" class="btn btn-ghost" style="width:100%;font-size:13px">
-                <i class="ph ph-arrow-clockwise"></i> 恢复当前会话
-            </button>
 
         </div>
     </div>
@@ -391,7 +505,7 @@
 ══════════════════════════════════════════════════════════════ -->
 <div v-if="showApiKeyPanel"
      style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)">
-    <div class="panel" style="width:min(920px,94vw);border-radius:12px;box-shadow:0 32px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;max-height:90vh">
+    <div class="panel api-config-panel" style="width:min(920px,94vw);border-radius:12px;box-shadow:0 32px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;max-height:90vh">
         <div style="padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
             <div style="display:flex;align-items:center;gap:10px">
                 <div style="width:32px;height:32px;background:rgba(232,180,75,.1);border:1px solid rgba(232,180,75,.25);border-radius:8px;display:flex;align-items:center;justify-content:center">
@@ -407,18 +521,18 @@
             </button>
         </div>
 
-        <div style="display:grid;grid-template-columns:250px minmax(0,1fr);min-height:0;overflow:hidden">
+        <div class="api-config-layout" style="display:grid;grid-template-columns:250px minmax(0,1fr);min-height:0;overflow:hidden">
             <aside style="border-right:1px solid rgba(255,255,255,.06);padding:16px;overflow-y:auto">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
                     <span class="tag">供应商</span>
-                    <button @click="newApiProvider" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-ghost btn-icon" title="新增供应商" style="width:28px;height:28px;padding:0">
+                    <button @click="newApiProvider" :disabled="!multiplayerAuthAccount" class="btn btn-ghost btn-icon" title="新增供应商" style="width:28px;height:28px;padding:0">
                         <i class="ph ph-plus" style="font-size:14px"></i>
                     </button>
                 </div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     <div v-for="p in apiProviders" :key="p.id" style="display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:6px">
                         <button @click="switchApiProvider(p.id)"
-                                :disabled="!multiplayerAuthAccount?.is_admin"
+                                :disabled="!multiplayerAuthAccount"
                                 class="btn btn-sm" style="justify-content:flex-start;text-align:left;padding:9px 10px;min-width:0"
                                 :style="activeProviderId===p.id
                                     ? {background:'rgba(79,201,138,.1)',borderColor:'rgba(79,201,138,.32)',color:'#b8f5d2'}
@@ -427,7 +541,7 @@
                                :style="{color:p.configured?'#4fc98a':'#e05c5c'}"></i>
                             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.name || p.id }}</span>
                         </button>
-                        <button v-if="apiProviders.length>1" @click="deleteApiProvider(p.id)" :disabled="!multiplayerAuthAccount?.is_admin" class="btn btn-ghost btn-icon" title="删除供应商" style="width:28px;height:100%;padding:0">
+                        <button v-if="apiProviders.length>1" @click="deleteApiProvider(p.id)" :disabled="!multiplayerAuthAccount" class="btn btn-ghost btn-icon" title="删除供应商" style="width:28px;height:100%;padding:0">
                             <i class="ph ph-trash" style="font-size:12px;color:#6b7280"></i>
                         </button>
                     </div>
@@ -437,16 +551,16 @@
             <div style="padding:18px 22px;overflow-y:auto;display:flex;flex-direction:column;gap:14px">
                 <div>
                     <label class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
-                        管理员权限
-                        <span v-if="multiplayerAuthAccount?.is_admin" style="font-size:10px;color:#e8b44b">已登录</span>
+                        账号配置
+                        <span v-if="multiplayerAuthAccount" style="font-size:10px;color:#4fc98a">已登录</span>
                         <span v-else style="font-size:10px;color:#e05c5c">未登录</span>
                     </label>
                     <div style="font-size:12px;line-height:1.6;color:#7c8494;border:1px solid rgba(255,255,255,.07);background:#090b10;border-radius:6px;padding:9px 10px">
-                        <template v-if="multiplayerAuthAccount?.is_admin">
-                            当前账号 @{{ multiplayerAuthAccount.username }} 可以修改系统配置。
+                        <template v-if="multiplayerAuthAccount">
+                            当前账号 @{{ multiplayerAuthAccount.username }} 可以管理自己的供应商配置。
                         </template>
                         <template v-else>
-                            请先在主页登录 config.json 中配置的管理员账号。
+                            请先在主页登录账号后再配置供应商。
                         </template>
                     </div>
                 </div>
@@ -484,7 +598,7 @@
                     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
                         <button v-for="mode in tokenPolicy.modes" :key="'token-policy-'+mode.mode"
                                 @click="setTokenPolicyMode(mode.mode)"
-                                :disabled="!multiplayerAuthAccount?.is_admin || isSavingTokenPolicy || tokenPolicy.mode===mode.mode"
+                                :disabled="!multiplayerAuthAccount || isSavingTokenPolicy || tokenPolicy.mode===mode.mode"
                                 class="btn btn-sm"
                                 :title="tokenPolicySummary(mode)"
                                 :style="tokenPolicy.mode===mode.mode
@@ -503,7 +617,7 @@
                     </div>
                     <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center">
                         <button @click="setAiCacheEnabled(!aiCache.enabled)"
-                                :disabled="!multiplayerAuthAccount?.is_admin || isSavingAiCache"
+                                :disabled="!multiplayerAuthAccount || isSavingAiCache"
                                 class="btn btn-sm"
                                 :style="aiCache.enabled
                                     ? {background:'rgba(79,201,138,.1)',borderColor:'rgba(79,201,138,.32)',color:'#b8f5d2'}
@@ -511,7 +625,7 @@
                             <i :class="aiCache.enabled ? 'ph ph-toggle-right' : 'ph ph-toggle-left'" style="font-size:16px"></i>
                             <span>{{ aiCache.enabled ? '已启用' : '已关闭' }}</span>
                         </button>
-                        <button @click="clearAiCache" :disabled="!multiplayerAuthAccount?.is_admin || isSavingAiCache || !aiCache.entries" class="btn btn-ghost btn-sm">
+                        <button @click="clearAiCache" :disabled="!multiplayerAuthAccount || isSavingAiCache || !aiCache.entries" class="btn btn-ghost btn-sm">
                             <i :class="isSavingAiCache ? 'ph ph-circle-notch' : 'ph ph-broom'" :style="isSavingAiCache ? 'animation:spin 1s linear infinite' : ''"></i>
                             清空
                         </button>
@@ -520,7 +634,7 @@
 
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
                     <span class="tag">模型配置</span>
-                    <button @click="fetchAllConfigModels" :disabled="!multiplayerAuthAccount?.is_admin || isFetchingConfigModels" class="btn btn-ghost btn-sm">
+                    <button @click="fetchAllConfigModels" :disabled="!multiplayerAuthAccount || isFetchingConfigModels" class="btn btn-ghost btn-sm">
                         <i :class="isFetchingConfigModels&&fetchingConfigCapability==='all'?'ph ph-circle-notch':'ph ph-download-simple'" :style="isFetchingConfigModels&&fetchingConfigCapability==='all'?'animation:spin 1s linear infinite':''"></i>
                         获取全部模型
                     </button>
@@ -560,7 +674,7 @@
         </div>
 
         <div style="padding:16px 24px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px;flex-shrink:0">
-            <button @click="saveApiKeys" :disabled="!multiplayerAuthAccount?.is_admin || isSavingKeys" class="btn btn-ok" style="flex:1">
+            <button @click="saveApiKeys" :disabled="!multiplayerAuthAccount || isSavingKeys" class="btn btn-ok" style="flex:1">
                 <i v-if="isSavingKeys" class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
                 <i v-else class="ph ph-floppy-disk"></i>
                 {{ isSavingKeys ? '保存中…' : '保存供应商并生效' }}
@@ -576,33 +690,36 @@
 <!-- ══════════════════════════════════════════════════════════════
      主控台
 ══════════════════════════════════════════════════════════════ -->
-<div v-if="appState==='game' && playSurface==='player'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
-    <header class="panel" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
-        <div style="display:flex;align-items:center;gap:14px;min-width:0">
-            <button @click="appState='menu'" class="btn btn-ghost btn-sm" style="gap:6px;padding:6px 10px">
+<div v-if="appState==='game' && playSurface==='player'" class="game-shell">
+    <header class="panel app-topbar" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
+        <div class="app-topbar-main" style="display:flex;align-items:center;gap:14px;min-width:0">
+            <button @click="leaveGameToMenu" class="btn btn-ghost btn-sm" style="gap:6px;padding:6px 10px">
                 <i class="ph ph-arrow-left" style="font-size:15px"></i>
                 <span style="font-family:'JetBrains Mono';font-size:12px;letter-spacing:.06em;font-weight:600">Z.R.I.C</span>
             </button>
-            <div style="width:1px;height:24px;background:rgba(255,255,255,.07)"></div>
-            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <div class="topbar-divider" style="width:1px;height:24px;background:rgba(255,255,255,.07)"></div>
+            <div class="topbar-status" style="display:flex;align-items:center;gap:8px;min-width:0">
                 <div :style="{width:'8px',height:'8px',borderRadius:'50%',background:dbConnected?'#4fc98a':'#e05c5c'}" :class="dbConnected?'pulse-dot':''"></div>
                 <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.06em" :style="{color:dbConnected?'#4fc98a':'#e05c5c'}">
                     {{ dbConnected ? 'AI-GM 在线' : '未连接' }}
                 </span>
             </div>
-            <div v-if="currentNode" style="display:flex;align-items:center;gap:5px;min-width:0">
-                <span style="font-size:12px;color:#6b7280">当前场景</span>
-                <span style="font-size:14px;color:#f5edd8;font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
+            <div v-if="currentNode" class="topbar-scene" style="display:flex;align-items:center;gap:5px;min-width:0">
+                <span class="topbar-scene-label" style="font-size:12px;color:#6b7280">当前场景</span>
+                <span class="topbar-scene-name" style="font-size:14px;color:#f5edd8;font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
                 <span style="font-family:'JetBrains Mono';font-size:11px;color:#374151">#{{ currentNode.id }}</span>
             </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+        <div class="app-topbar-actions" style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
             <div class="top-lore-actions">
                 <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
                     <i class="ph ph-globe" style="font-size:15px"></i> 世界观
                 </button>
                 <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
                     <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+                </button>
+                <button @click="openDossierPanel('assets')" class="btn btn-ghost btn-sm top-lore-btn" title="查看导入图片">
+                    <i class="ph ph-images" style="font-size:15px"></i> 图片
                 </button>
                 <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
                     <i class="ph ph-database" style="font-size:15px"></i> 知识库
@@ -617,8 +734,8 @@
                     <i class="ph ph-brain" style="font-size:15px"></i> 记忆
                 </button>
             </div>
-            <button @click="playSurface='gm'" class="btn btn-ghost btn-sm" data-testid="gm-surface-switch">
-                <i class="ph ph-game-controller" style="font-size:15px"></i> GM 控制台
+            <button @click="exportSave" class="btn btn-ghost btn-sm" title="打开存档管理">
+                <i class="ph ph-floppy-disk" style="font-size:15px"></i> 存档管理
             </button>
             <button @click="openGameSettingsModal" class="btn btn-ghost btn-sm">
                 <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
@@ -626,7 +743,7 @@
         </div>
     </header>
 
-    <div class="solo-play-shell" :class="{confirmed: soloHasConfirmedCharacters}">
+    <div class="solo-play-shell" :class="{confirmed: soloHasConfirmedCharacters, selecting: !soloHasConfirmedCharacters}">
         <aside v-if="!soloHasConfirmedCharacters" class="solo-panel">
             <section class="solo-section">
                 <div class="tag" style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:#93c5fd">
@@ -652,7 +769,7 @@
                 </div>
             </section>
 
-            <div class="solo-scroll">
+            <div class="solo-scroll solo-character-picker">
                 <button v-for="char in soloPlayableCharacters" :key="char.id"
                         @click="toggleSoloCharacter(char.id)"
                         class="solo-character-card"
@@ -672,26 +789,15 @@
                     <i class="ph ph-users" style="font-size:36px;display:block;margin-bottom:10px;opacity:.25"></i>
                     当前剧本还没有可扮演角色
                 </div>
-                <button v-if="soloPlayableCharacters.length" @click="confirmSoloCharacters" :disabled="!soloSelectedCharacterIds.length || soloHasConfirmedCharacters" class="btn btn-accent" style="width:100%;margin-top:10px">
+                <button v-if="soloPlayableCharacters.length" @click="confirmSoloCharacters" :disabled="!soloSelectedCharacterIds.length || soloHasConfirmedCharacters" class="btn btn-accent solo-confirm-button" style="width:100%;margin-top:10px">
                     <i :class="soloHasConfirmedCharacters ? 'ph ph-lock-key' : 'ph ph-check-circle'" style="font-size:15px"></i>
                     {{ soloHasConfirmedCharacters ? '角色已确认' : soloSelectedNames.length ? '确认扮演 ' + soloSelectedNames.join(' / ') : '选择角色后确认' }}
                 </button>
             </div>
         </aside>
 
-        <main class="solo-scene">
-            <div v-if="!soloHasConfirmedCharacters" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#374151;text-align:center;padding:24px">
-                <i class="ph ph-user-circle-check" style="font-size:58px;opacity:.22"></i>
-                <p style="font-size:15px;color:#8b95a7;margin:0">先在左侧确认扮演角色</p>
-                <p style="font-size:12px;color:#4b5563;line-height:1.7;max-width:420px;margin:0">
-                    {{ soloSelectedNames.length ? '已选择：' + soloSelectedNames.join(' / ') + '。确认后才会打开主场景和行动区。' : '选择一个剧中角色，确认后进入剧情。' }}
-                </p>
-                <button @click="confirmSoloCharacters" :disabled="!soloSelectedCharacterIds.length" class="btn btn-accent" style="margin-top:4px">
-                    <i class="ph ph-check-circle"></i> 确认角色
-                </button>
-            </div>
-
-            <div v-else-if="!currentNode" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#374151">
+        <main v-if="soloHasConfirmedCharacters" class="solo-scene">
+            <div v-if="!currentNode" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#374151">
                 <i class="ph ph-map-trifold" style="font-size:56px;opacity:.2"></i>
                 <p style="font-size:14px">等待载入场景</p>
             </div>
@@ -706,18 +812,24 @@
                             </div>
                             <h1 style="font-family:'Noto Serif SC';font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin-bottom:16px">{{ currentNode.name }}</h1>
                             <div v-if="isExpandingBranch" style="position:relative">
-                                <p class="scene-content">{{ expandingBranchText || soloSceneText }}</p>
+                                <div class="scene-content" v-html="renderSceneRichText(expandingBranchText || soloSceneText)"></div>
                                 <div style="display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:6px 12px;background:rgba(232,180,75,.08);border:1px solid rgba(232,180,75,.2);border-radius:6px">
                                     <i class="ph ph-circle-notch" style="font-size:14px;animation:spin 1s linear infinite;color:#e8b44b"></i>
                                     <span style="font-size:12px;color:#e8b44b">AI-GM 正在铺陈场景</span>
                                 </div>
                             </div>
-                            <p v-else class="scene-content">{{ soloSceneText }}</p>
+                            <div v-else class="scene-content" v-html="renderSceneRichText(soloSceneText)"></div>
+                            <div v-if="showSoloCharacterBriefing" style="margin-top:16px;background:rgba(232,180,75,.06);border:1px solid rgba(232,180,75,.18);border-radius:8px;padding:14px 16px">
+                                <div class="tag" style="color:#e8b44b;display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                                    <i class="ph ph-compass"></i> 入场简报
+                                </div>
+                                <p style="font-size:15px;line-height:1.8;color:#e8dcc1;white-space:pre-wrap;overflow-wrap:anywhere;margin:0">{{ soloCharacterBriefingText }}</p>
+                            </div>
                             <div v-if="aiGeneratedText[currentNode.id]" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                                 <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px">
                                     <i class="ph ph-sparkle"></i> 追加细节
                                 </div>
-                                <p style="font-size:15px;line-height:1.8;color:#a5b4fc">{{ aiGeneratedText[currentNode.id] }}</p>
+                                <div style="font-size:15px;line-height:1.8;color:#a5b4fc" v-html="renderSceneRichText(aiGeneratedText[currentNode.id])"></div>
                             </div>
                         </div>
                     </article>
@@ -765,7 +877,7 @@
             </template>
         </main>
 
-        <aside class="solo-panel right">
+        <aside v-if="soloHasConfirmedCharacters" class="solo-panel right">
             <section class="solo-section">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
                     <div class="tag" style="display:flex;align-items:center;gap:6px">
@@ -799,13 +911,13 @@
                     {{ soloHasConfirmedCharacters ? '当前扮演：' + soloConfirmedNames.join(' / ') : '角色确认后可提交自由行动。' }}
                 </div>
             </section>
-            <div class="solo-scroll" ref="soloLogRef">
+            <div class="solo-scroll solo-log-scroll" ref="soloLogRef">
                 <div v-for="entry in visibleSoloActionLog" :key="entry.id" class="solo-message" :class="entry.kind">
                     <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px;color:#6b7280">
                         <span style="font-weight:700" :style="{color:entry.kind==='ai'?'#e8b44b':'#93c5fd'}">{{ entry.sender }}</span>
                         <span style="font-family:'JetBrains Mono'">{{ entry.time }}</span>
                     </div>
-                    <div style="font-size:13px;line-height:1.65;color:#c9cdd6;white-space:pre-wrap">{{ entry.text }}</div>
+                    <div style="font-size:13px;line-height:1.65;color:#c9cdd6;white-space:pre-wrap;overflow-wrap:anywhere">{{ entry.text }}</div>
                 </div>
                 <div v-if="!visibleSoloActionLog.length" style="text-align:center;color:#4b5563;font-size:13px;line-height:1.7;padding:30px 10px">
                     <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
@@ -816,42 +928,45 @@
     </div>
 </div>
 
-<div v-if="appState==='game' && playSurface==='gm'" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
+<div v-if="appState==='game' && playSurface==='gm'" class="gm-game-shell" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10">
     <!-- ── 顶部应用栏 ── -->
-    <header class="panel" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
+    <header class="panel app-topbar" style="border-radius:0;border-x:none;border-t:none;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-shrink:0;z-index:20">
         <!-- 左侧 -->
-        <div style="display:flex;align-items:center;gap:0;min-width:0;flex:1">
+        <div class="app-topbar-main" style="display:flex;align-items:center;gap:0;min-width:0;flex:1">
             <button @click="appState='menu'" class="btn btn-ghost btn-sm" style="gap:6px;margin-right:16px;padding:6px 10px">
                 <i class="ph ph-arrow-left" style="font-size:15px"></i>
                 <span style="font-family:'JetBrains Mono';font-size:12px;letter-spacing:.06em;font-weight:600">Z.R.I.C</span>
             </button>
-            <div style="width:1px;height:24px;background:rgba(255,255,255,.07);margin-right:16px"></div>
+            <div class="topbar-divider" style="width:1px;height:24px;background:rgba(255,255,255,.07);margin-right:16px"></div>
             
             <!-- 状态指示 -->
-            <div style="display:flex;align-items:center;gap:8px">
+            <div class="topbar-status" style="display:flex;align-items:center;gap:8px">
                 <div :style="{width:'8px',height:'8px',borderRadius:'50%',background:dbConnected?'#4fc98a':'#e05c5c'}" :class="dbConnected?'pulse-dot':''"></div>
                 <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.06em" :style="{color:dbConnected?'#4fc98a':'#e05c5c'}">
                     {{ dbConnected ? '引擎在线' : '未连接' }}
                 </span>
             </div>
 
-            <div v-if="currentNode" style="display:flex;align-items:center;gap:0;margin-left:24px;min-width:0">
-                <div style="width:1px;height:24px;background:rgba(255,255,255,.07);margin-right:16px"></div>
-                <span style="font-size:13px;color:#6b7280">当前：</span>
-                <span style="font-size:14px;color:#c9cdd6;margin-left:4px;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
+            <div v-if="currentNode" class="topbar-scene gm" style="display:flex;align-items:center;gap:0;margin-left:24px;min-width:0">
+                <div class="topbar-divider" style="width:1px;height:24px;background:rgba(255,255,255,.07);margin-right:16px"></div>
+                <span class="topbar-scene-label" style="font-size:13px;color:#6b7280">当前：</span>
+                <span class="topbar-scene-name" style="font-size:14px;color:#c9cdd6;margin-left:4px;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentNode.name }}</span>
                 <span style="font-family:'JetBrains Mono';font-size:12px;color:#374151;margin-left:8px">#{{ currentNode.id }}</span>
             </div>
 
         </div>
 
         <!-- 右侧工具栏 -->
-        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+        <div class="app-topbar-actions" style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
             <div class="top-lore-actions">
                 <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
                     <i class="ph ph-globe" style="font-size:15px"></i> 世界观
                 </button>
                 <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
                     <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+                </button>
+                <button @click="openDossierPanel('assets')" class="btn btn-ghost btn-sm top-lore-btn" title="查看导入图片">
+                    <i class="ph ph-images" style="font-size:15px"></i> 图片
                 </button>
                 <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
                     <i class="ph ph-database" style="font-size:15px"></i> 知识库
@@ -869,8 +984,8 @@
             <button @click="playSurface='player'" class="btn btn-sm" style="background:rgba(232,180,75,.08);border-color:rgba(232,180,75,.22);color:#e8b44b" data-testid="player-surface-switch">
                 <i class="ph ph-user-circle" style="font-size:15px"></i> 玩家桌
             </button>
-            <button @click="exportSave" class="btn btn-ghost btn-sm">
-                <i class="ph ph-floppy-disk" style="font-size:15px"></i> 存档
+            <button @click="exportSave" class="btn btn-ghost btn-sm" title="打开存档管理">
+                <i class="ph ph-floppy-disk" style="font-size:15px"></i> 存档管理
             </button>
             <button @click="openGameSettingsModal" class="btn btn-ghost btn-sm">
                 <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
@@ -879,12 +994,12 @@
     </header>
 
     <!-- ── 三栏工作区 ── -->
-    <div style="flex:1;display:flex;overflow:hidden">
+    <div class="gm-workspace" style="flex:1;display:flex;overflow:hidden">
 
         <!-- ────────────────────────────────────────────────────
              左侧栏：场景导航 + BGM (加宽至 260px)
         ──────────────────────────────────────────────────── -->
-        <aside class="panel" style="width:260px;border-radius:0;border-y:none;border-l:none;display:flex;flex-direction:column;flex-shrink:0;z-index:10">
+        <aside class="panel gm-left-panel" style="width:260px;border-radius:0;border-y:none;border-l:none;display:flex;flex-direction:column;flex-shrink:0;z-index:10">
             <!-- Tab 切换 -->
             <div style="padding:12px;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0">
                 <div style="display:flex;background:#0b0e17;border:1px solid rgba(255,255,255,.07);border-radius:6px;padding:4px;gap:4px">
@@ -943,7 +1058,7 @@
         <!-- ────────────────────────────────────────────────────
              中间主栏：场景内容（支持时间线分屏）
         ──────────────────────────────────────────────────── -->
-        <main style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10;border-right:1px solid rgba(255,255,255,.06)">
+        <main class="gm-main-panel" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#090b10;border-right:1px solid rgba(255,255,255,.06)">
 
             <!-- ══ 分屏模式：活跃时间线 ≥2 条时自动切换 ══ -->
             <template v-if="activeTimelines.length >= 2">
@@ -1126,16 +1241,16 @@
                         <div style="background:#0b0e17;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:20px 24px;margin-bottom:20px">
                             <!-- 流式展开中：显示打字机效果 -->
                             <div v-if="isExpandingBranch" style="position:relative">
-                                <p class="scene-content" style="font-size:17px">{{ expandingBranchText || currentNode.content }}</p>
+                                <div class="scene-content" style="font-size:17px" v-html="renderSceneRichText(expandingBranchText || currentNode.content)"></div>
                                 <div style="display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:6px 12px;background:rgba(232,180,75,.08);border:1px solid rgba(232,180,75,.2);border-radius:6px">
                                     <i class="ph ph-circle-notch" style="font-size:14px;animation:spin 1s linear infinite;color:#e8b44b"></i>
                                     <span style="font-size:12px;color:#e8b44b">场景叙事生成中…</span>
                                 </div>
                             </div>
                             <!-- 有扩写内容：显示扩写版本 -->
-                            <p v-else-if="currentNode.expanded_content" class="scene-content" style="font-size:17px">{{ currentNode.expanded_content }}</p>
+                            <div v-else-if="currentNode.expanded_content" class="scene-content" style="font-size:17px" v-html="renderSceneRichText(currentNode.expanded_content)"></div>
                             <!-- 无扩写：显示原始骨架/手动编写的内容 -->
-                            <p v-else class="scene-content" style="font-size:17px">{{ currentNode.content }}</p>
+                            <div v-else class="scene-content" style="font-size:17px" v-html="renderSceneRichText(currentNode.content)"></div>
                         </div>
 
                         <!-- AI 扩写结果 -->
@@ -1143,7 +1258,7 @@
                             <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:10px">
                                 <i class="ph ph-sparkle"></i> AI 扩写细节
                             </div>
-                            <p style="font-size:15px;line-height:1.8;color:#a5b4fc">{{ aiGeneratedText[currentNode.id] }}</p>
+                            <div style="font-size:15px;line-height:1.8;color:#a5b4fc" v-html="renderSceneRichText(aiGeneratedText[currentNode.id])"></div>
                         </div>
 
                         <!-- 图片生成区 -->
@@ -1305,7 +1420,7 @@
         <!-- ────────────────────────────────────────────────────
              右侧栏：角色 & 骰子 (加宽至 280px)
         ──────────────────────────────────────────────────── -->
-        <aside class="panel" style="width:280px;border-radius:0;border-y:none;border-r:none;display:flex;flex-direction:column;flex-shrink:0">
+        <aside class="panel gm-right-panel" style="width:280px;border-radius:0;border-y:none;border-r:none;display:flex;flex-direction:column;flex-shrink:0">
 
             <!-- 角色面板头 -->
             <div style="padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0;display:flex;align-items:center;justify-content:space-between">
@@ -1585,11 +1700,11 @@
                     <button @click="openApiKeyPanel" class="btn btn-ghost" style="justify-content:flex-start">
                         <i class="ph ph-plugs-connected"></i> API 与模型供应商
                     </button>
+                    <button v-if="playSurface!=='gm'" @click="switchToGmSurface();showGameSettingsModal=false" class="btn btn-ghost" style="justify-content:flex-start" data-testid="gm-surface-switch">
+                        <i class="ph ph-game-controller"></i> GM 控制台
+                    </button>
                     <button @click="openBattleReportModal();showGameSettingsModal=false" class="btn btn-ghost" style="justify-content:flex-start">
                         <i class="ph ph-scroll"></i> 会话战报
-                    </button>
-                    <button @click="exportSave();showGameSettingsModal=false" class="btn btn-ghost" style="justify-content:flex-start">
-                        <i class="ph ph-floppy-disk"></i> 存档管理
                     </button>
                     <label class="btn btn-ghost" style="justify-content:flex-start;cursor:pointer">
                         <i class="ph ph-pencil-simple"></i>
@@ -1680,7 +1795,7 @@
                 <div class="tag" style="color:#7dd3fc;font-size:13px;display:flex;align-items:center;gap:7px">
                     <i class="ph ph-users-three" style="font-size:16px"></i> 多人模式
                 </div>
-                <div style="font-size:12px;color:#4b5563;margin-top:4px">AI-GM 主持同一剧本，玩家进房后选择角色扮演。</div>
+                <div style="font-size:12px;color:#4b5563;margin-top:4px">AI-GM 使用房主的供应商配置主持同一剧本，玩家进房后选择角色扮演。</div>
             </div>
             <button @click="showMultiplayerModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
                 <i class="ph ph-x" style="font-size:15px"></i>
@@ -1701,6 +1816,9 @@
                 <button v-if="!multiplayerAuthAccount" @click="showMultiplayerModal=false" class="btn btn-ghost btn-sm">
                     返回
                 </button>
+            </div>
+            <div style="background:#090b10;border:1px solid rgba(79,201,138,.16);border-radius:8px;padding:10px 12px;font-size:12px;color:#7c8494;line-height:1.65">
+                创建房间后，本房间的 AI-GM 固定使用房主当前账号下的供应商配置；成员加入后无需单独配置 API。
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
                 <div>
@@ -1977,27 +2095,34 @@
                     <i class="ph ph-floppy-disk" style="font-size:17px;color:#e8b44b"></i>
                     存档管理
                 </div>
-                <div style="font-size:11px;color:#4b5563;margin-top:3px">{{ currentSaveFolder ? '当前：'+currentSaveFolder : '当前未绑定存档' }}</div>
+                <div style="font-size:11px;color:#4b5563;margin-top:3px">已锁定当前剧本：{{ lockedSaveSourceLabel }}</div>
             </div>
             <button @click="showExportModal=false" class="btn btn-ghost btn-icon" style="width:30px;height:30px;padding:0">
                 <i class="ph ph-x" style="font-size:15px"></i>
             </button>
         </div>
-        <div style="padding:18px 22px;overflow:auto;display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.35fr);gap:16px">
-            <section style="display:flex;flex-direction:column;gap:10px;min-width:0">
+        <div style="padding:18px 22px;overflow:auto;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(260px,.85fr);gap:16px">
+            <section style="display:flex;flex-direction:column;gap:10px;min-width:0;order:2">
                 <div class="tag">保存当前进度</div>
-                <button @click="doExportOverwrite" :disabled="isExportingSave || !currentSaveFolder" class="btn btn-ok" style="justify-content:flex-start;padding:11px 14px">
+                <div style="padding:10px 12px;border:1px solid rgba(232,180,75,.18);background:rgba(232,180,75,.06);border-radius:8px;font-size:12px;line-height:1.6;color:#d8dde8">
+                    <div style="display:flex;align-items:center;gap:6px;color:#e8b44b;font-weight:650;margin-bottom:3px">
+                        <i class="ph ph-lock-key"></i> 当前剧本已锁定
+                    </div>
+                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ lockedSaveSourceLabel }}</div>
+                    <div v-if="lockedSaveSourcePath" style="font-family:'JetBrains Mono';font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ lockedSaveSourcePath }}</div>
+                </div>
+                <button @click="doExportOverwrite" :disabled="isExportingSave || !currentSaveWritable" class="btn btn-ok" style="justify-content:flex-start;padding:11px 14px">
                     <i :class="isExportingSave?'ph ph-circle-notch':'ph ph-floppy-disk'" :style="isExportingSave?'animation:spin 1s linear infinite;font-size:16px':'font-size:16px'"></i>
-                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ currentSaveFolder ? '覆盖 '+currentSaveFolder : '无当前存档' }}</span>
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ canSaveCurrentMultiplayerRoom ? '保存当前多人房间' : (currentSaveWritable ? '覆盖 '+currentSaveFolder : (currentSaveFolder ? '请新建个人存档' : '无当前存档')) }}</span>
                 </button>
                 <div style="display:flex;gap:8px">
-                    <input v-model.trim="exportNewName" @keyup.enter="doExportNew" class="inp" placeholder="新存档名" style="font-size:12px">
+                    <input v-model.trim="exportNewName" @keyup.enter="doExportNew" class="inp" placeholder="新存档名（留空自动命名）" style="font-size:12px">
                     <button @click="doExportNew" :disabled="isExportingSave" class="btn btn-accent" style="flex:0 0 auto">
-                        <i class="ph ph-plus-circle"></i> 新建
+                        <i class="ph ph-plus-circle"></i> 添加
                     </button>
                 </div>
                 <button @click="downloadSave(currentSaveItem)" :disabled="!currentSaveItem?.download_url" class="btn btn-ghost" style="justify-content:flex-start">
-                    <i class="ph ph-download-simple"></i> 下载当前存档
+                    <i class="ph ph-download-simple"></i> 导出当前存档
                 </button>
                 <div v-if="saveManagerMsg" style="font-size:12px;line-height:1.6;padding:9px 10px;border-radius:6px"
                      :style="saveManagerOk
@@ -2007,10 +2132,10 @@
                 </div>
             </section>
 
-            <section style="display:flex;flex-direction:column;gap:10px;min-width:0">
+            <section style="display:flex;flex-direction:column;gap:10px;min-width:0;order:1">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
                     <span class="tag">可载入存档</span>
-                    <button @click="fetchCampaigns" class="btn btn-ghost btn-sm">
+                    <button @click="fetchSaves" class="btn btn-ghost btn-sm">
                         <i class="ph ph-arrows-clockwise"></i> 刷新
                     </button>
                 </div>
@@ -2018,18 +2143,32 @@
                 <div v-if="filteredSaveItems.length" style="display:flex;flex-direction:column;gap:8px;max-height:48vh;overflow:auto;padding-right:2px">
                     <div v-for="save in filteredSaveItems" :key="'save-'+save.path"
                          style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;background:#090b10;border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:10px 12px"
-                         :style="save.path===selectedCampaign ? {borderColor:'rgba(232,180,75,.35)',background:'rgba(232,180,75,.06)'} : {}">
-                        <button @click="loadSaveFromManager(save)" class="btn btn-ghost" style="justify-content:flex-start;text-align:left;min-width:0;padding:8px 10px">
-                            <i :class="save.path===selectedCampaign?'ph ph-play-circle':'ph ph-folder-open'" style="font-size:16px;flex-shrink:0"></i>
-                            <span style="min-width:0">
-                                <span style="display:block;font-size:13px;font-weight:600;color:#c9cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ save.name }}</span>
-                                <span style="display:block;font-size:10px;color:#6b7280;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                                    {{ saveStatsText(save) }}
+                         :style="save.path===currentSavePath ? {borderColor:'rgba(232,180,75,.35)',background:'rgba(232,180,75,.06)'} : {}">
+                        <div style="min-width:0">
+                            <div v-if="renamingSaveName===save.path" style="display:flex;gap:8px;align-items:center">
+                                <input v-model.trim="renameSaveDraft" @keyup.enter="renameSave(save)" class="inp" placeholder="新存档名" style="font-size:12px;min-width:0">
+                                <button @click.stop="renameSave(save)" :disabled="isRenamingSave" class="btn btn-accent btn-sm" style="flex:0 0 auto">
+                                    <i :class="isRenamingSave?'ph ph-circle-notch':'ph ph-check'" :style="isRenamingSave?'animation:spin 1s linear infinite':''"></i> 保存
+                                </button>
+                                <button @click.stop="cancelRenameSave" :disabled="isRenamingSave" class="btn btn-ghost btn-sm" style="flex:0 0 auto">
+                                    取消
+                                </button>
+                            </div>
+                            <button v-else @click="loadSaveFromManager(save)" class="btn btn-ghost" style="justify-content:flex-start;text-align:left;min-width:0;width:100%;padding:8px 10px">
+                                <i :class="save.path===currentSavePath?'ph ph-play-circle':'ph ph-folder-open'" style="font-size:16px;flex-shrink:0"></i>
+                                <span style="min-width:0">
+                                    <span style="display:block;font-size:13px;font-weight:600;color:#c9cdd6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ save.name }}</span>
+                                    <span style="display:block;font-size:10px;color:#6b7280;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                                        {{ save.campaign_name || '未知剧本' }} · {{ saveStatsText(save) }}
+                                    </span>
                                 </span>
-                            </span>
-                        </button>
-                        <div style="display:flex;gap:6px">
-                            <button @click.stop="downloadSave(save)" :disabled="!save.download_url" class="btn btn-ghost btn-icon" title="下载 ZIP" style="width:32px;height:32px;padding:0">
+                            </button>
+                        </div>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+                            <button @click.stop="startRenameSave(save)" :disabled="!save.renamable || renamingSaveName===save.path" class="btn btn-ghost btn-icon" title="重命名" style="width:32px;height:32px;padding:0">
+                                <i class="ph ph-pencil-simple" style="font-size:14px"></i>
+                            </button>
+                            <button @click.stop="downloadSave(save)" :disabled="!save.download_url" class="btn btn-ghost btn-icon" title="导出 ZIP" style="width:32px;height:32px;padding:0">
                                 <i class="ph ph-download-simple" style="font-size:14px"></i>
                             </button>
                             <button @click.stop="deleteSave(save)" :disabled="!save.deletable" class="btn btn-ghost btn-icon" title="删除存档" style="width:32px;height:32px;padding:0">
@@ -3438,7 +3577,7 @@
                                         <strong style="color:#f5edd8">{{ dossierSelectedRoom.label }}</strong>
                                         <span class="tag">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[dossierSelectedRoom.state] || dossierSelectedRoom.state }}</span>
                                     </div>
-                                    <div style="font-size:12px;color:#9ca3af;line-height:1.7;white-space:pre-wrap">{{ dossierSelectedRoom.description || '暂无地点描述。' }}</div>
+                                    <div class="dossier-prose" style="font-size:12px;line-height:1.7" v-html="renderDossierRichText(dossierSelectedRoom.description || '暂无地点描述。')"></div>
                                 </div>
                                 <button v-for="room in mapVisibleRooms" :key="'dossier-room-list-'+room.id"
                                         @click="dossierSelectMapRoom(room, true)"
@@ -3455,6 +3594,41 @@
                     </div>
                 </template>
 
+                <template v-else-if="dossierTab==='assets'">
+                    <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                        <div>
+                            <div style="font-size:17px;font-weight:700;color:#f5edd8">导入图片</div>
+                            <div style="font-size:12px;color:#4b5563;margin-top:3px">剧本导入时识别或上传的图片资源，点击缩略图可放大查看。</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <input v-model.trim="dossierSearch" class="inp" placeholder="搜索文件名或引用场景…" style="width:240px;font-size:12px">
+                            <button @click="fetchCampaignAssets" class="btn btn-ghost btn-sm"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+                        </div>
+                    </div>
+                    <div class="dossier-scroll">
+                        <div v-if="dossierAssetsLoading" class="dossier-empty">
+                            <i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i> 正在读取图片资源…
+                        </div>
+                        <div v-else-if="!dossierFilteredAssets.length" class="dossier-empty">
+                            当前剧本暂无可查看图片资源。
+                        </div>
+                        <div v-else class="dossier-asset-grid">
+                            <button v-for="(asset, idx) in dossierFilteredAssets"
+                                    :key="'dossier-asset-'+asset.name"
+                                    @click="openDossierAssetPreview(asset)"
+                                    class="dossier-asset-card">
+                                <span class="dossier-asset-thumb">
+                                    <img :src="asset.url" :alt="asset.name" loading="lazy">
+                                </span>
+                                <span class="dossier-asset-meta">
+                                    <strong>{{ asset.name }}</strong>
+                                    <span>{{ formatAssetSize(asset.size_bytes) }} · {{ asset.scenes?.length ? asset.scenes.map(s=>s.name).join('、') : '未绑定场景' }}</span>
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+                </template>
+
                 <template v-else-if="dossierTab==='knowledge'">
                     <div style="padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:space-between;gap:12px">
                         <div>
@@ -3462,7 +3636,7 @@
                             <div style="font-size:12px;color:#4b5563;margin-top:3px">这里展示非隐藏 RAG 文档；隐藏文档留给触发器或 GM 管理区。</div>
                         </div>
                     </div>
-                    <div style="flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr)">
+                    <div class="dossier-knowledge-layout">
                         <aside class="dossier-side-list" style="border-left:none;border-right:1px solid rgba(255,255,255,.06)">
                             <div style="padding:12px;border-bottom:1px solid rgba(255,255,255,.06)">
                                 <input v-model.trim="dossierSearch" class="inp" placeholder="搜索文档标题或来源…" style="font-size:12px">
@@ -3489,7 +3663,7 @@
                                         <div style="font-size:12px;color:#4b5563;margin-top:4px">{{ dossierSelectedDoc.source || '无来源标注' }} · {{ dossierDocChunks.length }} 个切片</div>
                                     </div>
                                 </div>
-                                <div v-if="dossierDocChunks.length" class="dossier-prose">{{ dossierDocText }}</div>
+                                <div v-if="dossierDocChunks.length" class="dossier-prose" v-html="renderDossierRichText(dossierDocText)"></div>
                                 <div v-else class="dossier-empty">此文档暂无可读切片。</div>
                             </template>
                         </section>
@@ -3508,7 +3682,7 @@
                         <div v-if="!dossierFilteredLore.length" class="dossier-empty">暂无匹配百科词条。</div>
                         <div v-for="item in dossierFilteredLore" :key="'dossier-lore-'+item.id" class="dossier-card">
                             <div style="font-size:13px;font-weight:800;color:#a78bfa;margin-bottom:8px">{{ item.keywords }}</div>
-                            <div style="font-size:13px;color:#c9cdd6;line-height:1.8;white-space:pre-wrap">{{ item.content }}</div>
+                            <div class="dossier-prose" style="font-size:13px;line-height:1.8" v-html="renderDossierRichText(item.content)"></div>
                         </div>
                     </div>
                 </template>
@@ -3549,6 +3723,64 @@
                     </div>
                 </template>
             </main>
+        </div>
+    </div>
+</div>
+
+<div v-if="dossierAssetPreview" class="asset-lightbox" @click.self="closeDossierAssetPreview">
+    <div class="asset-lightbox-frame">
+        <div class="asset-lightbox-head">
+            <div style="min-width:0">
+                <div class="tag" style="color:#93c5fd;display:flex;align-items:center;gap:6px">
+                    <i class="ph ph-image"></i> 图片预览
+                </div>
+                <div class="asset-lightbox-title">{{ dossierAssetPreview.name }}</div>
+                <div class="asset-lightbox-sub">
+                    {{ formatAssetSize(dossierAssetPreview.size_bytes) }}
+                    <span v-if="dossierAssetPreview.scenes?.length"> · {{ dossierAssetPreview.scenes.map(s=>s.name).join('、') }}</span>
+                </div>
+            </div>
+            <div class="asset-lightbox-tools">
+                <button @click="zoomDossierAsset(-0.25)" :disabled="dossierAssetZoom<=0.55" class="btn btn-ghost btn-icon" title="缩小">
+                    <i class="ph ph-magnifying-glass-minus"></i>
+                </button>
+                <span class="asset-lightbox-zoom">{{ (dossierAssetZoom * 100).toFixed(0) }}%</span>
+                <button @click="zoomDossierAsset(0.25)" :disabled="dossierAssetZoom>=4.95" class="btn btn-ghost btn-icon" title="放大">
+                    <i class="ph ph-magnifying-glass-plus"></i>
+                </button>
+                <button @click="resetDossierAssetView" class="btn btn-ghost btn-sm" title="适应窗口">
+                    <i class="ph ph-corners-in"></i> 适应
+                </button>
+                <button @click="closeDossierAssetPreview" class="btn btn-ghost btn-icon" style="width:32px;height:32px;padding:0">
+                    <i class="ph ph-x"></i>
+                </button>
+            </div>
+        </div>
+        <div class="asset-lightbox-body"
+             @wheel.prevent="dossierAssetOnWheel"
+             @mousedown="dossierAssetStartPan"
+             @mousemove="dossierAssetMovePan"
+             @mouseup="dossierAssetEndPan"
+             @mouseleave="dossierAssetEndPan"
+             @touchstart="dossierAssetStartPan"
+             @touchmove.prevent="dossierAssetMovePan"
+             @touchend="dossierAssetEndPan"
+             @touchcancel="dossierAssetEndPan">
+            <button @click.stop="stepDossierAssetPreview(-1)" @mousedown.stop @touchstart.stop :disabled="dossierFilteredAssets.length<2" class="asset-lightbox-nav prev" title="上一张">
+                <i class="ph ph-caret-left"></i>
+            </button>
+            <img :src="dossierAssetPreview.url"
+                 :alt="dossierAssetPreview.name"
+                 :style="{ transform: dossierAssetTransform, cursor: dossierAssetZoom>1 ? 'grab' : 'zoom-in' }"
+                 draggable="false"
+                 @dblclick.stop="toggleDossierAssetZoom">
+            <button @click.stop="stepDossierAssetPreview(1)" @mousedown.stop @touchstart.stop :disabled="dossierFilteredAssets.length<2" class="asset-lightbox-nav next" title="下一张">
+                <i class="ph ph-caret-right"></i>
+            </button>
+        </div>
+        <div class="asset-lightbox-foot">
+            <span>{{ dossierAssetPreviewIndex + 1 }} / {{ dossierFilteredAssets.length || 1 }}</span>
+            <span>{{ dossierAssetPreview.updated_at || '' }}</span>
         </div>
     </div>
 </div>

@@ -42,6 +42,7 @@ def update_settings(*, enabled: bool | None = None, max_entries: int | None = No
 
 def make_cache_key(
     *,
+    owner_account_id: int | None = None,
     provider_id: str,
     provider_base_url: str,
     model: str,
@@ -58,6 +59,7 @@ def make_cache_key(
     user_hash = _sha256_text(user_prompt)
     provider_signature = _sha256_text(f"{provider_id}|{provider_base_url}|{model}")
     payload = {
+        "owner_account_id": int(owner_account_id) if owner_account_id is not None else "",
         "provider_signature": provider_signature,
         "model": model or "",
         "temperature": round(float(temperature or 0), 3),
@@ -82,6 +84,7 @@ def make_cache_key(
 
 def key_for_request(
     *,
+    owner_account_id: int | None = None,
     model: str,
     temperature: float,
     max_tokens: int,
@@ -91,13 +94,14 @@ def key_for_request(
     user_prompt: str,
 ) -> tuple[str, dict[str, Any]]:
     """Build the key using the currently active provider and token policy."""
-    cfg = ai_provider.get_config()
+    cfg = ai_provider.get_config(owner_account_id=owner_account_id)
     effective_max_tokens = int(max_tokens or 1)
     token_policy_mode = ""
     if apply_token_policy:
         token_policy_mode = ai_provider.get_token_policy_mode()
         effective_max_tokens = ai_provider.clamp_output_tokens(effective_max_tokens, json_mode=json_mode)
     return make_cache_key(
+        owner_account_id=owner_account_id,
         provider_id=cfg.provider_id,
         provider_base_url=cfg.base_url,
         model=model,

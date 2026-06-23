@@ -4,6 +4,12 @@ const CAMPAIGN_IMPORT_POLL_TIMEOUT_MS = 35 * 60 * 1000;
 const CAMPAIGN_IMPORT_NO_PROGRESS_TIMEOUT_MS = 10 * 60 * 1000;
 const MINERU_FLASH_MAX_BYTES = 10 * 1024 * 1024;
 const CONFIG_MODEL_OPTIONS_CACHE_KEY = 'zric-config-model-options-v1';
+const SOLO_SESSION_LOG_LIMIT = 80;
+const HIDDEN_ROOM_SAVE_PREFIX = '__room_';
+const SOLO_ROOM_SAVE_PREFIX = '__room_solo_';
+const MULTIPLAYER_ROOM_SAVE_PREFIX = '__room_mp_';
+const SOLO_SESSIONS_KEY = 'zric-solo-sessions';
+const SOLO_SESSIONS_LEGACY_KEYS = ['zric-solo-sessions-v1'];
 
 createApp({
     setup() {
@@ -31,6 +37,7 @@ createApp({
         const campaignPackageExportBusy = ref(false);
         const dbConnected = ref(false);
         const campaignFiles = ref([]);
+        const saveFiles = ref([]);
         const campaignLoadSummary = ref('');
         const showGameSettingsModal = ref(false);
         const showAdvancedSettings = ref(false);
@@ -109,9 +116,11 @@ createApp({
 
         // ── API 供应商配置 ──
         const showApiKeyPanel = ref(false);
-        const openApiKeyPanel = () => {
+        const openApiKeyPanel = async () => {
             showGameSettingsModal.value = false;
             showApiKeyPanel.value = true;
+            apiKeySaveMsg.value = '';
+            await fetchApiKeyStatus({ resetModels: true });
             loadModelOptionsCache();
             syncConfiguredModelState();
         };
@@ -180,10 +189,10 @@ createApp({
             if (multiplayerAuthToken.value) headers['X-Auth-Token'] = multiplayerAuthToken.value;
             return headers;
         };
-        const requireAdminUi = () => {
-            if (multiplayerAuthAccount.value?.is_admin) return true;
+        const requireProviderConfigUi = () => {
+            if (multiplayerAuthAccount.value) return true;
             apiKeySaveOk.value = false;
-            apiKeySaveMsg.value = '请先登录管理员账号';
+            apiKeySaveMsg.value = '请先登录账号';
             return false;
         };
 
@@ -240,38 +249,55 @@ createApp({
             return `${entries} 条 / 命中 ${hits} / 约省 ${savedText}`;
         });
 
+        const providerToConfigShape = (provider = {}) => ({
+            provider_id: provider.id || '',
+            provider_name: provider.name || '',
+            base_url: provider.base_url || '',
+            chat_model: provider.chat_model || '',
+            embedding_model: provider.embedding_model || '',
+            image_model: provider.image_model || '',
+            campaign_model: provider.campaign_model || '',
+            image_size: provider.image_size || '1024x1024',
+        });
+
         const applyApiConfigPayload = (d, { keepTypedKey = false } = {}) => {
             if (!d || d.status !== 'success') return;
             applyTokenPolicyPayload(d);
             applyAiCachePayload(d);
-            apiProviders.value = d.providers || apiProviders.value || [];
-            activeProviderId.value = d.active_provider || d.config?.provider_id || activeProviderId.value;
+            const providers = Array.isArray(d.providers) ? d.providers : (apiProviders.value || []);
+            apiProviders.value = providers;
+            const requestedActiveId = d.active_provider || d.config?.provider_id || activeProviderId.value;
+            let activeProfile = providers.find(p => p.id === requestedActiveId);
+            if (providers.length && !activeProfile) {
+                activeProfile = providers.find(p => p.active) || providers.find(p => p.configured) || providers[0];
+            }
+            activeProviderId.value = activeProfile?.id || requestedActiveId || '';
             const configured = d.keys?.openai_compatible?.configured;
-            const activeProfile = apiProviders.value.find(p => p.id === activeProviderId.value);
-            activeAiProvider.value = activeProfile ? {
-                id: activeProfile.id,
-                name: activeProfile.name,
-                base_url: activeProfile.base_url,
-            } : (d.config ? {
-                id: d.config.provider_id || activeProviderId.value || '',
-                name: d.config.provider_name || '',
-                base_url: d.config.base_url || '',
-            } : activeAiProvider.value);
-            apiKeyStatus.value = { openai: configured ?? !!activeProfile?.configured };
-            if (d.config) {
+            const providerConfig = activeProfile ? providerToConfigShape(activeProfile) : null;
+            const configMatchesActive = !providerConfig || !d.config?.provider_id || d.config.provider_id === providerConfig.provider_id;
+            const formConfig = configMatchesActive
+                ? { ...(providerConfig || {}), ...(d.config || {}) }
+                : providerConfig;
+            activeAiProvider.value = formConfig ? {
+                id: formConfig.provider_id || activeProviderId.value || '',
+                name: formConfig.provider_name || activeProfile?.name || '',
+                base_url: formConfig.base_url || activeProfile?.base_url || '',
+            } : activeAiProvider.value;
+            apiKeyStatus.value = { openai: activeProfile ? !!activeProfile.configured : !!configured };
+            if (formConfig) {
                 apiKeyInputs.value = {
                     ...apiKeyInputs.value,
-                    providerId: d.config.provider_id || activeProviderId.value || '',
-                    providerName: d.config.provider_name || activeProfile?.name || '',
+                    providerId: formConfig.provider_id || activeProviderId.value || '',
+                    providerName: formConfig.provider_name || activeProfile?.name || '',
                     openaiApiKey: keepTypedKey ? apiKeyInputs.value.openaiApiKey : '',
-                    baseUrl: d.config.base_url || 'https://api.openai.com/v1',
-                    chatModel: d.config.chat_model || '',
-                    embeddingModel: d.config.embedding_model || '',
-                    imageModel: d.config.image_model || '',
-                    campaignModel: d.config.campaign_model || '',
-                    imageSize: d.config.image_size || '1024x1024',
+                    baseUrl: formConfig.base_url || 'https://api.openai.com/v1',
+                    chatModel: formConfig.chat_model || '',
+                    embeddingModel: formConfig.embedding_model || '',
+                    imageModel: formConfig.image_model || '',
+                    campaignModel: formConfig.campaign_model || '',
+                    imageSize: formConfig.image_size || '1024x1024',
                 };
-                imgModel.value = d.config.image_model || imgModel.value;
+                imgModel.value = formConfig.image_model || imgModel.value;
             }
         };
 
@@ -295,7 +321,7 @@ createApp({
         };
 
         const newApiProvider = () => {
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             activeProviderId.value = '';
             apiKeyStatus.value = { openai: false };
             apiKeyInputs.value = blankApiKeyInputs(`Provider ${apiProviders.value.length + 1}`);
@@ -305,9 +331,14 @@ createApp({
             apiKeySaveMsg.value = '';
         };
 
-        const fetchApiKeyStatus = async () => {
+        const fetchApiKeyStatus = async ({ resetModels = false } = {}) => {
+            if (resetModels) {
+                modelOptions.value = blankModelOptions();
+                dropdownModelSearches.value = blankConfigModelSearches();
+                openModelDropdownCapability.value = '';
+            }
             try {
-                const r = await fetch(`${API_BASE_URL}/api/config/keys`);
+                const r = await fetch(`${API_BASE_URL}/api/config/keys`, { headers: configRequestHeaders() });
                 const d = await r.json();
                 if (d.status === 'success') {
                     applyApiConfigPayload(d);
@@ -320,7 +351,7 @@ createApp({
         const setTokenPolicyMode = async (mode) => {
             const targetMode = (mode || '').trim();
             if (!targetMode || isSavingTokenPolicy.value || tokenPolicy.value.mode === targetMode) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isSavingTokenPolicy.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -357,7 +388,7 @@ createApp({
 
         const setAiCacheEnabled = async (enabled) => {
             if (isSavingAiCache.value) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isSavingAiCache.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -386,7 +417,7 @@ createApp({
 
         const clearAiCache = async () => {
             if (isSavingAiCache.value || !aiCache.value.entries) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isSavingAiCache.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -414,7 +445,7 @@ createApp({
 
         const switchApiProvider = async (providerId) => {
             if (!providerId) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             const localProfile = apiProviders.value.find(p => p.id === providerId);
             if (localProfile) fillProviderInputs(localProfile);
             modelOptions.value = blankModelOptions();
@@ -445,7 +476,7 @@ createApp({
 
         const deleteApiProvider = async (providerId) => {
             if (!providerId || !confirm('删除这个 OpenAI 兼容供应商配置？')) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             try {
                 const r = await fetch(`${API_BASE_URL}/api/config/providers/delete`, {
                     method: 'POST',
@@ -643,7 +674,7 @@ createApp({
 
         const fetchConfigModels = async (capability = 'chat') => {
             if (isFetchingConfigModels.value) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = capability;
             apiKeySaveMsg.value = '';
@@ -689,7 +720,7 @@ createApp({
 
         const fetchAllConfigModels = async () => {
             if (isFetchingConfigModels.value) return;
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isFetchingConfigModels.value = true;
             fetchingConfigCapability.value = 'all';
             apiKeySaveMsg.value = '';
@@ -744,18 +775,14 @@ createApp({
 
         const selectConfigModel = async (fieldKey, modelId, capability = '') => {
             if (!modelId) return;
-            if (fieldKey === 'chatModel') {
-                await switchAiModel(modelId);
-                if (capability) openModelDropdownCapability.value = '';
-                return;
-            }
             apiKeyInputs.value[fieldKey] = modelId;
+            if (fieldKey === 'chatModel') syncChatModelSelection(modelId);
             if (fieldKey === 'imageModel') imgModel.value = modelId;
             if (capability) openModelDropdownCapability.value = '';
         };
 
         const saveApiKeys = async () => {
-            if (!requireAdminUi()) return;
+            if (!requireProviderConfigUi()) return;
             isSavingKeys.value = true;
             apiKeySaveMsg.value = '';
             try {
@@ -800,6 +827,24 @@ createApp({
         const selectedCampaignInfo = computed(() => {
             return campaignFiles.value.find(f => f.path === selectedCampaign.value) || null;
         });
+        const normalizeCampaignPath = (value = '') => String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+        const activeSoloSessionId = ref('');
+        const loadedCampaignPath = ref('');
+        const loadedCampaignName = ref('');
+        const loadedBaseCampaignPath = ref('');
+        const loadedBaseCampaignName = ref('');
+        const currentSavePath = ref('');
+        const campaignSelectionMatches = (campaign, path) => {
+            const normalized = normalizeCampaignPath(path);
+            if (!campaign || !normalized) return false;
+            const campaignPath = normalizeCampaignPath(campaign.path);
+            const campaignName = normalizeCampaignPath(campaign.name);
+            return (
+                campaignPath === normalized ||
+                campaignName === normalized ||
+                campaignPath === `campaigns/${normalized}`
+            );
+        };
         // AI 模型选择
         const aiModels = ref([]);
         const aiModelSearch = ref('');
@@ -886,7 +931,15 @@ createApp({
         const soloConfirmedCharacterIds = ref([]);
         const soloActionLog = ref([]);
         const soloLogRef = ref(null);
-        const visibleSoloActionLog = computed(() => [...soloActionLog.value].reverse());
+        const soloLogSortValue = (entry) => {
+            const idTime = Number(String(entry?.id || '').split('-')[0]);
+            if (Number.isFinite(idTime) && idTime > 0) return idTime;
+            const parsed = Date.parse(entry?.created_at || entry?.time || '');
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const visibleSoloActionLog = computed(() =>
+            [...soloActionLog.value].sort((a, b) => soloLogSortValue(b) - soloLogSortValue(a))
+        );
         const isGeneratingText = ref(false);
         const checkpointCount = ref(0);
         const isRollingBack = ref(false);
@@ -1037,7 +1090,7 @@ createApp({
             try {
                 await fetch(`${API_BASE_URL}/api/player/state`, {
                     method: 'POST',
-                    headers: {'Content-Type':'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify(payload),
                 });
                 playerStateCache.value = { ...playerStateCache.value, ...payload };
@@ -1055,7 +1108,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/game/checkpoint`, {
                     method: 'POST',
-                    headers: {'Content-Type':'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify({from_node_id: nodeId, label}),
                 });
                 const d = await r.json().catch(() => ({}));
@@ -1196,7 +1249,9 @@ createApp({
                 applyMultiplayerAuthSession(data);
                 multiplayerAuthForm.value = { ...multiplayerAuthForm.value, password: '' };
                 multiplayerAuthMsg.value = '账号已登录';
+                await fetchApiKeyStatus({ resetModels: true });
                 await fetchCampaigns();
+                await fetchSaves();
             } catch (e) {
                 multiplayerAuthMsg.value = e.message || '登录失败';
             } finally {
@@ -1220,7 +1275,9 @@ createApp({
                 localStorage.setItem('zric-mp-tokens', JSON.stringify({ roomTokens: multiplayerRoomTokens.value, memberTokens: {} }));
                 if (multiplayerWs) multiplayerWs.close();
                 multiplayerAuthMsg.value = '账号已退出';
+                await fetchApiKeyStatus({ resetModels: true });
                 await fetchCampaigns();
+                await fetchSaves();
                 multiplayerAuthBusy.value = false;
             }
         };
@@ -1230,12 +1287,6 @@ createApp({
             multiplayerAuthMsg.value = '请先登录账号';
             return false;
         };
-        const requireAdminAuth = () => {
-            if (requireMultiplayerAuth() && multiplayerAuthAccount.value?.is_admin) return true;
-            multiplayerAuthMsg.value = '请先登录管理员账号';
-            return false;
-        };
-
         const accountHeaders = (jsonBody = false) => {
             const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
             if (multiplayerAuthToken.value) headers['X-Auth-Token'] = multiplayerAuthToken.value;
@@ -1363,14 +1414,16 @@ createApp({
             if (!room?.code || !multiplayerRoomTokens.value[room.code]) return;
             try {
                 const activeMapRoom = (typeof mapRooms !== 'undefined' && mapRooms.value || []).find(r => r.state === 'active');
+                const currentSettings = room.settings && typeof room.settings === 'object' ? room.settings : {};
                 const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(room.code)}`, {
                     method: 'PATCH',
                     body: JSON.stringify({
                         current_scene_id: currentNode.value?.id || null,
                         current_room_id: activeMapRoom?.id || null,
                         settings: {
+                            ...currentSettings,
                             gm_console: true,
-                            campaign_path: selectedCampaign.value || currentSaveFolder.value || '',
+                            campaign_path: selectedCampaign.value || loadedCampaignPath.value || currentSettings.campaign_path || '',
                         },
                     }),
                 });
@@ -1399,7 +1452,7 @@ createApp({
             } catch(e) {}
         };
 
-        const createMultiplayerRoom = async () => {
+        const createMultiplayerRoom = async (options = {}) => {
             if (!requireMultiplayerAuth()) return;
             multiplayerBusy.value = true;
             multiplayerError.value = '';
@@ -1407,13 +1460,32 @@ createApp({
             clampMultiplayerMaxPlayers();
             saveMultiplayerLocalState();
             try {
+                const roomSavePath = normalizeCampaignPath(options.roomSavePath || '');
+                const campaignPath = normalizeCampaignPath(
+                    options.campaignPath
+                    || selectedCampaign.value
+                    || loadedBaseCampaignPath.value
+                    || loadedCampaignPath.value
+                    || currentSavePath.value
+                    || ''
+                );
+                const settings = {
+                    gm_console: true,
+                    max_players: multiplayerMaxPlayers.value,
+                };
+                if (campaignPath) settings.campaign_path = campaignPath;
+                if (roomSavePath) settings.room_save_path = roomSavePath;
+                if (options.restoreState && typeof options.restoreState === 'object') {
+                    settings.restore_state = options.restoreState;
+                }
                 const data = await multiplayerApi('/api/multiplayer/rooms', {
                     method: 'POST',
                     body: JSON.stringify({
-                        name: multiplayerRoomName.value || currentSaveFolder.value || '新的跑团房间',
+                        name: options.name || multiplayerRoomName.value || currentSaveFolder.value || '新的跑团房间',
                         gm_name: 'AI-GM',
-                        campaign_path: selectedCampaign.value || currentSaveFolder.value || '',
-                        settings: { gm_console: true, max_players: multiplayerMaxPlayers.value },
+                        campaign_path: campaignPath,
+                        restore_code: options.restoreCode || '',
+                        settings,
                     }),
                 });
                 if (data.room?.code && data.room_token) {
@@ -1421,13 +1493,35 @@ createApp({
                     saveMultiplayerLocalState();
                 }
                 applyMultiplayerSnapshot(data);
-                await syncMultiplayerRoomState();
+                if (appState.value === 'game') await syncMultiplayerRoomState();
                 multiplayerStatusMsg.value = `房间 ${data.room.code} 已创建`;
+                return data;
             } catch(e) {
                 multiplayerError.value = e.message || '创建房间失败';
+                return null;
             } finally {
                 multiplayerBusy.value = false;
             }
+        };
+
+        const joinMultiplayerRoomData = async (code, roleOverride = '') => {
+            const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(code)}/join`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    player_id: multiplayerAuthAccount.value?.player_id || multiplayerPlayerId.value,
+                    display_name: multiplayerAuthAccount.value?.display_name || multiplayerProfileName.value || '玩家',
+                    role: roleOverride || 'player',
+                    color: '#7dd3fc',
+                    client_id: multiplayerClientId,
+                }),
+            });
+            syncMultiplayerMember(data);
+            if (data.room?.code && data.member_token) {
+                multiplayerMemberTokens.value = { ...multiplayerMemberTokens.value, [data.room.code]: data.member_token };
+                saveMultiplayerLocalState();
+            }
+            applyMultiplayerSnapshot(data);
+            return data;
         };
 
         const enterMultiplayerRoomByCode = async (codeArg = '') => {
@@ -1438,11 +1532,9 @@ createApp({
             multiplayerBusy.value = true;
             multiplayerError.value = '';
             multiplayerStatusMsg.value = '';
+            saveMultiplayerLocalState();
             try {
-                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(code)}`, {
-                    method: 'GET',
-                });
-                applyMultiplayerSnapshot(data);
+                const data = await joinMultiplayerRoomData(code);
                 const roomCode = data.room?.code || code;
                 multiplayerJoinCode.value = roomCode;
                 multiplayerStatusMsg.value = `正在进入房间 ${roomCode}`;
@@ -1464,22 +1556,7 @@ createApp({
             multiplayerStatusMsg.value = '';
             saveMultiplayerLocalState();
             try {
-                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(code)}/join`, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        player_id: multiplayerAuthAccount.value?.player_id || multiplayerPlayerId.value,
-                        display_name: multiplayerAuthAccount.value?.display_name || multiplayerProfileName.value || '玩家',
-                        role: roleOverride || 'player',
-                        color: '#7dd3fc',
-                        client_id: multiplayerClientId,
-                    }),
-                });
-                syncMultiplayerMember(data);
-                if (data.room?.code && data.member_token) {
-                    multiplayerMemberTokens.value = { ...multiplayerMemberTokens.value, [data.room.code]: data.member_token };
-                    saveMultiplayerLocalState();
-                }
-                applyMultiplayerSnapshot(data);
+                const data = await joinMultiplayerRoomData(code, roleOverride);
                 connectMultiplayerWs();
                 await syncMultiplayerRoomState();
                 multiplayerStatusMsg.value = `已加入房间 ${data.room.code}`;
@@ -1505,7 +1582,7 @@ createApp({
         const createMultiplayerRoomForSelectedCampaign = async () => {
             if (appState.value === 'menu' && selectedCampaign.value) {
                 clampMultiplayerMaxPlayers();
-                await loadAndStart('multiplayer');
+                await loadAndStart('multiplayer', { activate: false, preserveMultiplayerState: true });
                 if (campaignLoadSummary.value && campaignLoadSummary.value.includes('失败')) return;
             }
             await createMultiplayerRoom();
@@ -1525,7 +1602,6 @@ createApp({
             if (!multiplayerInviteUrl.value) return;
             window.open(multiplayerInviteUrl.value, '_blank', 'noopener');
         };
-
         const showTriggerModal = ref(false);
         const triggers = ref([]);
         const currentTrigger = ref(null);
@@ -1575,19 +1651,99 @@ createApp({
         const exportNewName = ref('');
         const currentSaveFolder = ref('');
         const isExportingSave = ref(false);
+        const isRenamingSave = ref(false);
+        const renamingSaveName = ref('');
+        const renameSaveDraft = ref('');
         const saveManagerMsg = ref('');
         const saveManagerOk = ref(true);
         const saveSearch = ref('');
-        const saveItems = computed(() => campaignFiles.value || []);
+        const menuSaveModeFilter = ref('all');
+        const saveItems = computed(() => saveFiles.value || []);
+        const saveIdentity = (save = {}) => normalizeCampaignPath(save.path || save.name || '');
+        const savePlayMode = (save = {}) => {
+            const mode = String(save.play_mode || '').trim().toLowerCase();
+            if (mode === 'solo' || String(save.name || '').startsWith(SOLO_ROOM_SAVE_PREFIX)) return 'solo';
+            if (mode === 'multiplayer' || String(save.name || '').startsWith(MULTIPLAYER_ROOM_SAVE_PREFIX)) return 'multiplayer';
+            return 'general';
+        };
+        const savePlayModeLabel = (save = {}) => {
+            const mode = savePlayMode(save);
+            if (mode === 'solo') return '单人';
+            if (mode === 'multiplayer') return '多人';
+            return '通用';
+        };
+        const saveDisplayName = (save = {}) => {
+            const raw = String(save.display_name || save.name || '').trim();
+            if (raw.startsWith(SOLO_ROOM_SAVE_PREFIX)) return `单人房间 ${raw.slice(SOLO_ROOM_SAVE_PREFIX.length)}`;
+            if (raw.startsWith(MULTIPLAYER_ROOM_SAVE_PREFIX)) return `多人房间 ${raw.slice(MULTIPLAYER_ROOM_SAVE_PREFIX.length)}`;
+            return raw || save.path || '未命名存档';
+        };
         const currentSaveItem = computed(() => {
-            const currentPath = currentSaveFolder.value ? `campaigns/${currentSaveFolder.value}` : selectedCampaign.value;
-            return saveItems.value.find(s => s.path === currentPath || s.name === currentSaveFolder.value) || null;
+            const currentPath = normalizeCampaignPath(currentSavePath.value);
+            return saveItems.value.find(s => {
+                const path = normalizeCampaignPath(s.path);
+                return (currentPath && path === currentPath) || (!!currentSaveFolder.value && s.name === currentSaveFolder.value);
+            }) || null;
         });
+        const currentSaveWritable = computed(() => !!(currentSaveItem.value?.owned_by_me && currentSaveItem.value?.deletable));
         const filteredSaveItems = computed(() => {
             const q = saveSearch.value.trim().toLowerCase();
             const items = saveItems.value;
             if (!q) return items;
-            return items.filter(s => `${s.name || ''} ${s.path || ''} ${s.updated_at || ''}`.toLowerCase().includes(q));
+            return items.filter(s => `${s.name || ''} ${s.path || ''} ${s.campaign_name || ''} ${s.updated_at || ''}`.toLowerCase().includes(q));
+        });
+        const menuSaveModeCounts = computed(() => {
+            const counts = { all: saveItems.value.length, solo: 0, multiplayer: 0, general: 0 };
+            for (const save of saveItems.value) {
+                const mode = savePlayMode(save);
+                counts[mode] = Number(counts[mode] || 0) + 1;
+            }
+            return counts;
+        });
+        const menuSaveItems = computed(() => {
+            const mode = menuSaveModeFilter.value;
+            return [...saveItems.value]
+                .filter(save => mode === 'all' || savePlayMode(save) === mode)
+                .sort((a, b) => saveTimestamp(b) - saveTimestamp(a))
+                .slice(0, 8);
+        });
+        const sanitizeRoomToken = (value = '') =>
+            String(value || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
+        const isHiddenRoomSaveName = (value = '') => String(value || '').trim().startsWith(HIDDEN_ROOM_SAVE_PREFIX);
+        const soloRoomSaveName = (sessionId = '') => {
+            const clean = sanitizeRoomToken(sessionId);
+            return clean ? `${SOLO_ROOM_SAVE_PREFIX}${clean}` : '';
+        };
+        const multiplayerRoomSaveName = (roomCode = '') => {
+            const clean = sanitizeRoomToken(roomCode);
+            return clean ? `${MULTIPLAYER_ROOM_SAVE_PREFIX}${clean}` : '';
+        };
+        const multiplayerRoomCodeFromSave = (save = {}) => {
+            const candidates = [
+                save.name,
+                normalizeCampaignPath(save.path || '').split('/').pop(),
+                save.display_name,
+            ];
+            for (const candidate of candidates) {
+                const raw = String(candidate || '').trim();
+                if (raw.startsWith(MULTIPLAYER_ROOM_SAVE_PREFIX)) {
+                    return sanitizeRoomToken(raw.slice(MULTIPLAYER_ROOM_SAVE_PREFIX.length)).toUpperCase();
+                }
+            }
+            return '';
+        };
+        const lockedSaveSourceLabel = computed(() => {
+            return loadedBaseCampaignName.value
+                || selectedCampaignInfo.value?.name
+                || normalizeCampaignPath(lockedSaveSourcePath.value).split('/').pop()
+                || '当前剧本';
+        });
+        const lockedSaveSourcePath = computed(() => {
+            const selectedPath = normalizeCampaignPath(selectedCampaign.value || '');
+            if (selectedPath.startsWith('campaigns/')) return selectedPath;
+            if (loadedBaseCampaignPath.value) return normalizeCampaignPath(loadedBaseCampaignPath.value);
+            const loadedPath = normalizeCampaignPath(loadedCampaignPath.value || '');
+            return loadedPath.startsWith('campaigns/') ? loadedPath : '';
         });
         const isGeneratingReport = ref(false);
         const battleReportFilename = ref('');
@@ -1675,20 +1831,20 @@ createApp({
                 if (d.id) {
                     // 编辑：PUT
                     await fetch(`${API_BASE_URL}/api/timelines/${d.id}`, {
-                        method: 'PUT', headers: {'Content-Type':'application/json'},
+                        method: 'PUT', headers: accountHeaders(true),
                         body: JSON.stringify({ label: d.label, color: d.color, char_ids, status: 'active' })
                     });
                     // 同步节点
                     if (d.current_node_id) {
                         await fetch(`${API_BASE_URL}/api/timelines/${d.id}/jump`, {
-                            method: 'POST', headers: {'Content-Type':'application/json'},
+                            method: 'POST', headers: accountHeaders(true),
                             body: JSON.stringify({ node_id: d.current_node_id })
                         });
                     }
                 } else {
                     // 新建：POST
                     await fetch(`${API_BASE_URL}/api/timelines`, {
-                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        method: 'POST', headers: accountHeaders(true),
                         body: JSON.stringify(body)
                     });
                 }
@@ -1699,14 +1855,14 @@ createApp({
 
         const deleteTimeline = async id => {
             if (!confirm('确认删除该时间线？记忆流将一并清除。')) return;
-            await fetch(`${API_BASE_URL}/api/timelines/${id}`, { method: 'DELETE' });
+            await fetch(`${API_BASE_URL}/api/timelines/${id}`, { method: 'DELETE', headers: accountHeaders() });
             await fetchTimelines();
         };
 
         const bindCurrentSceneToTimeline = async tlId => {
             if (!currentNode.value) return;
             await fetch(`${API_BASE_URL}/api/timelines/${tlId}/jump`, {
-                method: 'POST', headers: {'Content-Type':'application/json'},
+                method: 'POST', headers: accountHeaders(true),
                 body: JSON.stringify({ node_id: currentNode.value.id })
             });
             await fetchTimelines();
@@ -1725,7 +1881,7 @@ createApp({
         const saveTlMemory = async () => {
             if (!tlMemoryTarget.value) return;
             await fetch(`${API_BASE_URL}/api/timelines/${tlMemoryTarget.value.id}/memory`, {
-                method: 'PUT', headers: {'Content-Type':'application/json'},
+                method: 'PUT', headers: accountHeaders(true),
                 body: JSON.stringify({ content: tlMemoryContent.value })
             });
             showTlMemoryModal.value = false;
@@ -1746,7 +1902,7 @@ createApp({
             isTlDynamicRunning.value = true;
             try {
                 const r = await fetch(`${API_BASE_URL}/api/timelines/${tl.id}/dynamic-options`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    method: 'POST', headers: accountHeaders(true),
                     body: JSON.stringify({
                         timeline_id: tl.id,
                         current_node_id: tl.current_node_id,
@@ -1785,7 +1941,7 @@ createApp({
             isMerging.value = true;
             try {
                 const r = await fetch(`${API_BASE_URL}/api/timelines/merge`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    method: 'POST', headers: accountHeaders(true),
                     body: JSON.stringify({ source_id: mergeSource.value.id, target_id: mergeTargetId.value })
                 });
                 const d = await r.json();
@@ -1857,7 +2013,7 @@ createApp({
             tlRunningIds.value = new Set([...tlRunningIds.value, tl.id]);
             try {
                 const r = await fetch(`${API_BASE_URL}/api/timelines/${tl.id}/dynamic-options`, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    method: 'POST', headers: accountHeaders(true),
                     body: JSON.stringify({
                         timeline_id: tl.id,
                         current_node_id: tl.current_node_id,
@@ -1905,7 +2061,7 @@ createApp({
                             const roomRes = await fetch(`${API_BASE_URL}/api/map/room-by-node/${nodeId}`);
                             const roomData = await roomRes.json();
                             if (roomData.room_id) {
-                                await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomData.room_id}&timeline_id=${tlId}`, { method: 'POST' });
+                                await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomData.room_id}&timeline_id=${tlId}`, { method: 'POST', headers: accountHeaders() });
                                 await fetchMapData();
                             }
                         } catch(_) {}
@@ -1913,14 +2069,14 @@ createApp({
                 } catch(e) { console.error('tl branch expand/apply failed:', e); }
             }
             await fetch(`${API_BASE_URL}/api/timelines/${tlId}/jump`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: accountHeaders(true),
                 body: JSON.stringify({ node_id: nodeId })
             });
             // 同步记录到全局记忆流
             const node = storyNodes.value.find(n => n.id === nodeId);
             if (node) {
                 fetch(`${API_BASE_URL}/api/game/log-scene-visit`, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    method: 'POST', headers: accountHeaders(true),
                     body: JSON.stringify({ node_id: nodeId, node_name: node.name, option_text: optionText })
                 }).catch(() => {});
             }
@@ -1954,7 +2110,7 @@ createApp({
             try {
                 await fetch(`${API_BASE_URL}/api/world-entities`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify({
                         entity_type: e.entity_type,
                         name: e.name.trim(),
@@ -1971,7 +2127,7 @@ createApp({
 
         const deleteEntity = async id => {
             if (!confirm('确认从世界状态中移除该实体记录？')) return;
-            await fetch(`${API_BASE_URL}/api/world-entities/${id}`, { method: 'DELETE' });
+            await fetch(`${API_BASE_URL}/api/world-entities/${id}`, { method: 'DELETE', headers: accountHeaders() });
             currentEntity.value = null;
             await fetchWorldEntities();
         };
@@ -1996,16 +2152,18 @@ createApp({
         const ragChunkOverlap  = ref(80);
         const ragTopK          = ref(6);
 
-        const fetchRagDocuments = async () => {
+        const fetchRagDocuments = async (options = {}) => {
             try {
-                const r = await fetch(`${API_BASE_URL}/api/rag/documents`);
+                const includeHidden = !!options.includeHidden;
+                const url = `${API_BASE_URL}/api/rag/documents${includeHidden ? '?include_hidden=1' : ''}`;
+                const r = await fetch(url, includeHidden ? { headers: accountHeaders() } : undefined);
                 ragDocuments.value = (await r.json()).documents || [];
             } catch(e) {}
         };
 
         const openRagModal = () => {
             enterAdvancedPanel();
-            fetchRagDocuments();
+            fetchRagDocuments({ includeHidden: true });
             ragTab.value = 'import';
             ragIngestResult.value = null;
             ragUploadFile.value   = null;
@@ -2054,6 +2212,7 @@ createApp({
                     fd.append('hidden',        ragForm.value.hidden ? 1 : 0);
                     const r = await fetch(`${API_BASE_URL}/api/rag/upload`, {
                         method: 'POST',
+                        headers: accountHeaders(),
                         body: fd          // 不设 Content-Type，让浏览器自动设置 multipart/form-data
                     });
                     d = await r.json();
@@ -2071,7 +2230,7 @@ createApp({
                     }
                     const r = await fetch(`${API_BASE_URL}/api/rag/ingest`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: accountHeaders(true),
                         body: JSON.stringify({
                             title:         ragForm.value.title.trim(),
                             source:        ragForm.value.source.trim(),
@@ -2093,7 +2252,7 @@ createApp({
                 if (d && d.status === 'success') {
                     ragForm.value       = { title: '', source: '', text: '', hidden: false };
                     ragUploadFile.value = null;
-                    await fetchRagDocuments();
+                    await fetchRagDocuments({ includeHidden: true });
                     ragTab.value        = 'view';
                     ragSelectedDoc.value = ragDocuments.value[0] || null;
                 } else if (d) {
@@ -2106,20 +2265,17 @@ createApp({
             }
         };
 
-        // 保留旧名兼容模板中可能残留的调用
-        const ragIngest = ragImport;
-
         const ragDeleteDoc = async id => {
             if (!confirm('确认删除此文档及其所有切片？此操作不可恢复。')) return;
-            await fetch(`${API_BASE_URL}/api/rag/documents/${id}`, { method: 'DELETE' });
+            await fetch(`${API_BASE_URL}/api/rag/documents/${id}`, { method: 'DELETE', headers: accountHeaders() });
             ragSelectedDoc.value = null;
-            await fetchRagDocuments();
+            await fetchRagDocuments({ includeHidden: true });
         };
 
         const ragToggleHidden = async doc => {
             const newHidden = doc.hidden ? 0 : 1;
-            await fetch(`${API_BASE_URL}/api/rag/documents/${doc.id}/hidden?hidden=${newHidden}`, { method: 'PATCH' });
-            await fetchRagDocuments();
+            await fetch(`${API_BASE_URL}/api/rag/documents/${doc.id}/hidden?hidden=${newHidden}`, { method: 'PATCH', headers: accountHeaders() });
+            await fetchRagDocuments({ includeHidden: true });
             ragSelectedDoc.value = ragDocuments.value.find(d => d.id === doc.id) || null;
         };
 
@@ -2130,7 +2286,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/rag/search`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: accountHeaders(true),
                     body: JSON.stringify({ scene_name: ragSearchQuery.value, content: '', top_k: ragTopK.value })
                 });
                 const d = await r.json();
@@ -2206,7 +2362,7 @@ createApp({
             const isNew = !t.id;
             const url = isNew ? `${API_BASE_URL}/api/game/trigger` : `${API_BASE_URL}/api/game/trigger/${t.id}`;
             const payload = { label: t.label||'触发器', target_node_id: t.target_node_id ? parseInt(t.target_node_id) : 0, mode: t.mode, conditions: _buildTree(t.conditions), cooldown: t.cooldown||0, max_fire_count: t.max_fire_count||0, actions: t.actions||[], prerequisite_trigger_ids: t.prerequisite_trigger_ids||[], exclude_trigger_ids: t.exclude_trigger_ids||[] };
-            try { const r=await fetch(url,{method:isNew?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+            try { const r=await fetch(url,{method:isNew?'POST':'PUT',headers:accountHeaders(true),body:JSON.stringify(payload)});
                 if(r.ok){await fetchTriggers();currentTrigger.value=null;} } catch(e){}
         };
         const addTriggerAction = () => {
@@ -2232,9 +2388,9 @@ createApp({
             };
             const t = act.type; Object.keys(act).forEach(k=>{ if(k!=='type') delete act[k]; }); Object.assign(act, defaults[t]||{});
         };
-        const deleteTrigger = async id => { if(!confirm('彻底删除此触发器？'))return; await fetch(`${API_BASE_URL}/api/game/trigger/${id}`,{method:'DELETE'}); await fetchTriggers(); currentTrigger.value=null; };
-        const resetTriggerFired = async id => { await fetch(`${API_BASE_URL}/api/game/trigger/${id}/reset`,{method:'POST'}); await fetchTriggers(); if(currentTrigger.value&&currentTrigger.value.id===id) currentTrigger.value={...currentTrigger.value,fired:0,fire_count:0}; };
-        const resetAllTriggers = async () => { if(!confirm('将所有触发器重置为未触发状态？'))return; await fetch(`${API_BASE_URL}/api/game/triggers/reset-all`,{method:'POST'}); await fetchTriggers(); if(currentTrigger.value) currentTrigger.value={...currentTrigger.value,fired:0,fire_count:0}; };
+        const deleteTrigger = async id => { if(!confirm('彻底删除此触发器？'))return; await fetch(`${API_BASE_URL}/api/game/trigger/${id}`,{method:'DELETE',headers:accountHeaders()}); await fetchTriggers(); currentTrigger.value=null; };
+        const resetTriggerFired = async id => { await fetch(`${API_BASE_URL}/api/game/trigger/${id}/reset`,{method:'POST',headers:accountHeaders()}); await fetchTriggers(); if(currentTrigger.value&&currentTrigger.value.id===id) currentTrigger.value={...currentTrigger.value,fired:0,fire_count:0}; };
+        const resetAllTriggers = async () => { if(!confirm('将所有触发器重置为未触发状态？'))return; await fetch(`${API_BASE_URL}/api/game/triggers/reset-all`,{method:'POST',headers:accountHeaders()}); await fetchTriggers(); if(currentTrigger.value) currentTrigger.value={...currentTrigger.value,fired:0,fire_count:0}; };
 
         // ── Campaigns ──
         const fetchCampaigns = async () => {
@@ -2242,29 +2398,41 @@ createApp({
                 const r = await fetch(`${API_BASE_URL}/api/campaigns`, { headers: accountHeaders() });
                 const d = await r.json();
                 if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '获取剧本列表失败');
-                let raw = Array.isArray(d.files) ? d.files : (Array.isArray(d.files_legacy) ? d.files_legacy : []);
-                if (raw.length > 0 && typeof raw[0] === 'string') raw = raw.map(f => ({name:f, type:'legacy', path:f}));
+                let raw = Array.isArray(d.files) ? d.files : [];
                 campaignFiles.value = raw;
-                const currentPath = currentSaveFolder.value ? `campaigns/${currentSaveFolder.value}` : '';
-                const stillSelected = raw.find(f => f.path === selectedCampaign.value);
-                const current = raw.find(f => f.path === currentPath || f.name === currentSaveFolder.value);
+                const selected = normalizeCampaignPath(selectedCampaign.value);
+                const stillSelected = raw.find(f => campaignSelectionMatches(f, selected));
                 const def = raw.find(f => f.name === 'campaign_settings.json' || f.name === 'campaign_settings');
-                selectedCampaign.value = (stillSelected || current || def || raw[0] || {}).path || '';
+                selectedCampaign.value = (stillSelected || def || raw[0] || {}).path || '';
                 return raw;
             } catch(e) {
                 return null;
             }
         };
+        const fetchSaves = async () => {
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/game/saves`, { headers: accountHeaders() });
+                const d = await r.json();
+                if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '获取存档列表失败');
+                saveFiles.value = Array.isArray(d.files)
+                    ? d.files.filter(save => normalizeCampaignPath(save?.path || '').startsWith('saves/'))
+                    : [];
+                return saveFiles.value;
+            } catch(e) {
+                saveFiles.value = [];
+                return null;
+            }
+        };
         const deleteSelectedCampaign = async () => {
             const selected = selectedCampaignInfo.value;
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             if (!selected?.deletable || !selected.name || isDeletingCampaign.value) return;
             const label = selected.name || selected.path || '当前剧本';
             if (!confirm(`删除剧本「${label}」？\n\n会删除该 campaigns 文件夹内的剧本、知识库、地图和图片资源。`)) return;
             isDeletingCampaign.value = true;
             campaignLoadSummary.value = '';
             try {
-                const r = await fetch(`${API_BASE_URL}/api/game/saves/${encodeURIComponent(selected.name)}`, {
+                const r = await fetch(`${API_BASE_URL}/api/campaigns/${encodeURIComponent(selected.name)}`, {
                     method: 'DELETE',
                     headers: accountHeaders(),
                 });
@@ -2281,7 +2449,7 @@ createApp({
             }
         };
         const exportCampaignPackage = async (campaign = selectedCampaignInfo.value) => {
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             if (!campaign?.package_export_url || campaignPackageExportBusy.value) return;
             campaignPackageExportBusy.value = true;
             campaignLoadSummary.value = '';
@@ -2309,7 +2477,7 @@ createApp({
         };
         const importCampaignPackageFile = async (file) => {
             if (!file || campaignPackageImportBusy.value) return;
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             campaignPackageImportBusy.value = true;
             campaignLoadSummary.value = '';
             try {
@@ -2404,7 +2572,7 @@ createApp({
             } catch(e) {}
         };
         const openCampaignImportModal = () => {
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             campaignImportName.value = '';
             campaignImportMainFile.value = null;
             campaignImportAssets.value = [];
@@ -2480,7 +2648,7 @@ createApp({
         };
         const importCampaign = async () => {
             if (!campaignImportMainFile.value || campaignImportBusy.value) return;
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             campaignImportBusy.value = true;
             campaignImportResult.value = null;
             campaignImportWarnings.value = [];
@@ -2570,7 +2738,7 @@ createApp({
         };
         const reparseSelectedCampaign = async () => {
             if (campaignImportBusy.value) return;
-            if (!requireAdminAuth()) return;
+            if (!requireMultiplayerAuth()) return;
             const selected = selectedCampaignInfo.value;
             if (!selectedCampaign.value || selected?.type !== 'folder') {
                 showCampaignImportOutcome({
@@ -2656,7 +2824,7 @@ createApp({
             isFetchingAiModels.value = true;
             aiModelError.value = '';
             try {
-                const r = await fetch(`${API_BASE_URL}/api/ai/models`);
+                const r = await fetch(`${API_BASE_URL}/api/ai/models`, { headers: accountHeaders() });
                 const d = await r.json();
                 if (d.status === 'success') {
                     const currentModel = d.active || apiKeyInputs.value.chatModel || '';
@@ -2715,8 +2883,8 @@ createApp({
         const switchAiModel = async (modelKey) => {
             const targetModel = (modelKey || '').trim();
             if (!targetModel) return;
-            if (!multiplayerAuthAccount.value?.is_admin) {
-                alert('请先登录管理员账号');
+            if (!multiplayerAuthAccount.value) {
+                alert('请先登录账号');
                 return;
             }
             if (targetModel === activeAiModel.value) {
@@ -2751,9 +2919,237 @@ createApp({
             const idx = available.indexOf(activeAiModel.value);
             switchAiModel(available[(idx + 1) % available.length]);
         };
-        const refreshLoadedCampaignResources = async () => {
+        const persistClearedSoloSelection = () => {
+            try {
+                localStorage.setItem('zric-solo-profile', JSON.stringify({
+                    name: soloPlayerName.value || '玩家',
+                    characterIds: [],
+                }));
+            } catch (_) {}
+        };
+        const createSoloSessionId = () => `solo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const normalizeSoloCharacterSelectionForCurrentCampaign = (ids) => {
+            const normalized = normalizeSoloCharacterSelection(ids);
+            if (!normalized.length || !characters.value.length) return normalized;
+            const playableIds = new Set(soloPlayableCharacters.value.map(c => String(c.id)));
+            return normalized.filter(id => playableIds.has(String(id)));
+        };
+        const buildSoloSessionState = (base = {}, options = {}) => {
+            const currentSelected = normalizeSoloCharacterSelection(soloSelectedCharacterIds.value);
+            const currentConfirmed = normalizeSoloCharacterSelection(soloConfirmedCharacterIds.value);
+            const currentActionLog = (soloActionLog.value || []).slice(-SOLO_SESSION_LOG_LIMIT);
+            const preserveSessionState = !!options.preserveSessionState;
+            return {
+                ...base,
+                playerName: preserveSessionState
+                    ? (base.playerName || soloPlayerName.value || '玩家')
+                    : (soloPlayerName.value || base.playerName || '玩家'),
+                selectedCharacterIds: preserveSessionState
+                    ? normalizeSoloCharacterSelection(base.selectedCharacterIds || base.confirmedCharacterIds || [])
+                    : currentSelected,
+                confirmedCharacterIds: preserveSessionState
+                    ? normalizeSoloCharacterSelection(base.confirmedCharacterIds || [])
+                    : currentConfirmed,
+                actionLog: preserveSessionState && Array.isArray(base.actionLog)
+                    ? base.actionLog.slice(-SOLO_SESSION_LOG_LIMIT)
+                    : currentActionLog,
+                currentNodeId: currentNode.value?.id || base.currentNodeId || null,
+                updatedAt: Date.now(),
+            };
+        };
+        const currentSoloSessionExportState = () => ({
+            playerName: soloPlayerName.value || '玩家',
+            selectedCharacterIds: normalizeSoloCharacterSelection(soloSelectedCharacterIds.value),
+            confirmedCharacterIds: normalizeSoloCharacterSelection(soloConfirmedCharacterIds.value),
+            actionLog: (soloActionLog.value || []).slice(-SOLO_SESSION_LOG_LIMIT),
+            currentNodeId: currentNode.value?.id || null,
+        });
+        const readSoloSessions = () => {
+            const allSessions = {};
+            for (const key of [SOLO_SESSIONS_KEY, ...SOLO_SESSIONS_LEGACY_KEYS]) {
+                const stored = readStoredJson(key, {});
+                if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+                    Object.assign(allSessions, stored);
+                }
+            }
+            return allSessions;
+        };
+        const writeSoloSessions = (sessions) => {
+            try {
+                localStorage.setItem(SOLO_SESSIONS_KEY, JSON.stringify(sessions && typeof sessions === 'object' ? sessions : {}));
+            } catch (_) {}
+        };
+        const soloSessionRouteParamNames = ['soloSession', 'solo_session', 'solo'];
+        const getSoloSessionIdFromUrl = () => {
+            try {
+                const url = new URL(window.location.href);
+                for (const name of soloSessionRouteParamNames) {
+                    const value = String(url.searchParams.get(name) || '').trim();
+                    if (value) return value;
+                }
+                const hash = String(url.hash || '').replace(/^#/, '');
+                if (hash) {
+                    const hashParams = new URLSearchParams(hash.includes('?') ? hash.split('?').pop() : hash);
+                    for (const name of soloSessionRouteParamNames) {
+                        const value = String(hashParams.get(name) || '').trim();
+                        if (value) return value;
+                    }
+                }
+            } catch (_) {}
+            return '';
+        };
+        const buildSoloSessionLink = (sessionId = activeSoloSessionId.value) => {
+            const id = String(sessionId || '').trim();
+            if (!id) return '';
+            try {
+                const url = new URL(window.location.href);
+                soloSessionRouteParamNames.forEach(name => url.searchParams.delete(name));
+                url.searchParams.set('soloSession', id);
+                url.hash = '';
+                return url.toString();
+            } catch (_) {
+                return '';
+            }
+        };
+        const setSoloSessionRoute = (sessionId = activeSoloSessionId.value) => {
+            const id = String(sessionId || '').trim();
+            if (!id) return;
+            try {
+                const url = new URL(window.location.href);
+                soloSessionRouteParamNames.forEach(name => url.searchParams.delete(name));
+                url.searchParams.set('soloSession', id);
+                url.hash = '';
+                window.history.replaceState({}, '', url.toString());
+            } catch (_) {}
+        };
+        const soloSessionLink = computed(() => buildSoloSessionLink(activeSoloSessionId.value));
+        const restoreSoloSessionState = (session = null) => {
+            const state = session && typeof session === 'object' ? session : {};
+            soloPlayerName.value = String(state.playerName || soloPlayerName.value || '玩家').trim() || '玩家';
+            const restoredSelected = normalizeSoloCharacterSelectionForCurrentCampaign(state.selectedCharacterIds || []);
+            const restoredActionLog = Array.isArray(state.actionLog) ? state.actionLog : [];
+            const restoredConfirmed = normalizeSoloCharacterSelectionForCurrentCampaign(
+                state.confirmedCharacterIds?.length
+                    ? state.confirmedCharacterIds
+                    : (restoredSelected.length && restoredActionLog.length ? restoredSelected : [])
+            );
+            soloSelectedCharacterIds.value = restoredSelected.length ? restoredSelected : restoredConfirmed;
+            soloConfirmedCharacterIds.value = restoredConfirmed;
+            soloActionLog.value = Array.isArray(state.actionLog)
+                ? state.actionLog.slice(-SOLO_SESSION_LOG_LIMIT).map(entry => ({
+                    id: String(entry?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+                    kind: entry?.kind || 'ai',
+                    sender: entry?.sender || 'AI-GM',
+                    text: sanitizeSoloLogText(entry?.text || '') || '（无文本裁定）',
+                    time: entry?.time || '',
+                    created_at: entry?.created_at || '',
+                }))
+                : [];
+            saveSoloProfile();
+        };
+        const updateSoloSessionRecord = (sessionId = activeSoloSessionId.value, extra = {}) => {
+            const id = sessionId || createSoloSessionId();
+            const sessions = readSoloSessions();
+            const previous = sessions[id] && typeof sessions[id] === 'object' ? sessions[id] : {};
+            const preserveSessionState = !!extra.preserveSessionState;
+            const { preserveSessionState: _preserveSessionState, ...sessionExtra } = extra || {};
+            const path = normalizeCampaignPath(
+                sessionExtra.baseCampaignPath
+                || sessionExtra.campaignPath
+                || previous.baseCampaignPath
+                || previous.campaignPath
+                || selectedCampaign.value
+                || loadedCampaignPath.value
+                || ''
+            );
+            const folder = String(sessionExtra.folder || previous.folder || currentSaveFolder.value || path.split('/').pop() || '').trim();
+            const roomSaveName = String(sessionExtra.roomSaveName || previous.roomSaveName || soloRoomSaveName(id)).trim();
+            const roomSavePath = normalizeCampaignPath(
+                sessionExtra.roomSavePath !== undefined
+                    ? sessionExtra.roomSavePath
+                    : (previous.roomSavePath || '')
+            );
+            const state = buildSoloSessionState({
+                ...previous,
+                ...sessionExtra,
+                id,
+                campaignPath: path,
+                baseCampaignPath: path,
+                baseCampaignName: sessionExtra.baseCampaignName || previous.baseCampaignName || path.split('/').pop() || '',
+                folder,
+                roomSaveName,
+                roomSavePath,
+                saveName: sessionExtra.saveName || previous.saveName || '',
+                savePath: normalizeCampaignPath(sessionExtra.savePath || previous.savePath || ''),
+            }, { preserveSessionState });
+            activeSoloSessionId.value = id;
+            writeSoloSessions({ ...sessions, [id]: state });
+            return state;
+        };
+        const clearSoloSessionRoute = () => {
+            activeSoloSessionId.value = '';
+            try {
+                const url = new URL(window.location.href);
+                const hadSessionRoute = soloSessionRouteParamNames.some(name => url.searchParams.has(name));
+                soloSessionRouteParamNames.forEach(name => url.searchParams.delete(name));
+                if (hadSessionRoute) window.history.replaceState({}, '', url.toString());
+            } catch (_) {}
+        };
+        const saveTimestamp = (save = {}) => {
+            const raw = String(save.updated_at || '').trim();
+            const parsed = Date.parse(raw.replace(' ', 'T'));
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const findSaveByPath = (path = '') => {
+            const normalized = normalizeCampaignPath(path);
+            if (!normalized) return null;
+            return saveItems.value.find(save => campaignSelectionMatches(save, normalized)) || null;
+        };
+        const resetLoadedCampaignSession = ({ clearSoloSelection = true } = {}) => {
+            storyNodes.value = [];
+            characters.value = [];
+            currentNode.value = null;
+            editData.value = { name: '', summary: '', content: '' };
+            aiGeneratedText.value = {};
+            playerAction.value = '';
+            lastDynamicContext.value = null;
+            optionLikelihoods.value = {};
+            fateHighlightIdx.value = -1;
+            generatedImageUrl.value = '';
+            imgPromptUsed.value = '';
+            imgLoadError.value = false;
+            soloConfirmedCharacterIds.value = [];
+            soloActionLog.value = [];
+            if (clearSoloSelection) {
+                soloSelectedCharacterIds.value = [];
+                persistClearedSoloSelection();
+            }
+        };
+        const leaveGameToMenu = () => {
+            appState.value = 'menu';
+            clearSoloSessionRoute();
+        };
+        const switchToGmSurface = () => {
+            playSurface.value = 'gm';
+            clearSoloSessionRoute();
+        };
+        const copySoloRoomLink = async (sessionId = '') => {
+            const id = String(sessionId || activeSoloSessionId.value || '').trim();
+            const link = buildSoloSessionLink(id);
+            if (!id || !link) return;
+            try {
+                await navigator.clipboard.writeText(link);
+                campaignLoadSummary.value = '单人房间链接已复制';
+            } catch (_) {
+                window.prompt('复制单人房间链接', link);
+            }
+        };
+        const refreshLoadedCampaignResources = async (options = {}) => {
             await Promise.all([
-                fetchGameState(),
+                fetchGameState({
+                    resetCurrentNode: !!options.resetCurrentNode,
+                    preferredNodeId: options.preferredNodeId || null,
+                }),
                 fetchTimelines(),
                 fetchMapData(),
                 fetchLorebook(),
@@ -2762,46 +3158,140 @@ createApp({
                 fetchPlayerStateBgm({ playIfPlaying: false }),
             ]);
         };
-        const loadAndStart = async (mode = 'solo') => {
-            if (!selectedCampaign.value) return;
+        const onCampaignSelectionChanged = () => {
+            selectedCampaign.value = normalizeCampaignPath(selectedCampaign.value);
+            currentSaveFolder.value = '';
+            currentSavePath.value = '';
+            campaignLoadSummary.value = '';
+            resetLoadedCampaignSession({ clearSoloSelection: true });
+        };
+        const loadAndStart = async (mode = 'solo', options = {}) => {
+            const targetCampaign = normalizeCampaignPath(selectedCampaign.value);
+            if (!targetCampaign) return;
+            if (!requireMultiplayerAuth()) return;
+            const requestedSessionId = options.sessionId || activeSoloSessionId.value || getSoloSessionIdFromUrl() || createSoloSessionId();
+            const existingSoloSession = mode === 'solo' ? readSoloSessions()[requestedSessionId] : null;
+            const isRestoringSoloSession = !!(mode === 'solo' && options.sessionId && existingSoloSession);
+            selectedCampaign.value = targetCampaign;
             pendingLaunchMode.value = mode;
             isLoading.value = true;
             isExpandingBranch.value = false;
             expandingBranchText.value = '';
             campaignLoadSummary.value = '';
             try {
+                const preserveMultiplayerState = !!options.preserveMultiplayerState;
                 const r = await fetch(`${API_BASE_URL}/api/game/load`, {
                     method: 'POST',
                     headers: accountHeaders(true),
-                    body: JSON.stringify({filename:selectedCampaign.value})
+                    body: JSON.stringify({
+                        filename: targetCampaign,
+                        preserve_multiplayer_state: preserveMultiplayerState,
+                    })
                 });
                 const d = await r.json().catch(() => ({}));
                 if (r.ok) {
-                    const parts = selectedCampaign.value.split('/');
-                    currentSaveFolder.value = parts[parts.length - 1];
+                    const activateAfterLoad = options.activate !== false;
+                    const loadedPath = normalizeCampaignPath(d.campaign_path || d.path || targetCampaign);
+                    const basePath = normalizeCampaignPath(d.base_campaign_path || '');
+                    const savePath = normalizeCampaignPath(d.current_save_path || (loadedPath.startsWith('saves/') ? loadedPath : ''));
+                    const parts = loadedPath.split('/');
+                    const loadedFolderName = parts[parts.length - 1] || '';
+                    const saveName = String(d.current_save_name || (loadedPath.startsWith('saves/') ? loadedFolderName : '')).trim();
+                    const loadedIsHiddenRoomSave = isHiddenRoomSaveName(saveName || loadedFolderName);
+                    const serverSoloState = d.solo_session_state && typeof d.solo_session_state === 'object'
+                        ? d.solo_session_state
+                        : {};
+                    const hasServerSoloState = !!(
+                        normalizeSoloCharacterSelection(serverSoloState.confirmedCharacterIds || []).length
+                        || normalizeSoloCharacterSelection(serverSoloState.selectedCharacterIds || []).length
+                        || (Array.isArray(serverSoloState.actionLog) && serverSoloState.actionLog.length)
+                    );
+                    const shouldRestoreSoloState = !!(mode === 'solo' && (isRestoringSoloSession || hasServerSoloState));
+                    selectedCampaign.value = basePath || (loadedPath.startsWith('campaigns/') ? loadedPath : targetCampaign);
+                    loadedCampaignPath.value = loadedPath;
+                    loadedCampaignName.value = d.campaign_name || loadedFolderName;
+                    loadedBaseCampaignPath.value = basePath;
+                    loadedBaseCampaignName.value = d.base_campaign_name || (basePath.split('/').pop() || '');
+                    currentSaveFolder.value = loadedIsHiddenRoomSave ? '' : saveName;
+                    currentSavePath.value = loadedIsHiddenRoomSave ? '' : savePath;
                     campaignLoadSummary.value = d.message || '剧本已载入，世界观、地图、百科库与知识库已同步';
-                    await refreshLoadedCampaignResources();
-                    await syncMultiplayerRoomState();
-                    soloConfirmedCharacterIds.value = [];
-                    soloActionLog.value = [];
-                    playerAction.value = '';
-                    playSurface.value = mode === 'gm' ? 'gm' : 'player';
-                    appState.value = 'game';
-                    if (mode !== 'multiplayer') showMultiplayerModal.value = false;
+                    if (activateAfterLoad) {
+                        resetLoadedCampaignSession({ clearSoloSelection: !shouldRestoreSoloState });
+                        await refreshLoadedCampaignResources({ resetCurrentNode: true, preferredNodeId: d.current_scene_id || null });
+                        if (mode !== 'multiplayer') await syncMultiplayerRoomState();
+                        playSurface.value = mode === 'gm' ? 'gm' : 'player';
+                        appState.value = 'game';
+                        if (mode === 'solo') {
+                            const baseCampaignPath = normalizeCampaignPath(
+                                existingSoloSession?.baseCampaignPath
+                                || existingSoloSession?.campaignPath
+                                || basePath
+                                || (!loadedIsHiddenRoomSave && loadedPath.startsWith('campaigns/') ? loadedPath : '')
+                            );
+                            const restored = updateSoloSessionRecord(requestedSessionId, {
+                                ...serverSoloState,
+                                ...existingSoloSession,
+                                preserveSessionState: shouldRestoreSoloState,
+                                baseCampaignName: d.base_campaign_name || loadedBaseCampaignName.value,
+                                baseCampaignPath: baseCampaignPath || basePath || selectedCampaign.value,
+                                campaignPath: baseCampaignPath || basePath || selectedCampaign.value,
+                                folder: existingSoloSession?.folder || serverSoloState.folder || (!loadedIsHiddenRoomSave ? (saveName || loadedFolderName) : ''),
+                                saveName: loadedIsHiddenRoomSave ? '' : saveName,
+                                savePath: loadedIsHiddenRoomSave ? '' : savePath,
+                                roomSaveName: existingSoloSession?.roomSaveName || soloRoomSaveName(requestedSessionId),
+                                roomSavePath: normalizeCampaignPath(
+                                    existingSoloSession?.roomSavePath
+                                    || (loadedIsHiddenRoomSave ? loadedPath : '')
+                                ),
+                            });
+                            setSoloSessionRoute(requestedSessionId);
+                            restoreSoloSessionState(restored);
+                        }
+                        else clearSoloSessionRoute();
+                        if (mode !== 'multiplayer') showMultiplayerModal.value = false;
+                    } else if (mode === 'multiplayer') {
+                        clearSoloSessionRoute();
+                    }
+                    return d;
                 } else {
                     campaignLoadSummary.value = d.message || '载入失败';
+                    return null;
                 }
             } catch(e) {
                 campaignLoadSummary.value = '载入失败，请检查后端是否运行';
+                return null;
             } finally {
                 isLoading.value = false;
                 pendingLaunchMode.value = '';
             }
         };
-        const enterCurrentGame = async () => {
-            await refreshLoadedCampaignResources();
-            playSurface.value = 'player';
-            appState.value = 'game';
+        const restoreSoloSessionFromLink = async (sessionId = getSoloSessionIdFromUrl()) => {
+            if (!requireMultiplayerAuth()) return;
+            const id = String(sessionId || '').trim();
+            if (!id) return;
+            const sessions = readSoloSessions();
+            const session = sessions[id];
+            if (!session || typeof session !== 'object') {
+                campaignLoadSummary.value = '该单人房间链接没有本地可恢复进度';
+                return;
+            }
+            const sessionRoomSavePath = normalizeCampaignPath(session?.roomSavePath || '');
+            const sessionSavePath = normalizeCampaignPath(session?.savePath || '');
+            const sessionBasePath = normalizeCampaignPath(session?.baseCampaignPath || session?.campaignPath || '');
+            const sessionPath = normalizeCampaignPath(sessionRoomSavePath || sessionSavePath || sessionBasePath || '');
+            if (!sessionPath) {
+                campaignLoadSummary.value = '该单人房间链接没有可载入的进度';
+                return;
+            }
+            selectedCampaign.value = sessionPath;
+            await loadAndStart('solo', { sessionId: id });
+        };
+        const autoRestoreSoloSession = async () => {
+            if (!multiplayerAuthAccount.value || !multiplayerAuthToken.value) return;
+            const urlSessionId = getSoloSessionIdFromUrl();
+            if (!urlSessionId) return;
+            if (appState.value === 'game' && playSurface.value === 'player' && activeSoloSessionId.value === urlSessionId) return;
+            await restoreSoloSessionFromLink(urlSessionId);
         };
         const formatSaveSize = (bytes) => {
             const n = Number(bytes || 0);
@@ -2826,24 +3316,60 @@ createApp({
             saveSearch.value = '';
             saveManagerMsg.value = '';
             showExportModal.value = true;
-            await fetchCampaigns();
+            await fetchSaves();
         };
-        const doExportSave = async (saveName) => {
+        const doExportSave = async (saveName, options = {}) => {
             if (isExportingSave.value) return null;
             if (!requireMultiplayerAuth()) return null;
+            const cleanSaveName = String(saveName || '').trim();
             isExportingSave.value = true;
             saveManagerMsg.value = '';
             try {
+                if (currentNode.value?.id) await syncPlayerStateBgm({ current_scene_id: currentNode.value.id });
+                const baseCampaignPath = normalizeCampaignPath(
+                    options.baseCampaignPath
+                    || lockedSaveSourcePath.value
+                    || selectedCampaign.value
+                    || loadedCampaignPath.value
+                    || ''
+                );
+                const headers = accountHeaders(true);
+                const hiddenRoomCode = String(options.roomCode || '').trim().toUpperCase()
+                    || multiplayerRoomCodeFromSave({ name: cleanSaveName })
+                    || (options.hiddenRoomSave ? String(multiplayerRoom.value?.code || '').trim().toUpperCase() : '');
+                if (hiddenRoomCode && multiplayerRoomTokens.value[hiddenRoomCode]) {
+                    headers['X-Room-Token'] = multiplayerRoomTokens.value[hiddenRoomCode];
+                }
                 const r = await fetch(`${API_BASE_URL}/api/game/export`, {
                     method: 'POST',
-                    headers: accountHeaders(true),
-                    body: JSON.stringify({save_name: saveName || ''}),
+                    headers,
+                    body: JSON.stringify({
+                        save_name: cleanSaveName,
+                        room_code: hiddenRoomCode || '',
+                        base_campaign_path: baseCampaignPath,
+                        solo_session_state: playSurface.value === 'player' ? currentSoloSessionExportState() : {},
+                    }),
                 });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '保存失败');
-                currentSaveFolder.value = d.folder || saveName || currentSaveFolder.value;
-                selectedCampaign.value = d.path || (currentSaveFolder.value ? `campaigns/${currentSaveFolder.value}` : selectedCampaign.value);
-                await fetchCampaigns();
+                const hiddenRoomSave = !!options.hiddenRoomSave || isHiddenRoomSaveName(d.folder || saveName || '');
+                if (!hiddenRoomSave) {
+                    currentSaveFolder.value = d.folder || cleanSaveName || currentSaveFolder.value;
+                    currentSavePath.value = normalizeCampaignPath(d.path || currentSavePath.value);
+                    loadedBaseCampaignPath.value = normalizeCampaignPath(d.base_campaign_path || loadedBaseCampaignPath.value || baseCampaignPath);
+                    loadedBaseCampaignName.value = d.base_campaign_name || loadedBaseCampaignName.value || (loadedBaseCampaignPath.value.split('/').pop() || '');
+                }
+                if (!hiddenRoomSave && activeSoloSessionId.value && playSurface.value === 'player') {
+                    updateSoloSessionRecord(activeSoloSessionId.value, {
+                        baseCampaignName: d.base_campaign_name || loadedBaseCampaignName.value,
+                        baseCampaignPath: d.base_campaign_path || baseCampaignPath,
+                        campaignPath: d.base_campaign_path || baseCampaignPath,
+                        folder: currentSaveFolder.value,
+                        saveName: d.folder || cleanSaveName || currentSaveFolder.value,
+                        savePath: d.path || currentSavePath.value,
+                    });
+                }
+                if (!hiddenRoomSave) await fetchSaves();
                 saveManagerOk.value = true;
                 saveManagerMsg.value = d.message || '存档已保存';
                 return d;
@@ -2855,8 +3381,75 @@ createApp({
                 isExportingSave.value = false;
             }
         };
+        const saveSoloRoomProgress = async (sessionId = activeSoloSessionId.value, options = {}) => {
+            if (!sessionId || playSurface.value !== 'player' || appState.value !== 'game') return null;
+            const existing = readSoloSessions()[sessionId] || {};
+            const saveName = String(options.roomSaveName || existing.roomSaveName || soloRoomSaveName(sessionId)).trim();
+            if (!saveName) return null;
+            const result = await doExportSave(saveName, { hiddenRoomSave: true });
+            if (!result) return null;
+            updateSoloSessionRecord(sessionId, {
+                roomSaveName: result.folder || saveName,
+                roomSavePath: result.path || '',
+                baseCampaignPath: existing?.baseCampaignPath || existing?.campaignPath || selectedCampaign.value || '',
+            });
+            campaignLoadSummary.value = '单人房间进度已保存';
+            return result;
+        };
+        const persistSoloSessionProgress = async (sessionId = activeSoloSessionId.value, options = {}) => {
+            if (!sessionId || playSurface.value !== 'player' || appState.value !== 'game') return null;
+            updateSoloSessionRecord(sessionId, options);
+            return saveSoloRoomProgress(sessionId, options);
+        };
+        const persistSoloSessionSnapshot = () => {
+            if (activeSoloSessionId.value && playSurface.value === 'player') {
+                updateSoloSessionRecord(activeSoloSessionId.value);
+            }
+        };
+        const saveCurrentMultiplayerRoomProgress = async () => {
+            const room = multiplayerRoom.value;
+            if (!room?.code) return null;
+            const saveName = multiplayerRoomSaveName(room.code);
+            if (!saveName) return null;
+            const result = await doExportSave(saveName, { hiddenRoomSave: true, roomCode: room.code });
+            if (!result) return null;
+            try {
+                const currentSettings = room.settings && typeof room.settings === 'object' ? room.settings : {};
+                const data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(room.code)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                        settings: {
+                            ...currentSettings,
+                            gm_console: true,
+                            campaign_path: currentSettings.campaign_path || selectedCampaign.value || loadedCampaignPath.value || '',
+                            room_save_name: result.folder || saveName,
+                            room_save_path: result.path || '',
+                        },
+                    }),
+                });
+                applyMultiplayerSnapshot(data);
+                multiplayerStatusMsg.value = `房间 ${room.code} 进度已保存`;
+            } catch (e) {
+                multiplayerStatusMsg.value = e?.message || '房间进度保存后同步失败';
+            }
+            return result;
+        };
+        const canSaveCurrentMultiplayerRoom = computed(() => {
+            const code = String(multiplayerRoom.value?.code || '').trim();
+            return !!(code && (multiplayerRoomTokens.value[code] || multiplayerRoom.value?.can_manage));
+        });
         const doExportOverwrite = async () => {
-            if (!currentSaveFolder.value) return;
+            if (canSaveCurrentMultiplayerRoom.value) {
+                await saveCurrentMultiplayerRoomProgress();
+                return;
+            }
+            if (!currentSaveWritable.value) {
+                saveManagerOk.value = false;
+                saveManagerMsg.value = currentSaveFolder.value
+                    ? '当前剧本不是你的可覆盖存档，请新建个人存档保存当前进度'
+                    : '当前未绑定存档，请先新建个人存档';
+                return;
+            }
             await doExportSave(currentSaveFolder.value);
         };
         const doExportNew = async () => {
@@ -2888,16 +3481,19 @@ createApp({
             }
         };
         const deleteSave = async (save) => {
-            if (!requireAdminAuth()) return;
-            if (!save?.deletable || !save.name) return;
+            if (!requireMultiplayerAuth()) return;
+            const ref = saveIdentity(save);
+            if (!save?.deletable || !ref) return;
             if (!confirm(`删除存档「${save.name}」？`)) return;
             try {
-                const r = await fetch(`${API_BASE_URL}/api/game/saves/${encodeURIComponent(save.name)}`, { method: 'DELETE', headers: accountHeaders() });
+                const r = await fetch(`${API_BASE_URL}/api/game/saves/${encodeURIComponent(ref)}`, { method: 'DELETE', headers: accountHeaders() });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '删除失败');
-                if (currentSaveFolder.value === save.name) currentSaveFolder.value = '';
-                if (selectedCampaign.value === save.path) selectedCampaign.value = '';
-                await fetchCampaigns();
+                if (currentSaveFolder.value === save.name || currentSavePath.value === normalizeCampaignPath(save.path)) {
+                    currentSaveFolder.value = '';
+                    currentSavePath.value = '';
+                }
+                await fetchSaves();
                 saveManagerOk.value = true;
                 saveManagerMsg.value = d.message || '存档已删除';
             } catch(e) {
@@ -2905,20 +3501,194 @@ createApp({
                 saveManagerMsg.value = e?.message || '删除失败';
             }
         };
+        const startRenameSave = (save) => {
+            if (!save?.renamable || !save.name) return;
+            renamingSaveName.value = saveIdentity(save);
+            renameSaveDraft.value = save.name;
+            saveManagerMsg.value = '';
+        };
+        const cancelRenameSave = () => {
+            renamingSaveName.value = '';
+            renameSaveDraft.value = '';
+        };
+        const renameSave = async (save) => {
+            if (!requireMultiplayerAuth()) return;
+            const ref = saveIdentity(save);
+            if (!save?.renamable || !ref || isRenamingSave.value) return;
+            const newName = renameSaveDraft.value.trim();
+            isRenamingSave.value = true;
+            saveManagerMsg.value = '';
+            try {
+                const oldName = save.name;
+                const oldPath = save.path;
+                const r = await fetch(`${API_BASE_URL}/api/game/saves/${encodeURIComponent(ref)}/rename`, {
+                    method: 'PATCH',
+                    headers: accountHeaders(true),
+                    body: JSON.stringify({ new_name: newName }),
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok || d.status !== 'success') throw new Error(d.message || d.detail || '重命名失败');
+                const renamedName = d.name || newName;
+                const renamedPath = normalizeCampaignPath(d.path || oldPath);
+                if (currentSaveFolder.value === oldName || currentSavePath.value === normalizeCampaignPath(oldPath)) {
+                    currentSaveFolder.value = renamedName;
+                    currentSavePath.value = renamedPath;
+                }
+                if (loadedCampaignPath.value === normalizeCampaignPath(oldPath) || loadedCampaignName.value === oldName) {
+                    loadedCampaignName.value = renamedName;
+                    loadedCampaignPath.value = renamedPath;
+                }
+                if (activeSoloSessionId.value && currentSaveFolder.value === renamedName) {
+                    updateSoloSessionRecord(activeSoloSessionId.value, {
+                        baseCampaignName: save.campaign_name || loadedBaseCampaignName.value,
+                        baseCampaignPath: save.campaign_path || loadedBaseCampaignPath.value,
+                        campaignPath: save.campaign_path || loadedBaseCampaignPath.value,
+                        folder: renamedName,
+                        saveName: renamedName,
+                        savePath: renamedPath,
+                    });
+                }
+                await fetchSaves();
+                saveManagerOk.value = true;
+                saveManagerMsg.value = d.message || '存档已重命名';
+                cancelRenameSave();
+            } catch(e) {
+                saveManagerOk.value = false;
+                saveManagerMsg.value = e?.message || '重命名失败';
+            } finally {
+                isRenamingSave.value = false;
+            }
+        };
         const loadSaveFromManager = async (save) => {
             if (!save?.path) return;
-            selectedCampaign.value = save.path;
+            if (savePlayMode(save) === 'multiplayer') {
+                await restoreMultiplayerSaveAsRoom(save);
+                return;
+            }
+            selectedCampaign.value = normalizeCampaignPath(save.path);
             saveManagerMsg.value = '';
-            await loadAndStart(playSurface.value === 'gm' ? 'gm' : 'solo');
+            const mode = playSurface.value === 'gm' ? 'gm' : 'solo';
+            const session = mode === 'solo' ? findSoloSessionForSave(save) : null;
+            await loadAndStart(mode, session?.id ? { sessionId: session.id } : {});
             if (campaignLoadSummary.value && campaignLoadSummary.value.includes('失败')) {
                 saveManagerOk.value = false;
                 saveManagerMsg.value = campaignLoadSummary.value;
                 return;
             }
             currentSaveFolder.value = save.name || save.path.split('/').pop();
+            currentSavePath.value = normalizeCampaignPath(save.path);
             saveManagerOk.value = true;
             saveManagerMsg.value = `已载入 ${save.name || save.path}`;
             showExportModal.value = false;
+        };
+        const findSoloSessionForSave = (save) => {
+            const savePath = normalizeCampaignPath(save?.path || '');
+            if (!savePath) return null;
+            const sessions = readSoloSessions();
+            return Object.values(sessions)
+                .filter(session => session && typeof session === 'object')
+                .filter(session => {
+                    const directSavePath = normalizeCampaignPath(session.savePath || '');
+                    const roomSavePath = normalizeCampaignPath(session.roomSavePath || '');
+                    return directSavePath === savePath || roomSavePath === savePath;
+                })
+                .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
+        };
+        const restoreMultiplayerSaveAsRoom = async (save) => {
+            const savePath = normalizeCampaignPath(save?.path || '');
+            if (!savePath) return;
+            if (!requireMultiplayerAuth()) return;
+            if (multiplayerWs) multiplayerWs.close();
+            multiplayerWs = null;
+            multiplayerWsConnected.value = false;
+            multiplayerRoom.value = null;
+            multiplayerMembers.value = [];
+            multiplayerMessages.value = [];
+            multiplayerError.value = '';
+            multiplayerStatusMsg.value = `正在恢复 ${saveDisplayName(save)}...`;
+            showMultiplayerModal.value = true;
+            selectedCampaign.value = savePath;
+            const loaded = await loadAndStart('multiplayer', {
+                activate: false,
+                preserveMultiplayerState: true,
+            });
+            if (campaignLoadSummary.value && campaignLoadSummary.value.includes('失败')) {
+                saveManagerOk.value = false;
+                saveManagerMsg.value = campaignLoadSummary.value;
+                multiplayerError.value = campaignLoadSummary.value;
+                return;
+            }
+            const roomSavePath = normalizeCampaignPath(loadedCampaignPath.value || savePath);
+            const savePathParts = savePath.split('/');
+            const inferredCampaignPath = savePathParts[0] === 'saves' && savePathParts[1]
+                ? `campaigns/${savePathParts[1]}`
+                : '';
+            const campaignPath = normalizeCampaignPath(
+                save.campaign_path
+                || loadedBaseCampaignPath.value
+                || inferredCampaignPath
+                || (normalizeCampaignPath(selectedCampaign.value).startsWith('campaigns/') ? selectedCampaign.value : '')
+                || ''
+            );
+            const restoredName = saveDisplayName(save);
+            multiplayerRoomName.value = restoredName || multiplayerRoomName.value || '恢复的多人房间';
+            const restoreState = loaded?.multiplayer_room_state || {};
+            const restoredRoomCode = multiplayerRoomCodeFromSave(save)
+                || multiplayerRoomCodeFromSave({ name: loaded?.current_save_name || roomSavePath.split('/').pop() || '' })
+                || String(restoreState.source_room_code || '').trim().toUpperCase();
+            let data = null;
+            if (restoredRoomCode) {
+                const currentSettings = restoreState.room?.settings && typeof restoreState.room.settings === 'object'
+                    ? restoreState.room.settings
+                    : {};
+                try {
+                    data = await multiplayerApi(`/api/multiplayer/rooms/${encodeURIComponent(restoredRoomCode)}`, {
+                        method: 'PATCH',
+                        body: JSON.stringify({
+                            name: multiplayerRoomName.value,
+                            settings: {
+                                ...currentSettings,
+                                gm_console: true,
+                                campaign_path: campaignPath,
+                                room_save_path: roomSavePath,
+                                room_save_name: roomSavePath.split('/').pop() || '',
+                                restore_state: restoreState,
+                            },
+                        }),
+                    });
+                } catch (err) {
+                    if (!/不存在|404/.test(String(err?.message || ''))) throw err;
+                }
+            }
+            if (!data) {
+                data = await createMultiplayerRoom({
+                    name: multiplayerRoomName.value,
+                    campaignPath,
+                    roomSavePath,
+                    restoreState,
+                    restoreCode: restoredRoomCode,
+                });
+            }
+            if (!data?.room?.code) {
+                saveManagerOk.value = false;
+                saveManagerMsg.value = multiplayerError.value || '创建恢复房间失败';
+                return;
+            }
+            saveManagerOk.value = true;
+            saveManagerMsg.value = `已恢复多人存档，正在进入房间 ${data.room.code}`;
+            multiplayerStatusMsg.value = saveManagerMsg.value;
+            showExportModal.value = false;
+            window.location.replace(multiplayerTableUrl(data.room.code));
+        };
+        const restoreSaveFromMenu = async (save) => {
+            if (!save?.path) return;
+            if (savePlayMode(save) === 'multiplayer') {
+                await restoreMultiplayerSaveAsRoom(save);
+                return;
+            }
+            const session = findSoloSessionForSave(save);
+            selectedCampaign.value = normalizeCampaignPath(save.path);
+            await loadAndStart('solo', { sessionId: session?.id || createSoloSessionId() });
         };
 
         // ── Game State ──
@@ -2953,52 +3723,87 @@ createApp({
             return soloPlayableCharacters.value;
         });
         const compactText = (value, max = 220) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+        const isInternalSceneName = (name = '') => /守秘人|GM|KP|幕后|真相|后台|导入|索引|规则说明|系统信息/i.test(String(name || ''));
+        const sceneLooksPlayerVisible = (node = {}) => {
+            if (!node || isInternalSceneName(node.name)) return false;
+            const sample = compactText(`${node.summary || ''} ${node.content || ''}`, 700);
+            return !/(?:守秘人|KP|GM|主持|英雄们|模组|危险的谎言|邪恶的超自然力量|玩家们|NPC角色)/i.test(sample);
+        };
+        const firstPlayerVisibleNode = () => storyNodes.value.find(sceneLooksPlayerVisible) || storyNodes.value[0] || null;
+        const cleanCharacterBriefText = (value = '') => String(value || '')
+            .replace(/原始身份：剧本主要\s*(?:登场\s*)?NPC，可作为玩家扮演角色。[；;\s]*/g, '')
+            .replace(/原始身份：剧本主要\s*(?:登场\s*)?NPC[，,。；;\s]*/g, '')
+            .replace(/可作为玩家扮演角色。[；;\s]*/g, '')
+            .replace(/【(?:AI|GM|KP|系统|推演|判定|规则系统|信息隔离|时间流速|禁止事项|基本设定|核心规则|导入|编辑|后台)[^】]*】[\s\S]*?(?=\n【|$)/gi, '')
+            .split(/(?:^|\s)(?:HP|SAN|MP|生命值|理智值)\s*(?:代表|[:：])/i)[0]
+            .split(/(?:AI|GM|KP|RAG|knowledge\/|world_entities|lorebook|source_markdown|embedding|推演约束|系统提示|后台|知识库|核心规则|基本设定|禁止事项|HP\s*(?:代表|[:：])|SAN\s*(?:代表|[:：])|MP\s*(?:代表|[:：])|生命值|理智值|好感度)/i)[0]
+            .replace(/([。！？；，、,.!?;])\1+/g, '$1')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/[。；;]+$/g, '');
+        const briefWithoutNamePrefix = (value = '', name = '') => {
+            const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            let text = cleanCharacterBriefText(value);
+            if (escaped) {
+                text = text
+                    .replace(new RegExp(`^${escaped}\\s*[：:]\\s*`), '')
+                    .replace(new RegExp(`^${escaped}\\s*[（(][^）)]*[）)]\\s*[：:。]\\s*`), '')
+                    .replace(new RegExp(`^${escaped}\\s*(?:与当前事件有直接关联。)?`), '');
+            }
+            return text
+                .replace(/入场(?:后|时).*?(?:不需要预设唯一正确选择|判断下一步)[。；;]?/g, '')
+                .trim()
+                .replace(/[。；;]+$/g, '');
+        };
+        const inventoryBriefText = (value = '') => cleanCharacterBriefText(value)
+            .replace(/^(?:身份|持有|物品|资源)[:：]\s*/i, '')
+            .trim()
+            .replace(/[。；;]+$/g, '');
         const characterSeed = (char, extra = '') => {
             const source = `${char?.id || ''}|${char?.name || ''}|${char?.role || ''}|${char?.personality || ''}|${char?.inventory || ''}|${extra}`;
             return Array.from(source).reduce((sum, ch, idx) => sum + ch.charCodeAt(0) * (idx + 1), 0);
         };
-        const characterAngleLine = (char, extra = '') => {
-            const name = char?.name || '角色';
-            const role = char?.role || '角色';
-            const hooks = [
-                `${name}会先用「${role}」的专业/本能判断眼前风险。`,
-                `${name}更在意哪些细节会影响自己的秘密、目标或安全。`,
-                `${name}会从同伴的反应里寻找可以利用或必须警惕的信号。`,
-                `${name}会优先确认退路、资源，以及自己还能掌控的东西。`,
-                `${name}会把现场异常和自身经历联系起来，而不是只看表面。`,
+        const characterEntryBriefing = (char, sceneName, publicText) => {
+            if (!char) return '';
+            const name = char.name || '角色';
+            const role = char.role || '角色';
+            const roleSuffix = ['PC', 'NPC'].includes(String(role || '').toUpperCase()) ? '' : `（${role}）`;
+            const scene = sceneName || '开场';
+            const personality = cleanCharacterBriefText(char.personality);
+            const roleBrief = briefWithoutNamePrefix(char.role_brief, name) || briefWithoutNamePrefix(personality, name);
+            const scriptBrief = cleanCharacterBriefText(char.script_brief);
+            const openingPrompt = cleanCharacterBriefText(char.opening_prompt);
+            const inventory = inventoryBriefText(char.inventory);
+            const worldviewBrief = compactText(cleanCharacterBriefText(worldviewContent.value), 780);
+            const sceneBrief = compactText(publicText, 420) || '当前场景细节尚未完全展开。';
+            const scriptIntro = scriptBrief || worldviewBrief || sceneBrief;
+            const lines = [
+                `剧本简介：${compactText(scriptIntro, 900)}`,
+                `当前开局：${sceneBrief}`,
+                `角色背景：${name}${roleSuffix}。${roleBrief ? compactText(roleBrief, 700) : '需要根据现场信息判断自己的立场、风险和可行动资源。'}`,
             ];
-            return hooks[characterSeed(char, extra) % hooks.length];
-        };
-        const characterPerspectiveOpening = (char, sceneName, publicText) => {
-            const base = compactText(publicText, 520) || '场景细节尚未完全展开，你只能先依靠自己的判断进入局面。';
-            if (!char) return base;
-            const details = [`${char.name || '角色'}，你以「${char.role || '角色'}」的身份进入「${sceneName || '开场'}」。`];
-            if (char.personality) details.push(`你的性格/背景提示：${compactText(char.personality, 160)}。`);
-            if (char.inventory) details.push(`你的随身/状态记录：${compactText(char.inventory, 160)}。`);
-            details.push(characterAngleLine(char, sceneName));
-            details.push(`从你的视角看，眼前的开场是：${base}`);
-            details.push('你可以用这个角色的口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
-            return details.join('\n');
+            if (inventory) lines.push(`可用资源：${compactText(inventory, 300)}`);
+            lines.push(`开场白：${openingPrompt ? compactText(openingPrompt, 500) : `${name}已经进入「${scene}」。先确认当前目标、可互动对象、关键线索和最紧迫的风险，再结合自身身份与资源决定下一步行动。`}`);
+            return lines.join('\n');
         };
         const characterPerspectiveOptions = (char, options, sceneText = '') => {
             const list = Array.isArray(options) ? options : [];
             if (!char) return list.map(opt => ({ ...opt, visible_text: opt.text, action_text: opt.text }));
             return list.map((opt, idx) => {
                 const rawText = compactText(opt?.text, 180) || '自由行动';
-                const role = char.role || '角色';
                 const name = char.name || '角色';
                 const lenses = [
-                    `以${role}的判断，先${rawText}`,
-                    `从${name}自己的处境出发，${rawText}`,
-                    `带着${role}的顾虑，尝试${rawText}`,
-                    `优先确认这对${name}意味着什么，再${rawText}`,
-                    `以${name}的个人目标为准，把现场线索和${role}判断联系起来，${rawText}`,
+                    `${name}先${rawText}`,
+                    `${name}观察周围反应后，${rawText}`,
+                    `${name}带着当前顾虑，尝试${rawText}`,
+                    `${name}确认眼前风险后，${rawText}`,
+                    `${name}抓住当前机会，${rawText}`,
                 ];
                 const visibleText = lenses[(characterSeed(char, `${idx}|${rawText}|${sceneText}`) + idx) % lenses.length];
                 return {
                     ...opt,
                     visible_text: visibleText,
-                    action_text: `${name}（${role}）：${visibleText}`,
+                    action_text: visibleText,
                 };
             });
         };
@@ -3007,12 +3812,22 @@ createApp({
             return soloSelectedCharacters.value[0] || null;
         });
         const soloPublicSceneText = computed(() => {
-            const node = currentNode.value || {};
+            const node = sceneLooksPlayerVisible(currentNode.value) ? (currentNode.value || {}) : (firstPlayerVisibleNode() || currentNode.value || {});
             return node.expanded_content || node.content || '';
         });
         const soloSceneText = computed(() => {
-            if (!soloHasConfirmedCharacters.value) return compactText(soloPublicSceneText.value, 520);
-            return characterPerspectiveOpening(soloPerspectiveCharacter.value, currentNode.value?.name || '开场', soloPublicSceneText.value);
+            return soloHasConfirmedCharacters.value ? soloPublicSceneText.value : compactText(soloPublicSceneText.value, 520);
+        });
+        const soloCharacterBriefingText = computed(() => {
+            const selected = soloHasConfirmedCharacters.value ? soloConfirmedCharacters.value : soloSelectedCharacters.value;
+            const briefingNode = sceneLooksPlayerVisible(currentNode.value) ? currentNode.value : firstPlayerVisibleNode();
+            return selected
+                .map(char => characterEntryBriefing(char, briefingNode?.name || '开场', soloPublicSceneText.value))
+                .filter(Boolean)
+                .join('\n\n');
+        });
+        const showSoloCharacterBriefing = computed(() => {
+            return soloHasConfirmedCharacters.value && !soloActionLog.value.length && !!soloCharacterBriefingText.value;
         });
         const soloVisibleOptions = computed(() => characterPerspectiveOptions(
             soloPerspectiveCharacter.value,
@@ -3024,6 +3839,7 @@ createApp({
                 name: soloPlayerName.value || '玩家',
                 characterIds: normalizeSoloCharacterSelection(soloSelectedCharacterIds.value),
             }));
+            persistSoloSessionSnapshot();
         };
         const isSoloCharacterSelected = (id) => {
             const idKey = String(id);
@@ -3042,12 +3858,28 @@ createApp({
             if (soloHasConfirmedCharacters.value || !soloSelectedCharacterIds.value.length) return;
             soloConfirmedCharacterIds.value = normalizeSoloCharacterSelection(soloSelectedCharacterIds.value);
             saveSoloProfile();
+            if (activeSoloSessionId.value) updateSoloSessionRecord(activeSoloSessionId.value);
         };
         const toggleSoloCharacter = (id) => {
             if (soloHasConfirmedCharacters.value) return;
             const idKey = String(id);
             soloSelectedCharacterIds.value = isSoloCharacterSelected(id) ? [] : [id];
             saveSoloProfile();
+            if (activeSoloSessionId.value) updateSoloSessionRecord(activeSoloSessionId.value);
+        };
+        const sanitizeSoloLogText = (value = '') => {
+            const imageRefRe = /!\[[^\]]*\]\((?:\/api\/campaign-assets\/|images\/)[^)]+\)|!\[[^\]]*\]\((?:\/api\/campaign-assets\/|images\/)[^\s)]*|(?:\/api\/campaign-assets\/|images\/)[^\s)]+/gi;
+            const source = String(value ?? '');
+            const hadImageRef = imageRefRe.test(source) || /<details>\s*<summary>\s*(?:natural_image|text_image)\s*<\/summary>/i.test(source);
+            imageRefRe.lastIndex = 0;
+            const cleaned = source
+                .replace(/<details>\s*<summary>\s*(?:natural_image|text_image)\s*<\/summary>[\s\S]*?<\/details>/gi, '')
+                .replace(imageRefRe, '')
+                .replace(/[ \t]+\n/g, '\n')
+                .replace(/\n{2,}/g, '\n')
+                .replace(/[ \t]{2,}/g, ' ')
+                .trim();
+            return cleaned || (hadImageRef ? '（图片已略过，可在场景或资料册中查看）' : '');
         };
         const addSoloLog = (kind, sender, text) => {
             const now = new Date();
@@ -3055,13 +3887,18 @@ createApp({
                 id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                 kind,
                 sender,
-                text,
+                text: sanitizeSoloLogText(text) || '（无文本裁定）',
                 time: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+                created_at: now.toISOString(),
             });
+            if (soloActionLog.value.length > SOLO_SESSION_LOG_LIMIT) {
+                soloActionLog.value = soloActionLog.value.slice(-SOLO_SESSION_LOG_LIMIT);
+            }
             nextTick(() => {
                 const el = soloLogRef.value;
                 if (el) el.scrollTop = 0;
             });
+            if (activeSoloSessionId.value) updateSoloSessionRecord(activeSoloSessionId.value);
         };
         const summarizeAiOptionsForSolo = () => {
             const opts = currentNode.value?.options || [];
@@ -3079,12 +3916,42 @@ createApp({
             addSoloLog('player', actor, visibleText || actionText || '选择行动方向');
             await jumpToNode(next.id, actionText || visibleText || opt.text || '继续');
             addSoloLog('ai', 'AI-GM', `场景推进：${next.name}\n${next.expanded_content || next.content || '等待你继续描述下一步。'}`);
+            await persistSoloSessionProgress();
         };
-        const fetchGameState = async () => {
+        const fetchGameState = async (options = {}) => {
+            const resetCurrentNode = !!options.resetCurrentNode;
+            const preferredNodeId = options.preferredNodeId == null ? null : Number(options.preferredNodeId);
+            let ok = false;
             try { const r=await fetch(`${API_BASE_URL}/api/game/state`); const d=await r.json();
                 if(d.status==='success'){storyNodes.value=d.nodes;characters.value=d.characters;dbConnected.value=true;
-                    if(currentNode.value){currentNode.value=d.nodes.find(n=>n.id===currentNode.value.id)||d.nodes[0];applyNodeSceneImage(currentNode.value);syncEditData();}
-                    else if(d.nodes.length>0){jumpToNode(d.nodes[0].id);} }
+                    ok = true;
+                    loadedCampaignPath.value = normalizeCampaignPath(d.current_campaign_path || '');
+                    loadedCampaignName.value = d.current_campaign_name || (loadedCampaignPath.value.split('/').pop() || '');
+                    loadedBaseCampaignPath.value = normalizeCampaignPath(d.base_campaign_path || '');
+                    loadedBaseCampaignName.value = d.base_campaign_name || (loadedBaseCampaignPath.value.split('/').pop() || '');
+                    const stateSaveName = String(d.current_save_name || '').trim();
+                    const stateSavePath = normalizeCampaignPath(d.current_save_path || '');
+                    currentSaveFolder.value = stateSaveName && !isHiddenRoomSaveName(stateSaveName) ? stateSaveName : '';
+                    currentSavePath.value = currentSaveFolder.value ? stateSavePath : '';
+                    if(resetCurrentNode){
+                        currentNode.value=null;
+                        const serverNodeId = Number(d.current_scene_id || 0);
+                        const resolvedPreferredId = Number.isFinite(preferredNodeId) && preferredNodeId > 0
+                            ? preferredNodeId
+                            : serverNodeId;
+                        const target = Number.isFinite(resolvedPreferredId) && resolvedPreferredId > 0
+                            ? d.nodes.find(n => Number(n.id) === resolvedPreferredId)
+                            : null;
+                        const next = target || firstPlayerVisibleNode() || d.nodes[0];
+                        if(next){currentNode.value=next;applyNodeSceneImage(next);syncEditData();}
+                    }
+                    else if(currentNode.value){currentNode.value=d.nodes.find(n=>n.id===currentNode.value.id)||d.nodes[0];applyNodeSceneImage(currentNode.value);syncEditData();}
+                    else if(d.nodes.length>0){
+                        const serverNodeId = Number(d.current_scene_id || 0);
+                        const next = d.nodes.find(n => Number(n.id) === serverNodeId) || firstPlayerVisibleNode() || d.nodes[0];
+                        jumpToNode(next.id);
+                    }
+                }
             } catch(e){dbConnected.value=false;}
             try { const sl=await fetch(`${API_BASE_URL}/api/game/stat-labels`); const sld=await sl.json(); if(sld.hp_label)hpLabel.value=sld.hp_label; if(sld.san_label)sanLabel.value=sld.san_label; } catch(e){}
             const playableIds = new Set(soloPlayableCharacters.value.map(c => String(c.id)));
@@ -3099,7 +3966,9 @@ createApp({
             } else {
                 soloConfirmedCharacterIds.value = normalizeSoloCharacterSelection(soloConfirmedCharacterIds.value);
             }
-            await fetchWorldEntities(); };
+            await fetchWorldEntities();
+            return ok;
+        };
 
         // ── 流式展开分支叙事（共享工具函数）──
         // fxContext/actionType：由 applyBranchEffects 返回后回传，让 expand 读到最新状态
@@ -3110,7 +3979,7 @@ createApp({
             try {
                 const resp = await fetch(`${API_BASE_URL}/api/ai/expand-branch/stream`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify({
                         node_id: nodeId,
                         scene_name: sceneName || '',
@@ -3157,7 +4026,7 @@ createApp({
             try {
                 const fxResp = await fetch(`${API_BASE_URL}/api/ai/apply-branch-effects`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify({ node_id: nodeId, allow_ai_extraction: false })
                 });
                 const fxData = await fxResp.json();
@@ -3215,7 +4084,7 @@ createApp({
                         const roomRes = await fetch(`${API_BASE_URL}/api/map/room-by-node/${next.id}`);
                         const roomData = await roomRes.json();
                         if (roomData.room_id) {
-                            await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomData.room_id}`, { method: 'POST' });
+                            await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomData.room_id}`, { method: 'POST', headers: accountHeaders() });
                             await fetchMapData();
                         }
                     } catch(_) {}
@@ -3224,8 +4093,8 @@ createApp({
 
             // 只有通过预设选项跳转才记录到记忆流
             if(optionText) {
-                fetch(`${API_BASE_URL}/api/game/log-scene-visit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node_id:next.id,node_name:next.name,option_text:optionText})}).catch(()=>{});
-                fetch(`${API_BASE_URL}/api/game/check-triggers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_id:next.id,scene_name:next.name,scene_content:next.content||'',allow_ai:false})})
+                fetch(`${API_BASE_URL}/api/game/log-scene-visit`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({node_id:next.id,node_name:next.name,option_text:optionText})}).catch(()=>{});
+                fetch(`${API_BASE_URL}/api/game/check-triggers`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({scene_id:next.id,scene_name:next.name,scene_content:next.content||'',allow_ai:false})})
                 .then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();}).then(d=>{
                     console.log('[check-triggers]', d);
                     if(d.fired&&d.fired.length>0){
@@ -3287,28 +4156,28 @@ createApp({
 
         // ── Worldview / Memory / Lorebook ──
         const fetchWorldview=async()=>{try{const r=await fetch(`${API_BASE_URL}/api/game/worldview`);worldviewContent.value=(await r.json()).content;}catch(e){}};
-        const saveWorldview=async()=>{try{await fetch(`${API_BASE_URL}/api/game/worldview`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:worldviewContent.value})});showWorldviewModal.value=false;}catch(e){}};
+        const saveWorldview=async()=>{try{await fetch(`${API_BASE_URL}/api/game/worldview`,{method:'PUT',headers:accountHeaders(true),body:JSON.stringify({content:worldviewContent.value})});showWorldviewModal.value=false;}catch(e){}};
         const openWorldviewModal=()=>{enterAdvancedPanel();fetchWorldview();showWorldviewModal.value=true;};
         const fetchMemory=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/memory`);memoryContent.value=(await r.json()).content;};
-        const saveMemory=async()=>{await fetch(`${API_BASE_URL}/api/game/memory`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:memoryContent.value})});showMemoryModal.value=false;};
+        const saveMemory=async()=>{await fetch(`${API_BASE_URL}/api/game/memory`,{method:'PUT',headers:accountHeaders(true),body:JSON.stringify({content:memoryContent.value})});showMemoryModal.value=false;};
         const openMemoryModal=()=>{enterAdvancedPanel();fetchMemory();showMemoryModal.value=true;};
         const fetchLorebook=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/lorebook`);lorebook.value=(await r.json()).lorebook;};
         const openLorebookModal=()=>{enterAdvancedPanel();fetchLorebook();showLorebookModal.value=true;currentLore.value={keywords:'',content:''};};
-        const saveLore=async()=>{if(!currentLore.value.keywords||!currentLore.value.content)return;await fetch(`${API_BASE_URL}/api/game/lorebook`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keywords:currentLore.value.keywords,content:currentLore.value.content})});currentLore.value={keywords:'',content:''};await fetchLorebook();};
-        const deleteLore=async id=>{if(!confirm('确定移除该百科记录？'))return;await fetch(`${API_BASE_URL}/api/game/lorebook/${id}`,{method:'DELETE'});currentLore.value={keywords:'',content:''};await fetchLorebook();};
+        const saveLore=async()=>{if(!currentLore.value.keywords||!currentLore.value.content)return;await fetch(`${API_BASE_URL}/api/game/lorebook`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({keywords:currentLore.value.keywords,content:currentLore.value.content})});currentLore.value={keywords:'',content:''};await fetchLorebook();};
+        const deleteLore=async id=>{if(!confirm('确定移除该百科记录？'))return;await fetch(`${API_BASE_URL}/api/game/lorebook/${id}`,{method:'DELETE',headers:accountHeaders()});currentLore.value={keywords:'',content:''};await fetchLorebook();};
 
         // ── Node / Option CRUD ──
-        const saveNodeChanges=async()=>{if(!currentNode.value)return;await fetch(`${API_BASE_URL}/api/game/node/${currentNode.value.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(editData.value)});await fetchGameState();};
-        const createNewNode=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/node`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'未命名场景',summary:'剧情摘要…',content:'输入环境与剧情…'})});const d=await r.json();await fetchGameState();jumpToNode(d.id);};
-        const deleteCurrentNode=async()=>{if(!confirm('危险操作：彻底删除此场景节点？'))return;await fetch(`${API_BASE_URL}/api/game/node/${currentNode.value.id}`,{method:'DELETE'});currentNode.value=null;await fetchGameState();};
-        const addManualOption=async()=>{if(!newOptionText.value||!newOptionTarget.value)return;await fetch(`${API_BASE_URL}/api/game/option`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node_id:currentNode.value.id,text:newOptionText.value,next_node_id:parseInt(newOptionTarget.value)})});newOptionText.value='';newOptionTarget.value='';await fetchGameState();};
-        const deleteOption=async optId=>{await fetch(`${API_BASE_URL}/api/game/option/${optId}`,{method:'DELETE'});await fetchGameState();};
+        const saveNodeChanges=async()=>{if(!currentNode.value)return;await fetch(`${API_BASE_URL}/api/game/node/${currentNode.value.id}`,{method:'PUT',headers:accountHeaders(true),body:JSON.stringify(editData.value)});await fetchGameState();};
+        const createNewNode=async()=>{const r=await fetch(`${API_BASE_URL}/api/game/node`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({name:'未命名场景',summary:'剧情摘要…',content:'输入环境与剧情…'})});const d=await r.json();await fetchGameState();jumpToNode(d.id);};
+        const deleteCurrentNode=async()=>{if(!confirm('危险操作：彻底删除此场景节点？'))return;await fetch(`${API_BASE_URL}/api/game/node/${currentNode.value.id}`,{method:'DELETE',headers:accountHeaders()});currentNode.value=null;await fetchGameState();};
+        const addManualOption=async()=>{if(!newOptionText.value||!newOptionTarget.value)return;await fetch(`${API_BASE_URL}/api/game/option`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({node_id:currentNode.value.id,text:newOptionText.value,next_node_id:parseInt(newOptionTarget.value)})});newOptionText.value='';newOptionTarget.value='';await fetchGameState();};
+        const deleteOption=async optId=>{await fetch(`${API_BASE_URL}/api/game/option/${optId}`,{method:'DELETE',headers:accountHeaders()});await fetchGameState();};
 
         // ── Characters ──
-        const saveStatLabels=async()=>{try{await fetch(`${API_BASE_URL}/api/game/stat-labels`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({hp_label:hpLabel.value,san_label:sanLabel.value})});}catch(e){}};
-        const saveCharacterState=async char=>{try{await fetch(`${API_BASE_URL}/api/game/character/${char.id}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',personality:char.personality||'',status:char.status||'active'})});await postMultiplayerAiEvent('state',`${char.name} 状态更新：${hpLabel.value} ${char.hp}，${sanLabel.value} ${char.san}，${{active:'在场',hidden:'未登场',benched:'暂离',dead:'死亡'}[char.status||'active']||char.status||'在场'}${char.inventory?'；'+char.inventory:''}`,{source:'character_update',character:{id:char.id,name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',status:char.status||'active'}});}catch(e){}};
-        const createCharacter=async()=>{if(!newChar.value.name.trim())return;try{await fetch(`${API_BASE_URL}/api/game/character`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(newChar.value)});showCharModal.value=false;resetNewChar();await fetchGameState();}catch(e){}};
-        const deleteCharacter=async charId=>{if(!confirm('放逐该实体？'))return;try{await fetch(`${API_BASE_URL}/api/game/character/${charId}`,{method:'DELETE'});await fetchGameState();}catch(e){}};
+        const saveStatLabels=async()=>{try{await fetch(`${API_BASE_URL}/api/game/stat-labels`,{method:'PUT',headers:accountHeaders(true),body:JSON.stringify({hp_label:hpLabel.value,san_label:sanLabel.value})});}catch(e){}};
+        const saveCharacterState=async char=>{try{await fetch(`${API_BASE_URL}/api/game/character/${char.id}`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',personality:char.personality||'',status:char.status||'active'})});await postMultiplayerAiEvent('state',`${char.name} 状态更新：${hpLabel.value} ${char.hp}，${sanLabel.value} ${char.san}，${{active:'在场',hidden:'未登场',benched:'暂离',dead:'死亡'}[char.status||'active']||char.status||'在场'}${char.inventory?'；'+char.inventory:''}`,{source:'character_update',character:{id:char.id,name:char.name,hp:char.hp,san:char.san,inventory:char.inventory||'',status:char.status||'active'}});}catch(e){}};
+        const createCharacter=async()=>{if(!newChar.value.name.trim())return;try{await fetch(`${API_BASE_URL}/api/game/character`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify(newChar.value)});showCharModal.value=false;resetNewChar();await fetchGameState();}catch(e){}};
+        const deleteCharacter=async charId=>{if(!confirm('放逐该实体？'))return;try{await fetch(`${API_BASE_URL}/api/game/character/${charId}`,{method:'DELETE',headers:accountHeaders()});await fetchGameState();}catch(e){}};
 
         // ── NPC Persona 编辑 ──
         const openPersonaModal = (char) => {
@@ -3418,7 +4287,7 @@ createApp({
             const entity = worldEntities.value.find(e => e.name === char.name && e.entity_type === 'npc');
             if (entity) {
                 await fetch(`${API_BASE_URL}/api/world-entities/${entity.id}/persona`, {
-                    method: 'PUT', headers: {'Content-Type':'application/json'},
+                    method: 'PUT', headers: accountHeaders(true),
                     body: JSON.stringify({
                         emotion: personaEmotion.value,
                         breakpoint: personaBreakpoint.value,
@@ -3433,20 +4302,21 @@ createApp({
         const removePersonaMemory = (idx) => {
             personaMemories.value = personaMemories.value.filter((_, i) => i !== idx);
         };
-        const generateNPC=async()=>{if(!currentNode.value)return;isGeneratingNPC.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/generate-npc`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scene_name:currentNode.value.name,scene_content:currentNode.value.content,player_action:playerAction.value||'Explore'})});const d=await r.json();if(d.status==='success'){await fetchGameState();showNpcToast(d.npc);}}catch(e){}finally{isGeneratingNPC.value=false;}};
+        const generateNPC=async()=>{if(!currentNode.value)return;isGeneratingNPC.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/generate-npc`,{method:'POST',headers:accountHeaders(true),body:JSON.stringify({scene_name:currentNode.value.name,scene_content:currentNode.value.content,player_action:playerAction.value||'Explore'})});const d=await r.json();if(d.status==='success'){await fetchGameState();showNpcToast(d.npc);}}catch(e){}finally{isGeneratingNPC.value=false;}};
 
         // ── 时间回溯 ──
         const goBack = async () => {
             if (checkpointCount.value === 0 || isRollingBack.value) return;
             isRollingBack.value = true;
             try {
-                const r = await fetch(`${API_BASE_URL}/api/game/rollback`, {method:'POST'});
+                const r = await fetch(`${API_BASE_URL}/api/game/rollback`, {method:'POST', headers:accountHeaders()});
                 const d = await r.json();
                 if (d.status === 'success') {
                     checkpointCount.value = d.remaining ?? Math.max(0, checkpointCount.value - 1);
                     await Promise.all([fetchGameState(), fetchMapData(), fetchPlayerStateBgm()]);
                     const node = storyNodes.value.find(n => n.id === d.restored_node_id);
                     if (node) { currentNode.value = node; applyNodeSceneImage(node); syncEditData(); }
+                    await persistSoloSessionProgress();
                 }
             } catch(_) {}
             finally { isRollingBack.value = false; }
@@ -3460,7 +4330,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/ai/expand-text`, {
                     method: 'POST',
-                    headers: {'Content-Type':'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify({scene_name: currentNode.value.name || '', content: currentNode.value.content || ''})
                 });
                 const data = await r.json();
@@ -3497,7 +4367,7 @@ createApp({
                 if(forceNarrativeThrust.value) body.force_thrust = true;
 
                 const r=await fetch(`${API_BASE_URL}/api/ai/dynamic-options`,{
-                    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
+                    method:'POST',headers:accountHeaders(true),body:JSON.stringify(body)
                 });
                 const d=await r.json();
                 if(d.status==='success'){
@@ -3539,7 +4409,10 @@ createApp({
             addSoloLog('player', actor, raw);
             await createGameCheckpoint('自由行动', currentNode.value?.id);
             const result = await generateDynamicOptions('', actionForAi);
-            if (result?.status === 'success') addSoloLog('ai', 'AI-GM', summarizeAiOptionsForSolo());
+            if (result?.status === 'success') {
+                addSoloLog('ai', 'AI-GM', summarizeAiOptionsForSolo());
+                await persistSoloSessionProgress();
+            }
             else playerAction.value = raw;
         };
         // GM 干预：用纠正指令重新推演
@@ -3563,7 +4436,7 @@ createApp({
                 };
                 const response = await fetch(`${API_BASE_URL}/api/game/gm-event`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: accountHeaders(true),
                     body: JSON.stringify(payload),
                 });
                 const data = await response.json().catch(() => ({}));
@@ -3579,6 +4452,7 @@ createApp({
                 gmManualEventText.value = '';
                 gmManualEventMsg.value = '已发布到当前玩家视图';
                 setTimeout(() => { gmManualEventMsg.value = ''; }, 2500);
+                await persistSoloSessionProgress();
             } catch (err) {
                 gmManualEventMsg.value = err?.message || '发布失败';
             } finally {
@@ -3586,7 +4460,7 @@ createApp({
             }
         };
         const openBattleReportModal=()=>{showBattleReportModal.value=true;battleReport.value='';battleReportFilename.value='';};
-        const generateBattleReport=async()=>{isGeneratingReport.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/export-battle-report`,{method:'POST'});const d=await r.json();if(d.status==='success'){battleReport.value=d.report;battleReportFilename.value=d.filename;}}catch(e){}finally{isGeneratingReport.value=false;}};
+        const generateBattleReport=async()=>{isGeneratingReport.value=true;try{const r=await fetch(`${API_BASE_URL}/api/ai/export-battle-report`,{method:'POST',headers:accountHeaders()});const d=await r.json();if(d.status==='success'){battleReport.value=d.report;battleReportFilename.value=d.filename;}}catch(e){}finally{isGeneratingReport.value=false;}};
         const downloadBattleReport=()=>{if(!battleReport.value)return;const b=new Blob([battleReport.value],{type:'text/markdown;charset=utf-8'});const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download=battleReportFilename.value||'battle_report.md';a.click();URL.revokeObjectURL(u);};
 
         // ── Images ──
@@ -3602,7 +4476,7 @@ createApp({
             try {
                 const r = await fetch(`${API_BASE_URL}/api/ai/generate-image`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: accountHeaders(true),
                     body: JSON.stringify({ description: desc, style: imgStyle.value, image_model: imgModel.value })
                 });
                 const d = await r.json();
@@ -3667,7 +4541,7 @@ createApp({
         const requestDiceService = async (path, body) => {
             const response = await fetch(`${API_BASE_URL}${path}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: accountHeaders(true),
                 body: JSON.stringify(body)
             });
             let data = null;
@@ -3848,18 +4722,20 @@ createApp({
 
         watch(isEditMode, v => { if (v) syncEditData(); });
         watch(soloPlayerName, saveSoloProfile);
+        watch(currentNode, () => {
+            if (activeSoloSessionId.value && playSurface.value === 'player' && appState.value === 'game') {
+                updateSoloSessionRecord(activeSoloSessionId.value);
+            }
+        });
         watch(volume, v => { if (audioRef.value) audioRef.value.volume = v; });
         onMounted(async () => {
             await refreshMultiplayerAuthAccount();
-            await fetchApiKeyStatus();
-            fetchCampaigns();
+            await fetchApiKeyStatus({ resetModels: true });
+            await fetchCampaigns();
+            await fetchSaves();
+            await autoRestoreSoloSession();
             if (audioRef.value) audioRef.value.volume = 0.3;
         });
-
-        // 进入游戏时一并拉取时间线、地图、百科与知识库
-        const enterCurrentGameWithTl = async () => {
-            await enterCurrentGame();
-        };
 
         // ══════════════════════════════════════════════════════
         // 【地图编辑器】：响应式状态与方法
@@ -4091,7 +4967,7 @@ createApp({
             // 完成拖动房间
             if (mapDragRoom && mapActiveTool.value === 'select') {
                 await fetch(`${API_BASE_URL}/api/map/rooms/${mapDragRoom.id}`, {
-                    method: 'PUT', headers: {'Content-Type':'application/json'},
+                    method: 'PUT', headers: accountHeaders(true),
                     body: JSON.stringify({ ...mapDragRoom })
                 }).catch(() => {});
                 mapDragRoom = null;
@@ -4111,7 +4987,7 @@ createApp({
         const mapOnRoomClick = async (room) => {
             if (mapActiveTool.value === 'delete') {
                 if (!confirm(`删除房间「${room.label}」及其所有连接？`)) return;
-                await fetch(`${API_BASE_URL}/api/map/rooms/${room.id}`, { method: 'DELETE' });
+                await fetch(`${API_BASE_URL}/api/map/rooms/${room.id}`, { method: 'DELETE', headers: accountHeaders() });
                 await fetchMapData();
                 if (mapSelectedRoom.value?.id === room.id) mapSelectedRoom.value = null;
                 return;
@@ -4123,7 +4999,7 @@ createApp({
                 } else if (mapConnectSource.value !== room.id) {
                     // 创建连接
                     await fetch(`${API_BASE_URL}/api/map/edges`, {
-                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        method: 'POST', headers: accountHeaders(true),
                         body: JSON.stringify({ map_id: MAP_ID, from_id: mapConnectSource.value, to_id: room.id })
                     });
                     mapConnectSource.value = null;
@@ -4140,7 +5016,7 @@ createApp({
 
         const mapSelectEdge = (edge) => {
             if (mapActiveTool.value === 'delete') {
-                fetch(`${API_BASE_URL}/api/map/edges/${edge.id}`, { method: 'DELETE' })
+                fetch(`${API_BASE_URL}/api/map/edges/${edge.id}`, { method: 'DELETE', headers: accountHeaders() })
                     .then(() => fetchMapData());
                 return;
             }
@@ -4154,7 +5030,7 @@ createApp({
                 mapCancelRoom(); return;
             }
             const r = await fetch(`${API_BASE_URL}/api/map/rooms`, {
-                method: 'POST', headers: {'Content-Type':'application/json'},
+                method: 'POST', headers: accountHeaders(true),
                 body: JSON.stringify({
                     map_id: MAP_ID,
                     label: mapNamingLabel.value.trim(),
@@ -4183,7 +5059,7 @@ createApp({
             const idx = mapRooms.value.findIndex(r => r.id === mapSelectedRoom.value.id);
             if (idx >= 0) mapRooms.value[idx] = { ...mapSelectedRoom.value };
             await fetch(`${API_BASE_URL}/api/map/rooms/${mapSelectedRoom.value.id}`, {
-                method: 'PUT', headers: {'Content-Type':'application/json'},
+                method: 'PUT', headers: accountHeaders(true),
                 body: JSON.stringify(mapSelectedRoom.value)
             }).catch(() => {});
         };
@@ -4193,7 +5069,7 @@ createApp({
             const idx = mapEdges.value.findIndex(e => e.id === mapSelectedEdge.value.id);
             if (idx >= 0) mapEdges.value[idx] = { ...mapSelectedEdge.value };
             await fetch(`${API_BASE_URL}/api/map/edges/${mapSelectedEdge.value.id}`, {
-                method: 'PUT', headers: {'Content-Type':'application/json'},
+                method: 'PUT', headers: accountHeaders(true),
                 body: JSON.stringify(mapSelectedEdge.value)
             }).catch(() => {});
         };
@@ -4205,7 +5081,7 @@ createApp({
         };
 
         const mapSetActive = async (roomId) => {
-            await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomId}`, { method: 'POST' });
+            await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomId}`, { method: 'POST', headers: accountHeaders() });
             mapRooms.value.forEach(r => {
                 if (r.state === 'active') r.state = 'explored';
             });
@@ -4218,14 +5094,14 @@ createApp({
         const mapDeleteSelectedRoom = async () => {
             if (!mapSelectedRoom.value) return;
             if (!confirm(`删除房间「${mapSelectedRoom.value.label}」？`)) return;
-            await fetch(`${API_BASE_URL}/api/map/rooms/${mapSelectedRoom.value.id}`, { method: 'DELETE' });
+            await fetch(`${API_BASE_URL}/api/map/rooms/${mapSelectedRoom.value.id}`, { method: 'DELETE', headers: accountHeaders() });
             mapSelectedRoom.value = null;
             await fetchMapData();
         };
 
         const mapDeleteSelectedEdge = async () => {
             if (!mapSelectedEdge.value) return;
-            await fetch(`${API_BASE_URL}/api/map/edges/${mapSelectedEdge.value.id}`, { method: 'DELETE' });
+            await fetch(`${API_BASE_URL}/api/map/edges/${mapSelectedEdge.value.id}`, { method: 'DELETE', headers: accountHeaders() });
             mapSelectedEdge.value = null;
             await fetchMapData();
         };
@@ -4233,7 +5109,7 @@ createApp({
         const mapClearAll = async () => {
             if (!confirm('清空整张地图？此操作不可撤销。')) return;
             for (const r of mapRooms.value)
-                await fetch(`${API_BASE_URL}/api/map/rooms/${r.id}`, { method: 'DELETE' }).catch(() => {});
+                await fetch(`${API_BASE_URL}/api/map/rooms/${r.id}`, { method: 'DELETE', headers: accountHeaders() }).catch(() => {});
             mapRooms.value = [];
             mapEdges.value = [];
             mapFloors.value = [1];
@@ -4257,7 +5133,7 @@ createApp({
             if (roomsOnFloor.length > 0) {
                 if (!confirm(`第 ${floor} 层有 ${roomsOnFloor.length} 个房间，确认连同房间一起删除？`)) return;
                 for (const r of roomsOnFloor)
-                    await fetch(`${API_BASE_URL}/api/map/rooms/${r.id}`, { method: 'DELETE' }).catch(() => {});
+                    await fetch(`${API_BASE_URL}/api/map/rooms/${r.id}`, { method: 'DELETE', headers: accountHeaders() }).catch(() => {});
             }
             await fetchMapData();
             if (mapActiveFloor.value === floor)
@@ -4275,7 +5151,7 @@ createApp({
         // 创建跨楼层连接（楼梯/电梯等）
         const mapConnectCrossFloor = async (fromRoomId, toRoomId, edgeType) => {
             await fetch(`${API_BASE_URL}/api/map/edges`, {
-                method: 'POST', headers: {'Content-Type':'application/json'},
+                method: 'POST', headers: accountHeaders(true),
                 body: JSON.stringify({
                     map_id: MAP_ID,
                     from_id: fromRoomId,
@@ -4296,7 +5172,7 @@ createApp({
 
         const mapSaveEntityRoom = async (entity) => {
             await fetch(`${API_BASE_URL}/api/world-entities/${entity.id}/room?room_id=${entity.room_id ?? ''}`,
-                { method: 'PUT' }
+                { method: 'PUT', headers: accountHeaders() }
             ).catch(() => {});
             // 同步到本地 worldEntities 列表
             const idx = worldEntities.value.findIndex(e => e.id === entity.id);
@@ -4306,7 +5182,7 @@ createApp({
         // ── 时间线移动房间 ───────────────────────────────────────
         const mapSetTimelineRoom = async (tlId, roomId) => {
             await fetch(`${API_BASE_URL}/api/map/move?room_id=${roomId}&timeline_id=${tlId}`,
-                { method: 'POST' }
+                { method: 'POST', headers: accountHeaders() }
             ).catch(() => {});
             const tl = timelines.value.find(t => t.id === tlId);
             if (tl) tl.current_room_id = roomId;
@@ -4325,6 +5201,13 @@ createApp({
         const dossierSelectedDoc = ref(null);
         const dossierDocChunks = ref([]);
         const dossierLoadingDoc = ref(false);
+        const dossierAssets = ref([]);
+        const dossierAssetsLoading = ref(false);
+        const dossierAssetPreview = ref(null);
+        const dossierAssetPreviewIndex = ref(0);
+        const dossierAssetZoom = ref(1);
+        const dossierAssetPanX = ref(0);
+        const dossierAssetPanY = ref(0);
         const dossierSelectedRoom = ref(null);
         const dossierSelectedEntity = ref(null);
         const dossierMapCanvasRef = ref(null);
@@ -4339,10 +5222,13 @@ createApp({
         let dossierMapPanning = false;
         let dossierMapPanStart = { x: 0, y: 0, vx: 0, vy: 0 };
         let dossierMapSuppressClick = false;
+        let dossierAssetPanning = false;
+        let dossierAssetPanStart = { x: 0, y: 0, px: 0, py: 0 };
 
         const dossierTabs = [
             { id: 'worldview', label: '世界观', icon: 'ph-globe' },
             { id: 'map', label: '地图', icon: 'ph-map-trifold' },
+            { id: 'assets', label: '图片', icon: 'ph-images' },
             { id: 'knowledge', label: '知识库', icon: 'ph-database' },
             { id: 'lore', label: '百科', icon: 'ph-books' },
             { id: 'entities', label: '实体', icon: 'ph-graph' },
@@ -4353,6 +5239,7 @@ createApp({
         );
         const dossierTabCount = (tabId) => {
             if (tabId === 'map') return mapRooms.value.length || '';
+            if (tabId === 'assets') return dossierAssets.value.length || '';
             if (tabId === 'knowledge') return ragDocuments.value.filter(d => !d.hidden).length || '';
             if (tabId === 'lore') return lorebook.value.length || '';
             if (tabId === 'entities') return worldEntities.value.length || '';
@@ -4376,9 +5263,75 @@ createApp({
                 !q || `${entity.name || ''} ${entity.location || ''} ${entity.status || ''} ${entity.state_desc || ''}`.toLowerCase().includes(q)
             );
         });
+        const dossierFilteredAssets = computed(() => {
+            const q = dossierSearch.value.toLowerCase();
+            return dossierAssets.value.filter(asset => {
+                const sceneText = (asset.scenes || []).map(scene => scene.name || '').join(' ');
+                return !q || `${asset.name || ''} ${sceneText}`.toLowerCase().includes(q);
+            });
+        });
         const dossierDocText = computed(() =>
             dossierDocChunks.value.map(chunk => chunk.chunk_text).filter(Boolean).join('\n\n')
         );
+        const dossierAssetTransform = computed(() =>
+            `translate3d(${dossierAssetPanX.value}px, ${dossierAssetPanY.value}px, 0) scale(${dossierAssetZoom.value})`
+        );
+        const formatAssetSize = (bytes = 0) => {
+            const n = Number(bytes || 0);
+            if (!n) return '0 B';
+            if (n < 1024) return `${n} B`;
+            if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+            return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        };
+        const escapeHtml = (value = '') => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        const cleanCampaignDisplayText = (value = '') => {
+            let source = String(value || '').replace(/\r\n?/g, '\n');
+            if (!source) return '';
+            const images = [];
+            source = source.replace(/!\[[^\]]*\]\(\/api\/campaign-assets\/[^)]+\)/g, (match) => {
+                images.push(match);
+                return `@@ZRIC_IMAGE_${images.length - 1}@@`;
+            });
+            source = source
+                .replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, '\n')
+                .replace(/<br\s*\/?>/gi, '\n')
+                .replace(/<\/(?:p|div|li|tr|h[1-6])\s*>/gi, '\n')
+                .replace(/<[^>]+>/g, '')
+                .replace(/\$=\s*\\mathbf\{([^}]+)\}\s*=\$/g, '= $1 =')
+                .replace(/\$\\mathbf\{([^}]+)\}\$/g, '$1')
+                .replace(/\\([*_{}\[\]()#+.!-])/g, '$1')
+                .replace(/^\s*(?:类型\s*[:：]\s*\w+|材料\s*\d+)\s*$/gmi, '')
+                .replace(/[ \t]+\n/g, '\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+            images.forEach((image, idx) => {
+                source = source.replace(`@@ZRIC_IMAGE_${idx}@@`, image);
+            });
+            return source;
+        };
+        const renderCampaignRichText = (value = '', imageClass = 'dossier-image-block') => {
+            const source = cleanCampaignDisplayText(value);
+            const parts = [];
+            let last = 0;
+            const imageRe = /!\[([^\]]*)\]\((\/api\/campaign-assets\/[^)]+)\)/g;
+            let match;
+            while ((match = imageRe.exec(source)) !== null) {
+                if (match.index > last) parts.push(escapeHtml(source.slice(last, match.index)));
+                const alt = escapeHtml(match[1] || '剧本图片');
+                const src = escapeHtml(match[2].replace(/\s+/g, ''));
+                parts.push(`<figure class="${imageClass}"><img src="${src}" alt="${alt}" loading="lazy"><figcaption>${alt}</figcaption></figure>`);
+                last = match.index + match[0].length;
+            }
+            if (last < source.length) parts.push(escapeHtml(source.slice(last)));
+            return parts.join('').replace(/\n/g, '<br>');
+        };
+        const renderDossierRichText = (value = '') => renderCampaignRichText(value, 'dossier-image-block');
+        const renderSceneRichText = (value = '') => renderCampaignRichText(value, 'scene-image-block');
 
         const selectDossierDoc = async (docId) => {
             dossierSelectedDocId.value = docId;
@@ -4397,12 +5350,103 @@ createApp({
             finally { dossierLoadingDoc.value = false; }
         };
 
+        const fetchCampaignAssets = async () => {
+            dossierAssetsLoading.value = true;
+            try {
+                const r = await fetch(`${API_BASE_URL}/api/game/campaign-assets`, { headers: accountHeaders() });
+                const d = await r.json();
+                if (d.status === 'success') {
+                    dossierAssets.value = Array.isArray(d.assets) ? d.assets : [];
+                    if (dossierAssetPreview.value) {
+                        const refreshed = dossierAssets.value.find(asset => asset.name === dossierAssetPreview.value.name);
+                        if (refreshed) dossierAssetPreview.value = refreshed;
+                        else closeDossierAssetPreview();
+                    }
+                }
+            } catch(e) {
+                dossierAssets.value = [];
+            } finally {
+                dossierAssetsLoading.value = false;
+            }
+        };
+
+        const openDossierAssetPreview = (asset) => {
+            if (!asset) return;
+            const idx = dossierFilteredAssets.value.findIndex(item => item.name === asset.name);
+            dossierAssetPreviewIndex.value = idx >= 0 ? idx : 0;
+            dossierAssetPreview.value = asset;
+            resetDossierAssetView();
+        };
+        const closeDossierAssetPreview = () => {
+            dossierAssetPreview.value = null;
+            resetDossierAssetView();
+        };
+        const stepDossierAssetPreview = (delta) => {
+            const list = dossierFilteredAssets.value;
+            if (!list.length) return closeDossierAssetPreview();
+            const next = (dossierAssetPreviewIndex.value + delta + list.length) % list.length;
+            dossierAssetPreviewIndex.value = next;
+            dossierAssetPreview.value = list[next];
+            resetDossierAssetView();
+        };
+        const resetDossierAssetView = () => {
+            dossierAssetZoom.value = 1;
+            dossierAssetPanX.value = 0;
+            dossierAssetPanY.value = 0;
+            dossierAssetPanning = false;
+        };
+        const setDossierAssetZoom = (value) => {
+            const next = Math.min(5, Math.max(0.5, Number(value) || 1));
+            dossierAssetZoom.value = Math.round(next * 100) / 100;
+            if (dossierAssetZoom.value <= 1) {
+                dossierAssetPanX.value = 0;
+                dossierAssetPanY.value = 0;
+            }
+        };
+        const zoomDossierAsset = (delta) => {
+            setDossierAssetZoom(dossierAssetZoom.value + delta);
+        };
+        const toggleDossierAssetZoom = () => {
+            if (dossierAssetZoom.value <= 1.05) setDossierAssetZoom(2);
+            else resetDossierAssetView();
+        };
+        const dossierAssetEventPoint = (e) => {
+            if (e?.touches?.length) return e.touches[0];
+            if (e?.changedTouches?.length) return e.changedTouches[0];
+            return e || { clientX: 0, clientY: 0 };
+        };
+        const dossierAssetOnWheel = (e) => {
+            zoomDossierAsset(e.deltaY > 0 ? -0.15 : 0.15);
+        };
+        const dossierAssetStartPan = (e) => {
+            if (dossierAssetZoom.value <= 1) return;
+            if (e.button !== undefined && e.button !== 0) return;
+            const p = dossierAssetEventPoint(e);
+            dossierAssetPanning = true;
+            dossierAssetPanStart = {
+                x: p.clientX,
+                y: p.clientY,
+                px: dossierAssetPanX.value,
+                py: dossierAssetPanY.value,
+            };
+        };
+        const dossierAssetMovePan = (e) => {
+            if (!dossierAssetPanning) return;
+            const p = dossierAssetEventPoint(e);
+            dossierAssetPanX.value = dossierAssetPanStart.px + (p.clientX - dossierAssetPanStart.x);
+            dossierAssetPanY.value = dossierAssetPanStart.py + (p.clientY - dossierAssetPanStart.y);
+        };
+        const dossierAssetEndPan = () => {
+            dossierAssetPanning = false;
+        };
+
         const refreshDossierTabData = async (tab = dossierTab.value) => {
             if (tab === 'worldview') await fetchWorldview();
             if (tab === 'map') {
                 await Promise.all([fetchMapData(), fetchWorldEntities(), fetchTimelines()]);
                 scheduleDossierMapFit();
             }
+            if (tab === 'assets') await fetchCampaignAssets();
             if (tab === 'knowledge') {
                 await fetchRagDocuments();
                 const firstDoc = dossierVisibleRagDocuments.value[0];
@@ -4552,7 +5596,8 @@ createApp({
         const dossierMapOnTouchEnd = () => dossierMapEndPan();
 
         return {
-            appState, playSurface, pendingLaunchMode, isLoading, isDeletingCampaign, campaignPackageImportBusy, campaignPackageExportBusy, dbConnected, campaignFiles, selectedCampaign, selectedCampaignInfo, campaignLoadSummary,
+            appState, playSurface, pendingLaunchMode, isLoading, isDeletingCampaign, campaignPackageImportBusy, campaignPackageExportBusy, dbConnected, campaignFiles, saveFiles, selectedCampaign, selectedCampaignInfo, campaignLoadSummary,
+            activeSoloSessionId, soloSessionLink, leaveGameToMenu, switchToGmSurface, copySoloRoomLink, saveSoloRoomProgress,
             showGameSettingsModal, showAdvancedSettings, openGameSettingsModal, returnToAdvancedSettings,
             showCampaignImportModal, campaignImportName, campaignImportMainFile,
             campaignImportAssets, campaignImportOcrEnabled, campaignImportBusy, campaignImportResult,
@@ -4569,7 +5614,7 @@ createApp({
             aiCache, aiCacheSummary, isSavingAiCache, fetchAiCacheStatus, setAiCacheEnabled, clearAiCache,
             isSavingKeys, apiKeySaveMsg, apiKeySaveOk, dropdownModelSearches, openModelDropdownCapability, modelOptions, modelConfigFields, isFetchingConfigModels, fetchingConfigCapability,
             fetchApiKeyStatus, saveApiKeys, newApiProvider, switchApiProvider, deleteApiProvider, fetchConfigModels, fetchAllConfigModels, selectConfigModel, openModelDropdown, toggleModelDropdown, filteredConfigModels, selectFirstFilteredConfigModel,
-            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloPerspectiveCharacter, soloPublicSceneText, soloSceneText, soloVisibleOptions, soloActionLog, visibleSoloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, selectSoloVisibleOption, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
+            storyNodes, characters, currentNode, isEditMode, hpLabel, sanLabel, editData, newOptionText, newOptionTarget, showWorldviewModal, worldviewContent, showMemoryModal, memoryContent, showLorebookModal, lorebook, currentLore, aiGeneratedText, playerAction, actionType, soloPlayerName, soloSelectedCharacterIds, soloPlayableCharacters, soloSelectedNames, soloConfirmedNames, soloHasConfirmedCharacters, soloActorLabel, soloVisibleCharacters, soloPerspectiveCharacter, soloPublicSceneText, soloSceneText, soloCharacterBriefingText, showSoloCharacterBriefing, soloVisibleOptions, soloActionLog, visibleSoloActionLog, soloLogRef, isSoloCharacterSelected, isSoloCharacterLocked, toggleSoloCharacter, clearSoloCharacters, confirmSoloCharacters, saveSoloProfile, submitSoloAction, selectSoloVisibleOption, isGeneratingText, checkpointCount, isRollingBack, goBack, isGeneratingOptions, imgPrompt, imgStyle, imgModel, isGeneratingImage, isLoadingImg, generatedImageUrl, imgEnPrompt, imgPromptUsed, imgLoadError, audioRef, tracks, currentTrackId, currentTrackUrl, customTrackUrl, isPlaying, volume, narrativeMood, timeSkipInput, forceNarrativeThrust, optionLikelihoods, fateSpinning, fateHighlightIdx, dicePanel, diceBusy, diceError, diceResultText, rollGmDice, clearDiceResult, showTriggerModal, triggers, currentTrigger, condTypes, collapsedChars, toggleCharCollapse, showCharModal, isGeneratingNPC, isExpandingBranch, expandingBranchText, newChar, npcToast, triggerAlert, passiveAlerts, statChangesLog, showStatChanges, showBattleReportModal, battleReport, isGeneratingReport, battleReportFilename, leftTab, treeContainerRef, treeLayout,
             gmManualEventText, gmManualEventKind, gmManualEventBusy, gmManualEventMsg, gmManualSyncPlayer, gmManualRecordMemory, publishGmManualEvent,
             // 多人房间
             showMultiplayerModal, multiplayerRoom, multiplayerMembers, multiplayerMessages,
@@ -4578,7 +5623,7 @@ createApp({
             multiplayerMaxPlayers, multiplayerPlayableCharacterLimit, multiplayerMaxPlayersUpper, multiplayerRoomMaxPlayers,
             multiplayerClaimedPlayerCount, multiplayerRoomSeatsRemaining, clampMultiplayerMaxPlayers,
             multiplayerAuthAccount, multiplayerAuthForm, multiplayerAuthBusy, multiplayerAuthMsg, submitMultiplayerAuth, logoutMultiplayerAuth,
-            openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, enterMultiplayerRoomByCode, copyMultiplayerInvite, openMultiplayerTable,
+            openMultiplayerModal, openMenuMultiplayer, createMultiplayerRoom, createMultiplayerRoomForSelectedCampaign, joinMultiplayerRoom, enterMultiplayerRoomByCode, copyMultiplayerInvite, openMultiplayerTable, saveCurrentMultiplayerRoomProgress, canSaveCurrentMultiplayerRoom,
             // 时间线系统
             timelinePanelOpen, timelines, showTlEditModal, tlEditData, tlColorPresets,
             showTlMemoryModal, tlMemoryTarget, tlMemoryContent,
@@ -4593,12 +5638,12 @@ createApp({
             showRagModal, ragTab, ragDocuments, ragSelectedDoc, ragForm,
             ragIngesting, ragIngestResult, ragSearchQuery, ragSearching, ragSearchResults,
             ragUploadFile, ragDragOver, ragChunkSize, ragChunkOverlap, ragTopK,
-            openRagModal, ragImport, ragIngest, ragDeleteDoc, ragToggleHidden, ragSearch,
+            openRagModal, ragImport, ragDeleteDoc, ragToggleHidden, ragSearch,
             ragHandleFileSelect, ragHandleDrop,
-            fetchCampaigns, deleteSelectedCampaign, exportCampaignPackage, campaignPackagePickImport, loadAndStart, enterCurrentGame: enterCurrentGameWithTl, exportSave, doExportOverwrite, doExportNew,
-            showExportModal, exportShowNameInput, exportNewName, currentSaveFolder,
-            isExportingSave, saveManagerMsg, saveManagerOk, saveSearch, currentSaveItem, filteredSaveItems,
-            saveStatsText, downloadSave, deleteSave, loadSaveFromManager,
+            fetchCampaigns, fetchSaves, onCampaignSelectionChanged, deleteSelectedCampaign, exportCampaignPackage, campaignPackagePickImport, loadAndStart, exportSave, doExportOverwrite, doExportNew,
+            showExportModal, exportShowNameInput, exportNewName, currentSaveFolder, currentSavePath, lockedSaveSourceLabel, lockedSaveSourcePath,
+            isExportingSave, isRenamingSave, renamingSaveName, renameSaveDraft, saveManagerMsg, saveManagerOk, saveSearch, menuSaveModeFilter, menuSaveModeCounts, currentSaveItem, currentSaveWritable, filteredSaveItems, menuSaveItems,
+            saveStatsText, savePlayModeLabel, saveDisplayName, downloadSave, deleteSave, startRenameSave, cancelRenameSave, renameSave, loadSaveFromManager, restoreSaveFromMenu,
             fetchGameState, jumpToNode, saveNodeChanges, createNewNode, deleteCurrentNode, addManualOption, deleteOption, saveStatLabels, saveCharacterState, createCharacter, deleteCharacter, generateNPC, resetNewChar, openWorldviewModal, saveWorldview, openMemoryModal, saveMemory, openLorebookModal, saveLore, deleteLore, fetchTriggers, openTriggerModal, newTrigger, selectTrigger, saveTrigger, deleteTrigger, resetTriggerFired, addTriggerAction, resetActionFields, resetAllTriggers, generateAIText, generateDynamicOptions, openBattleReportModal, generateBattleReport, downloadBattleReport, generateImage, togglePlay, changeTrack, doTimeSkip, doForceThrust, fatePick,
             // GM 干预
             gmCorrection, lastDynamicContext, retryWithCorrection,
@@ -4614,11 +5659,18 @@ createApp({
             // 顶栏资料册
             showDossierModal, dossierTab, dossierTabs, dossierActiveTab, dossierSearch,
             dossierSelectedDocId, dossierSelectedDoc, dossierDocChunks, dossierLoadingDoc,
+            dossierAssets, dossierAssetsLoading, dossierFilteredAssets,
+            dossierAssetPreview, dossierAssetPreviewIndex,
+            dossierAssetZoom, dossierAssetPanX, dossierAssetPanY, dossierAssetTransform,
             dossierVisibleRagDocuments, dossierFilteredLore, dossierFilteredEntities, dossierDocText,
+            formatAssetSize, renderDossierRichText, renderSceneRichText,
             dossierSelectedRoom, dossierSelectedEntity, dossierMapCanvasRef,
             dossierMapScale, dossierMapViewX, dossierMapViewY, dossierMapSvgW, dossierMapSvgH, dossierMapViewBox,
             dossierTabCount, openDossierPanel, switchDossierTab,
-            selectDossierDoc, selectDossierFloor, dossierFitMapToFloor, dossierSelectMapRoom,
+            selectDossierDoc, fetchCampaignAssets, openDossierAssetPreview, closeDossierAssetPreview, stepDossierAssetPreview,
+            resetDossierAssetView, zoomDossierAsset, toggleDossierAssetZoom,
+            dossierAssetOnWheel, dossierAssetStartPan, dossierAssetMovePan, dossierAssetEndPan,
+            selectDossierFloor, dossierFitMapToFloor, dossierSelectMapRoom,
             dossierMapOnWheel, dossierMapOnMouseDown, dossierMapOnMouseMove, dossierMapOnMouseUp,
             dossierMapOnTouchStart, dossierMapOnTouchMove, dossierMapOnTouchEnd,
             // 地图系统

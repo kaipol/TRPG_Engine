@@ -9,14 +9,19 @@ import json_repair
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from .logger import get_logger
 from . import ai_provider
+from .auth import require_account_from_request
 
 _log = get_logger("entity")
 
 entity_router = APIRouter(tags=["世界实体"])
+
+
+def _require_write_account(request: Request):
+    require_account_from_request(request)
 
 # ---------------------------------------------------------
 # 依赖注入
@@ -170,7 +175,8 @@ def get_world_entities_text(conn, *search_texts) -> str:
 def ai_extract_and_upsert_entities(
     conn, scene_name: str, content: str,
     player_action: str, ai_branches_text: str,
-    timeline_label: str
+    timeline_label: str,
+    owner_account_id: int | None = None,
 ):
     """
     推演完成后，用 AI 从场景+结果中提取涉及的命名实体并写入/更新注册表。
@@ -230,6 +236,7 @@ def ai_extract_and_upsert_entities(
             temperature=0.1,
             max_tokens=1000,
             response_format={"type": "json_object"},
+            owner_account_id=owner_account_id,
         )
         parsed   = json_repair.loads(resp.choices[0].message.content)
         entities = parsed.get("entities", [])
@@ -367,7 +374,8 @@ def list_world_entities():
 
 
 @entity_router.post("/api/world-entities")
-def upsert_world_entity(req: WorldEntityUpsertRequest):
+def upsert_world_entity(req: WorldEntityUpsertRequest, request: Request):
+    _require_write_account(request)
     with safe_db() as conn:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         new_aliases = [str(a).strip()[:40] for a in req.aliases if str(a).strip()]
@@ -399,7 +407,8 @@ def upsert_world_entity(req: WorldEntityUpsertRequest):
 
 
 @entity_router.delete("/api/world-entities/{entity_id}")
-def delete_world_entity(entity_id: int):
+def delete_world_entity(entity_id: int, request: Request):
+    _require_write_account(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM world_entities WHERE id=?", (entity_id,))
         conn.commit()
@@ -407,7 +416,8 @@ def delete_world_entity(entity_id: int):
 
 
 @entity_router.put("/api/world-entities/{entity_id}/room")
-def set_entity_room(entity_id: int, room_id: int | None = None):
+def set_entity_room(entity_id: int, request: Request, room_id: int | None = None):
+    _require_write_account(request)
     """将世界实体绑定到地图房间。"""
     with safe_db() as conn:
         conn.execute("UPDATE world_entities SET room_id=? WHERE id=?", (room_id, entity_id))
@@ -437,7 +447,8 @@ def get_entity_persona(entity_id: int):
 
 
 @entity_router.put("/api/world-entities/{entity_id}/persona")
-def update_entity_persona(entity_id: int, req: UpdatePersonaRequest):
+def update_entity_persona(entity_id: int, req: UpdatePersonaRequest, request: Request):
+    _require_write_account(request)
     """更新 NPC 的 persona 数据。"""
     with safe_db() as conn:
         row = conn.execute("SELECT state_desc FROM world_entities WHERE id=?", (entity_id,)).fetchone()

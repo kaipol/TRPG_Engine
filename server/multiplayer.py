@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - import fallback for direct tooling
 _log = get_logger("multiplayer")
 multiplayer_router = APIRouter(tags=["多人联机"])
 from . import ai_provider
-from .auth import account_player_id, get_account_by_token, require_account_from_request
+from .auth import account_from_request, account_player_id, get_account_by_token, require_account_from_request
 from .campaign_storage import (
     campaign_asset_url,
     resolve_campaign_folder_name,
@@ -73,6 +73,7 @@ _append_to_memory = None
 _chunk_text = None
 _get_embeddings = None
 _refresh_vector_cache = None
+_load_campaign_path = None
 
 _ws_clients_by_room: dict[int, set[WebSocket]] = {}
 _ws_meta: dict[WebSocket, dict[str, Any]] = {}
@@ -83,6 +84,7 @@ MAX_SCENARIO_CHARS = int(_MULTIPLAYER_SETTINGS["max_scenario_chars"])
 MAX_SCENARIO_CHUNKS = int(_MULTIPLAYER_SETTINGS["max_scenario_chunks"])
 MAX_MAP_UPLOAD_BYTES = int(_MULTIPLAYER_SETTINGS["max_map_upload_bytes"])
 MAX_ROOM_PLAYERS = int(_MULTIPLAYER_SETTINGS["max_room_players"])
+MULTIPLAYER_ROOM_SAVE_PREFIX = "__room_mp_"
 BGM_TRACKS: dict[str, str] = {
     "午后田园": "https://soundimage.org/wp-content/uploads/2014/08/Netherplace.mp3",
     "黄昏渡口": "https://soundimage.org/wp-content/uploads/2018/01/Romantic-Lands-Beckon.mp3",
@@ -124,15 +126,17 @@ def configure_multiplayer(
     fn_chunk_text=None,
     fn_get_embeddings=None,
     fn_refresh_vector_cache=None,
+    fn_load_campaign_path=None,
 ):
     """Inject runtime dependencies from main.py."""
     global _db_file, _append_to_memory
-    global _chunk_text, _get_embeddings, _refresh_vector_cache
+    global _chunk_text, _get_embeddings, _refresh_vector_cache, _load_campaign_path
     _db_file = db_file
     _append_to_memory = fn_append_to_memory
     _chunk_text = fn_chunk_text
     _get_embeddings = fn_get_embeddings
     _refresh_vector_cache = fn_refresh_vector_cache
+    _load_campaign_path = fn_load_campaign_path
 
 
 def get_db_connection():
@@ -168,6 +172,9 @@ def init_multiplayer_tables():
                 code               TEXT NOT NULL UNIQUE,
                 name               TEXT NOT NULL,
                 gm_name            TEXT NOT NULL DEFAULT '',
+                owner_account_id   INTEGER NOT NULL,
+                owner_username     TEXT NOT NULL DEFAULT '',
+                owner_display_name TEXT NOT NULL DEFAULT '',
                 campaign_path      TEXT NOT NULL DEFAULT '',
                 gm_token_hash      TEXT NOT NULL DEFAULT '',
                 current_scene_id   INTEGER,
@@ -295,6 +302,9 @@ def init_multiplayer_tables():
             "ALTER TABLE multiplayer_rooms ADD COLUMN current_room_id INTEGER",
             "ALTER TABLE multiplayer_rooms ADD COLUMN map_background_url TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE multiplayer_rooms ADD COLUMN gm_token_hash TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE multiplayer_rooms ADD COLUMN owner_account_id INTEGER",
+            "ALTER TABLE multiplayer_rooms ADD COLUMN owner_username TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE multiplayer_rooms ADD COLUMN owner_display_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE multiplayer_members ADD COLUMN client_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE multiplayer_members ADD COLUMN member_token_hash TEXT NOT NULL DEFAULT ''",
         ):
@@ -346,6 +356,22 @@ def _require_gm(room, room_token: str):
         raise fastapi.HTTPException(status_code=403, detail="需要 GM 房间令牌")
 
 
+def _has_room_owner_access(room, request: Request) -> bool:
+    account = account_from_request(request)
+    if not account:
+        return False
+    try:
+        return int(dict(room).get("owner_account_id") or 0) == int(dict(account).get("id") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _require_gm_or_owner(room, request: Request):
+    if _has_gm_access(room, _room_token_from_request(request)) or _has_room_owner_access(room, request):
+        return
+    _require_gm(room, _room_token_from_request(request))
+
+
 def _require_member_or_gm(conn, room, player_id: str, member_token: str, room_token: str = "") -> str:
     if _has_gm_access(room, room_token):
         return "gm"
@@ -360,6 +386,28 @@ def _require_member_or_gm(conn, room, player_id: str, member_token: str, room_to
         raise fastapi.HTTPException(status_code=403, detail="成员令牌无效")
     # 真人进入多人桌时永远按玩家处理；AI-GM/管理同步只通过房间令牌走 gm 分支。
     return "player"
+
+
+def _room_access_player_id_from_request(request: Request) -> str:
+    account = account_from_request(request)
+    return account_player_id(account) if account else ""
+
+
+def _require_room_reader(conn, room, request: Request, player_id: str = "") -> str:
+    if _has_gm_access(room, _room_token_from_request(request)):
+        return "gm"
+    if _has_room_owner_access(room, request):
+        return "gm"
+    actor_id = (player_id or "").strip() or _room_access_player_id_from_request(request)
+    if not actor_id:
+        raise fastapi.HTTPException(status_code=403, detail="需要先加入房间")
+    return _require_member_or_gm(
+        conn,
+        room,
+        actor_id,
+        _member_token_from_request(request),
+        "",
+    )
 
 
 def _require_player_character_claims(conn, room, player_id: str, role: str) -> list[dict[str, Any]]:
@@ -387,7 +435,18 @@ def _dump_json(data: Any) -> str:
 
 
 def _room_code() -> str:
-    return secrets.token_hex(3).upper()
+    return secrets.token_hex(4).upper()
+
+
+def _room_code_from_save_ref(value: Any) -> str:
+    name = str(value or "").strip().replace("\\", "/").split("/")[-1]
+    if not name.startswith(MULTIPLAYER_ROOM_SAVE_PREFIX):
+        return ""
+    return re.sub(r"[^A-Za-z0-9_-]", "", name[len(MULTIPLAYER_ROOM_SAVE_PREFIX):]).upper()[:80]
+
+
+def _normalize_room_code(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "", str(value or "").strip()).upper()[:80]
 
 
 def _room_by_code(conn, room_code: str):
@@ -397,6 +456,8 @@ def _room_by_code(conn, room_code: str):
     ).fetchone()
     if not row:
         raise fastapi.HTTPException(status_code=404, detail="房间不存在")
+    if _int_or_none(dict(row).get("owner_account_id")) is None:
+        raise fastapi.HTTPException(status_code=410, detail="房间缺少房主账号，请重新创建房间")
     return row
 
 
@@ -423,10 +484,51 @@ def _room_campaign_folder(row) -> tuple[str, str]:
     raise fastapi.HTTPException(status_code=400, detail="房间未绑定剧本，无法保存地图到对应剧本目录")
 
 
+def _room_load_path(row) -> str:
+    room = dict(row)
+    settings = _load_json(room.get("settings", "{}"), {})
+    candidates = [
+        str(settings.get("room_save_path") or "").strip(),
+        str(settings.get("campaign_path") or "").strip(),
+        str(room.get("campaign_path") or "").strip(),
+    ]
+    for raw_path in candidates:
+        if not raw_path:
+            continue
+        normalized = raw_path.replace("\\", "/").strip()
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) == 3 and parts[0] == "saves":
+            return f"saves/{parts[1]}/{parts[2]}"
+        if len(parts) == 2 and parts[0] == "campaigns":
+            return f"campaigns/{parts[1]}"
+        if len(parts) == 1:
+            return f"campaigns/{parts[0]}"
+    return ""
+
+
+def _ensure_room_campaign_loaded(conn, row) -> None:
+    if not callable(_load_campaign_path):
+        return
+    load_path = _room_load_path(row)
+    if not load_path:
+        return
+    current_path = str(_system_value(conn, "current_campaign_path") or "").strip().replace("\\", "/")
+    if current_path == load_path:
+        return
+    owner_account_id = _room_owner_account_id(row)
+    try:
+        _load_campaign_path(load_path, owner_account_id=owner_account_id)
+    except TypeError:
+        _load_campaign_path(load_path)
+
+
 def _serialize_room(row) -> dict[str, Any]:
     data = dict(row)
     data["settings"] = _load_json(data.get("settings", "{}"), {})
     data.pop("gm_token_hash", None)
+    data.pop("owner_account_id", None)
+    data.pop("owner_username", None)
+    data.pop("owner_display_name", None)
     return data
 
 
@@ -449,6 +551,357 @@ def _serialize_member(row) -> dict[str, Any]:
 
 def _serialize_character_claim(row) -> dict[str, Any]:
     return dict(row)
+
+
+def _restore_state_has_room_data(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    claims = value.get("character_claims")
+    if isinstance(claims, list) and claims:
+        return True
+    tokens = value.get("tokens")
+    return isinstance(tokens, list) and any(
+        isinstance(token, dict)
+        and str(token.get("kind") or "pc") == "pc"
+        and token.get("owner_id")
+        and token.get("linked_character_id") is not None
+        for token in tokens
+    )
+
+
+def _infer_character_claims_from_messages(conn, room_id: int) -> list[dict[str, Any]]:
+    valid_character_ids = {
+        int(r["id"])
+        for r in conn.execute("SELECT id FROM characters").fetchall()
+        if r["id"] is not None
+    }
+    if not valid_character_ids:
+        return []
+    member_names = {
+        str(r["player_id"]): str(r["display_name"] or r["player_id"])
+        for r in conn.execute(
+            "SELECT player_id, display_name FROM multiplayer_members WHERE room_id=?",
+            (room_id,),
+        ).fetchall()
+    }
+    rows = conn.execute(
+        """
+        SELECT sender_id, sender_name, payload, created_at
+        FROM multiplayer_messages
+        WHERE room_id=?
+        ORDER BY id DESC
+        LIMIT 300
+        """,
+        (room_id,),
+    ).fetchall()
+    claims: list[dict[str, Any]] = []
+    seen_players: set[str] = set()
+    seen_characters: set[int] = set()
+    for row in rows:
+        payload = _load_json(row["payload"], {})
+        if not isinstance(payload, dict):
+            continue
+        player_id = str(payload.get("actor_id") or payload.get("sender_id") or row["sender_id"] or "").strip()[:80]
+        if not player_id or player_id in seen_players:
+            continue
+        raw_character_id = payload.get("character_id")
+        if raw_character_id is None:
+            raw_ids = payload.get("character_ids")
+            if isinstance(raw_ids, list) and raw_ids:
+                raw_character_id = raw_ids[0]
+        try:
+            character_id = int(raw_character_id)
+        except (TypeError, ValueError):
+            continue
+        if character_id not in valid_character_ids or character_id in seen_characters:
+            continue
+        display_name = _normalize_display_name(
+            member_names.get(player_id)
+            or payload.get("actor_name")
+            or payload.get("character_name")
+            or row["sender_name"]
+            or player_id
+        )
+        claims.append({
+            "character_id": character_id,
+            "player_id": player_id,
+            "display_name": display_name,
+            "claimed_at": row["created_at"] or _now(),
+        })
+        seen_players.add(player_id)
+        seen_characters.add(character_id)
+        if len(claims) >= MAX_ROOM_PLAYERS:
+            break
+    claims.reverse()
+    return claims
+
+
+def _room_restore_state_from_row(conn, room_row) -> dict[str, Any]:
+    if not room_row:
+        return {}
+    room_id = int(room_row["id"])
+    room = dict(room_row)
+    room_settings = _load_json(room.get("settings", "{}"), {})
+    members = [
+        {
+            "player_id": r["player_id"],
+            "display_name": r["display_name"],
+            "role": r["role"],
+            "color": r["color"],
+            "last_seen": r["last_seen"],
+        }
+        for r in conn.execute(
+            """
+            SELECT player_id, display_name, role, color, last_seen
+            FROM multiplayer_members
+            WHERE room_id=?
+            ORDER BY display_name
+            """,
+            (room_id,),
+        ).fetchall()
+    ]
+    claims = [
+        {
+            "character_id": r["character_id"],
+            "player_id": r["player_id"],
+            "display_name": r["display_name"],
+            "claimed_at": r["claimed_at"],
+        }
+        for r in conn.execute(
+            """
+            SELECT character_id, player_id, display_name, claimed_at
+            FROM multiplayer_character_claims
+            WHERE room_id=?
+            ORDER BY claimed_at, id
+            """,
+            (room_id,),
+        ).fetchall()
+    ]
+    if not claims:
+        claims = _infer_character_claims_from_messages(conn, room_id)
+    tokens = [
+        {
+            "token_id": r["token_id"],
+            "name": r["name"],
+            "kind": r["kind"],
+            "owner_id": r["owner_id"],
+            "avatar_url": r["avatar_url"],
+            "color": r["color"],
+            "x": r["x"],
+            "y": r["y"],
+            "size": r["size"],
+            "linked_room_id": r["linked_room_id"],
+            "linked_entity_id": r["linked_entity_id"],
+            "linked_character_id": r["linked_character_id"],
+            "notes": r["notes"],
+            "updated_at": r["updated_at"],
+        }
+        for r in conn.execute(
+            """
+            SELECT token_id, name, kind, owner_id, avatar_url, color, x, y, size,
+                   linked_room_id, linked_entity_id, linked_character_id, notes, updated_at
+            FROM multiplayer_tokens
+            WHERE room_id=?
+            ORDER BY kind, name
+            """,
+            (room_id,),
+        ).fetchall()
+    ]
+    return {
+        "source_room_code": room.get("code", ""),
+        "room": {
+            "name": room.get("name", ""),
+            "campaign_path": room.get("campaign_path", ""),
+            "current_scene_id": room.get("current_scene_id"),
+            "current_room_id": room.get("current_room_id"),
+            "map_background_url": room.get("map_background_url", ""),
+            "settings": room_settings,
+        },
+        "members": members,
+        "character_claims": claims,
+        "tokens": tokens,
+    }
+
+
+def export_room_state_for_save_name(
+    conn,
+    save_name: str,
+    account: dict[str, Any] | None = None,
+    room_token: str = "",
+) -> dict[str, Any]:
+    room_code = _room_code_from_save_ref(save_name)
+    if not room_code:
+        return {}
+    room = conn.execute("SELECT * FROM multiplayer_rooms WHERE UPPER(code)=UPPER(?)", (room_code,)).fetchone()
+    if not room:
+        return {}
+    has_account_access = False
+    if account:
+        try:
+            account_id = int(dict(account).get("id"))
+        except (TypeError, ValueError):
+            account_id = None
+        has_account_access = account_id is not None and int(room["owner_account_id"] or 0) == account_id
+    has_token_access = _has_gm_access(room, room_token)
+    if account and not (has_account_access or has_token_access):
+        return {}
+    return _room_restore_state_from_row(conn, room)
+
+
+def _restore_state_from_save_ref(conn, save_ref: Any) -> dict[str, Any]:
+    room_code = _room_code_from_save_ref(save_ref)
+    if not room_code:
+        return {}
+    room = conn.execute("SELECT * FROM multiplayer_rooms WHERE UPPER(code)=UPPER(?)", (room_code,)).fetchone()
+    return _room_restore_state_from_row(conn, room) if room else {}
+
+
+def _restore_room_state_into_room(conn, room_id: int, state: Any) -> None:
+    if not isinstance(state, dict):
+        return
+    members_raw = state.get("members") if isinstance(state.get("members"), list) else []
+    claims_raw = state.get("character_claims") if isinstance(state.get("character_claims"), list) else []
+    tokens_raw = state.get("tokens") if isinstance(state.get("tokens"), list) else []
+    if not claims_raw and tokens_raw:
+        claims_raw = [
+            {
+                "character_id": token.get("linked_character_id"),
+                "player_id": token.get("owner_id"),
+                "display_name": token.get("name") or token.get("owner_id"),
+                "claimed_at": token.get("updated_at") or _now(),
+            }
+            for token in tokens_raw
+            if isinstance(token, dict) and str(token.get("kind") or "pc") == "pc" and token.get("owner_id") and token.get("linked_character_id") is not None
+        ]
+    if not members_raw and not claims_raw and not tokens_raw:
+        return
+
+    room_state = state.get("room") if isinstance(state.get("room"), dict) else {}
+    if room_state:
+        current_scene_id = _int_or_none(room_state.get("current_scene_id"))
+        current_room_id = _int_or_none(room_state.get("current_room_id"))
+        map_background_url = str(room_state.get("map_background_url") or "").strip()[:500]
+        conn.execute(
+            """
+            UPDATE multiplayer_rooms
+            SET current_scene_id=COALESCE(?, current_scene_id),
+                current_room_id=COALESCE(?, current_room_id),
+                map_background_url=COALESCE(NULLIF(?, ''), map_background_url)
+            WHERE id=?
+            """,
+            (current_scene_id, current_room_id, map_background_url, room_id),
+        )
+
+    conn.execute("DELETE FROM multiplayer_character_claims WHERE room_id=?", (room_id,))
+    conn.execute("DELETE FROM multiplayer_tokens WHERE room_id=?", (room_id,))
+
+    character_ids = {
+        int(r["id"])
+        for r in conn.execute("SELECT id FROM characters").fetchall()
+        if r["id"] is not None
+    }
+    now = _now()
+    member_by_player: dict[str, dict[str, Any]] = {}
+    for raw in members_raw[: max(MAX_ROOM_PLAYERS * 2, 8)]:
+        if not isinstance(raw, dict):
+            continue
+        player_id = str(raw.get("player_id") or "").strip()[:80]
+        if not player_id:
+            continue
+        member_by_player[player_id] = raw
+
+    restored_claims: list[dict[str, Any]] = []
+    seen_players: set[str] = set()
+    seen_characters: set[int] = set()
+    for raw in claims_raw[:MAX_ROOM_PLAYERS]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            character_id = int(raw.get("character_id"))
+        except (TypeError, ValueError):
+            continue
+        player_id = str(raw.get("player_id") or "").strip()[:80]
+        if not player_id or character_id not in character_ids or player_id in seen_players or character_id in seen_characters:
+            continue
+        display_name = _normalize_display_name(raw.get("display_name") or member_by_player.get(player_id, {}).get("display_name") or player_id)
+        claimed_at = str(raw.get("claimed_at") or now).strip()[:40] or now
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO multiplayer_character_claims
+            (room_id, character_id, player_id, display_name, claimed_at)
+            VALUES (?,?,?,?,?)
+            """,
+            (room_id, character_id, player_id, display_name, claimed_at),
+        )
+        restored_claims.append({"character_id": character_id, "player_id": player_id, "display_name": display_name})
+        seen_players.add(player_id)
+        seen_characters.add(character_id)
+
+    restored_token_keys: set[str] = set()
+    for raw in tokens_raw[:200]:
+        if not isinstance(raw, dict):
+            continue
+        token_id = str(raw.get("token_id") or "").strip()[:80]
+        if not token_id:
+            continue
+        try:
+            x = float(raw.get("x", 120))
+            y = float(raw.get("y", 120))
+            size = max(20.0, min(float(raw.get("size", 48)), 160.0))
+        except (TypeError, ValueError):
+            x, y, size = 120.0, 120.0, 48.0
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO multiplayer_tokens
+            (room_id, token_id, name, kind, owner_id, avatar_url, color, x, y, size,
+             linked_room_id, linked_entity_id, linked_character_id, notes, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                room_id,
+                token_id,
+                str(raw.get("name") or "Token")[:80],
+                str(raw.get("kind") or "pc")[:20],
+                str(raw.get("owner_id") or "")[:80],
+                str(raw.get("avatar_url") or "")[:500],
+                str(raw.get("color") or "#f59e0b")[:20],
+                x,
+                y,
+                size,
+                raw.get("linked_room_id"),
+                raw.get("linked_entity_id"),
+                raw.get("linked_character_id"),
+                str(raw.get("notes") or "")[:1000],
+                str(raw.get("updated_at") or now)[:40],
+            ),
+        )
+        restored_token_keys.add(token_id)
+
+    for index, claim in enumerate(restored_claims):
+        token_id = f"pc_{claim['player_id']}"
+        if token_id in restored_token_keys:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO multiplayer_tokens
+            (room_id, token_id, name, kind, owner_id, color, x, y, size, linked_character_id, notes, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                room_id,
+                token_id,
+                claim["display_name"],
+                "pc",
+                claim["player_id"],
+                str(member_by_player.get(claim["player_id"], {}).get("color") or "#7dd3fc")[:20],
+                120 + index * 56,
+                120,
+                48,
+                claim["character_id"],
+                _dump_json({"character_id": claim["character_id"], "locked": True}),
+                now,
+            ),
+        )
 
 
 def _normalize_display_name(value: Any) -> str:
@@ -478,22 +931,38 @@ def _account_player_id_from_request(request: Request) -> str:
     return account_player_id(require_account_from_request(request))
 
 
+def _account_username_for_player_id(conn, player_id: Any) -> str:
+    value = str(player_id or "").strip()
+    if not value.startswith("account:"):
+        return ""
+    try:
+        account_id = int(value.split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return ""
+    try:
+        row = conn.execute("SELECT username FROM auth_accounts WHERE id=?", (account_id,)).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row["username"] or "").strip()[:60] if row else ""
+
+
+def _account_username_payload(conn, player_id: Any) -> dict[str, str]:
+    username = _account_username_for_player_id(conn, player_id)
+    return {"account_username": username} if username else {}
+
+
 def _joined_player_count(conn, room_id: int) -> int:
     rows = conn.execute(
         """
-        SELECT m.player_id
-        FROM multiplayer_members m
-        WHERE m.room_id=?
-          AND (
-            m.connected=1
-            OR EXISTS (
-                SELECT 1
-                FROM multiplayer_character_claims c
-                WHERE c.room_id=m.room_id AND c.player_id=m.player_id
-            )
-          )
+        SELECT player_id
+        FROM multiplayer_members
+        WHERE room_id=? AND connected=1
+        UNION
+        SELECT player_id
+        FROM multiplayer_character_claims
+        WHERE room_id=?
         """,
-        (room_id,),
+        (room_id, room_id),
     ).fetchall()
     return len({str(row["player_id"] or "").strip() for row in rows if str(row["player_id"] or "").strip()})
 
@@ -612,6 +1081,21 @@ def _valid_bgm_name(value: Any) -> str:
     return name if name in BGM_TRACKS else ""
 
 
+def _room_owner_account_id(room) -> int:
+    owner_account_id = _int_or_none(dict(room).get("owner_account_id"))
+    if owner_account_id is None:
+        raise fastapi.HTTPException(status_code=410, detail="房间缺少房主账号，请重新创建房间")
+    return owner_account_id
+
+
+def _account_owner_columns(account: dict[str, Any]) -> tuple[int, str, str]:
+    return (
+        int(account["id"]),
+        str(account.get("username") or "")[:60],
+        str(account.get("display_name") or account.get("username") or "")[:40],
+    )
+
+
 def _apply_bgm_recommendation(conn, adjudication: dict[str, Any]) -> str:
     name = _valid_bgm_name(adjudication.get("bgm_name"))
     if not name:
@@ -717,6 +1201,34 @@ def _current_scene_for_room(conn, room) -> dict[str, Any] | None:
     return _serialize_scene_for_players(conn, scene_id)
 
 
+def _is_internal_scene_name(name: str) -> bool:
+    return bool(re.search(r"(?:守秘人|GM|KP|幕后|真相|后台|导入|索引|规则说明|系统信息)", str(name or ""), re.I))
+
+
+def _scene_looks_player_visible(scene: dict[str, Any] | None) -> bool:
+    if not scene:
+        return False
+    name = str(scene.get("name") or "")
+    if _is_internal_scene_name(name):
+        return False
+    text = _single_line(str(scene.get("summary") or scene.get("content") or ""))
+    if re.search(r"(?:守秘人|KP|GM|主持|英雄们|模组|危险的谎言|邪恶的超自然力量|玩家们|NPC角色)", text, re.I):
+        return False
+    return True
+
+
+def _first_player_visible_scene(conn) -> dict[str, Any] | None:
+    rows = conn.execute("SELECT id FROM nodes ORDER BY id").fetchall()
+    fallback = None
+    for row in rows:
+        scene = _serialize_scene_for_players(conn, int(row["id"]))
+        if scene and fallback is None:
+            fallback = scene
+        if _scene_looks_player_visible(scene):
+            return scene
+    return fallback
+
+
 def _current_scene_id_for_room(conn, room) -> int | None:
     return _int_or_none(room["current_scene_id"]) or _int_or_none(_system_value(conn, "player_current_scene_id")) or _first_scene_id(conn)
 
@@ -784,7 +1296,8 @@ def _apply_action_scene_advance(conn, room, req: PlayerActionRequest, actor_payl
         (next_node_id, current_room_id, _now(), room["id"]),
     )
     scene_name = str(next_node["name"] or f"场景 #{next_node_id}").strip()
-    content = f"场景推进：{req.actor_name}选择「{option_text}」→ {scene_name}"
+    actor = (req.character_name or req.actor_name or "玩家").strip()
+    content = f"场景推进：{actor}转向「{scene_name}」。"
     scene_payload = {
         "source": "scene_advance",
         **actor_payload,
@@ -802,35 +1315,139 @@ def _apply_action_scene_advance(conn, room, req: PlayerActionRequest, actor_payl
 
 
 def _character_opening_text(conn, room, character: sqlite3.Row | dict[str, Any]) -> str:
-    char = dict(character)
     scene = _current_scene_for_room(conn, room) or {}
-    scene_name = str(scene.get("name") or "开场").strip()
+    if not _scene_looks_player_visible(scene):
+        scene = _first_player_visible_scene(conn) or scene
     scene_text = str(scene.get("expanded_content") or scene.get("content") or "").strip()
-    scene_excerpt = _single_line(scene_text)[:420] or "主持端尚未写下更多场景细节，你先从自己的视角观察当下。"
-    name = str(char.get("name") or "角色").strip()
-    role = str(char.get("role") or "调查员").strip()
-    inventory = str(char.get("inventory") or "").strip()
-    personality = str(char.get("personality") or "").strip()
-    status = str(char.get("status") or "active").strip()
-    seed = hashlib.sha256(f"{room['code']}|{char.get('id')}|{name}".encode("utf-8")).hexdigest()
-    focus_options = [
-        "你首先注意到环境里最不合常理的细节。",
-        "你下意识检查随身物与退路，确认自己还能掌控什么。",
-        "你把同伴的动静放在余光里，独自判断这里是否安全。",
-        "你从自己的经历出发，意识到眼前的线索可能并不简单。",
+    scene_excerpt = _single_line(scene_text)[:420] or "主持端尚未写下更多场景细节。"
+    scene_name = str(scene.get("name") or "开场").strip()
+    name = _character_value(character, "name", "角色") or "角色"
+    role = _character_value(character, "role", "角色") or "角色"
+    public_role = _public_role_label(role)
+    role_suffix = f"（{public_role}）" if public_role else ""
+    personality = _clean_character_brief_text(_character_value(character, "personality", ""))
+    role_brief = _clean_character_brief_text(_character_value(character, "role_brief", "")) or personality
+    script_brief = _clean_character_brief_text(_character_value(character, "script_brief", ""))
+    opening_prompt = _clean_character_brief_text(_character_value(character, "opening_prompt", ""))
+    inventory = _inventory_brief_text(_character_value(character, "inventory", ""))
+    worldview = _clean_character_brief_text(_system_value(conn, "worldview"))
+    script_intro = script_brief or _single_line(worldview)[:780] or scene_excerpt
+    role_line = _brief_without_name_prefix(role_brief, name) if role_brief else ""
+    details = [
+        f"剧本简介：{_single_line(script_intro)[:900]}",
+        f"当前开局：{scene_excerpt}",
+        f"角色背景：{name}{role_suffix}。{_single_line(role_line)[:700] if role_line else '需要根据现场信息判断自己的立场、风险和可行动资源。'}",
     ]
-    focus = focus_options[int(seed[:2], 16) % len(focus_options)]
-    details = [f"{name}，你以「{role}」的身份进入「{scene_name}」。"]
-    if personality:
-        details.append(f"你的性格/背景提示是：{_single_line(personality)[:160]}。")
     if inventory:
-        details.append(f"你当前随身/状态记录：{_single_line(inventory)[:160]}。")
-    elif status and status != "active":
-        details.append(f"你当前状态为：{status}。")
-    details.append(focus)
-    details.append(f"从你的视角看，开场是这样的：{scene_excerpt}")
-    details.append("你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。")
-    return "\n".join(details)[:1800]
+        details.append(f"可用资源：{_single_line(inventory)[:300]}")
+    details.append(
+        f"开场白：{_single_line(opening_prompt)[:500] if opening_prompt else f'{name}已经进入「{scene_name}」。先确认当前目标、可互动对象、关键线索和最紧迫的风险，再结合自身身份与资源决定下一步行动。'}"
+    )
+    return "\n".join(details)[:2600]
+
+
+def _character_value(character: sqlite3.Row | dict[str, Any], key: str, default: Any = "") -> Any:
+    if isinstance(character, dict):
+        return character.get(key, default)
+    try:
+        return character[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _clean_character_brief_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"原始身份：剧本主要\s*(?:登场\s*)?NPC，可作为玩家扮演角色。[；;\s]*", "", text)
+    text = re.sub(r"原始身份：剧本主要\s*(?:登场\s*)?NPC[，,。；;\s]*", "", text)
+    text = re.sub(r"可作为玩家扮演角色。[；;\s]*", "", text)
+    text = re.sub(
+        r"【(?:AI|GM|KP|系统|推演|判定|规则系统|信息隔离|时间流速|禁止事项|基本设定|核心规则|导入|编辑|后台)[^】]*】.*?(?=\n【|\Z)",
+        "",
+        text,
+        flags=re.S | re.I,
+    )
+    text = re.split(r"(?:^|\s)(?:HP|SAN|MP|生命值|理智值)\s*(?:代表|[:：])", text, maxsplit=1, flags=re.I)[0]
+    text = re.split(
+        r"(?:AI|GM|KP|RAG|knowledge/|world_entities|lorebook|source_markdown|embedding|推演约束|系统提示|后台|知识库|核心规则|基本设定|禁止事项|HP\s*(?:代表|[:：])|SAN\s*(?:代表|[:：])|MP\s*(?:代表|[:：])|生命值|理智值|好感度)",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    text = re.sub(r"([。！？；，、,.!?;])\1+", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"[。；;]+$", "", text)
+
+
+def _brief_without_name_prefix(value: str, name: str) -> str:
+    text = _clean_character_brief_text(value)
+    label = re.escape(str(name or "").strip())
+    if label:
+        text = re.sub(rf"^{label}\s*[：:]\s*", "", text)
+        text = re.sub(rf"^{label}\s*[（(][^）)]*[）)]\s*[：:。]\s*", "", text)
+        text = re.sub(rf"^{label}\s*(?:与当前事件有直接关联。)?", "", text).strip()
+    text = re.sub(r"入场(?:后|时).*?(?:不需要预设唯一正确选择|判断下一步)[。；;]?", "", text)
+    return text.strip(" 。；;")
+
+
+def _inventory_brief_text(value: Any) -> str:
+    text = _clean_character_brief_text(value)
+    text = re.sub(r"^(?:身份|持有|物品|资源)[:：]\s*", "", text, flags=re.I)
+    return text.strip(" 。；;")
+
+
+def _public_role_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.upper() in {"PC", "NPC", "PLAYER"} else text
+
+
+def _humanize_player_action(action: str, *, actor_name: str = "", character_name: str = "") -> str:
+    text = _single_line(action)
+    text = re.sub(r"^AI[- ]?KP\s*记录了[^：:]*[：:]\s*", "", text, flags=re.I).strip()
+    text = re.sub(r"等待下一步裁定[。.]?$", "", text).strip()
+    actor = str(character_name or actor_name or "").strip()
+    if actor:
+        escaped = re.escape(actor)
+        text = re.sub(rf"^{escaped}\s*[（(]\s*(?:PC|NPC|PLAYER)\s*[）)]\s*[：:]\s*", f"{actor}：", text, flags=re.I)
+        text = re.sub(rf"^{escaped}\s*[：:]\s*", f"{actor}：", text)
+    text = re.sub(r"[（(]\s*(?:PC|NPC|PLAYER)\s*[）)]", "", text, flags=re.I)
+    text = re.sub(r"\b(?:PC|NPC|PLAYER)\s*判断\b", "自己的判断", text, flags=re.I)
+    text = re.sub(r"以([^，。；:：]+?)的个人目标为准，把现场线索和自己的判断联系起来，", r"\1结合现场线索与自己的目标，", text)
+    text = re.sub(r"以([^，。；:：]+?)的个人目标为准，把现场线索和.*?判断联系起来，", r"\1结合现场线索与自己的目标，", text)
+    text = re.sub(r"以([^，。；:：]+?)的判断，先", r"\1先", text)
+    text = re.sub(r"带着(?:PC|NPC|PLAYER|角色)的顾虑，尝试", "带着当前顾虑，尝试", text, flags=re.I)
+    text = re.sub(r"前往[:：]\s*([^。；，]+)", r"前往「\1」", text)
+    if actor:
+        escaped = re.escape(actor)
+        text = re.sub(rf"^{escaped}\s*[：:]\s*{escaped}", actor, text)
+        text = re.sub(rf"^{escaped}\s*[：:]\s*", actor, text)
+    text = re.sub(r"\s+", " ", text).strip(" 。；;")
+    text = re.sub(r"([。！？；，、,.!?;])\1+", r"\1", text)
+    return text[:1200]
+
+
+def _fallback_action_narration(req: PlayerActionRequest, action: str) -> str:
+    actor = (req.character_name or req.actor_name or "玩家").strip()
+    clean_action = _humanize_player_action(action, actor_name=req.actor_name, character_name=req.character_name)
+    if re.search(r"前往「([^」]+)」", clean_action):
+        destination = re.search(r"前往「([^」]+)」", clean_action).group(1)
+        return f"{actor}转向「{destination}」，开始靠近新的线索。现场的目光和阻力随之转移。"
+    if actor and clean_action.startswith(actor):
+        return f"{clean_action}。现场随之出现新的反应。"
+    return f"{actor}采取行动：{clean_action}。现场随之出现新的反应。"
+
+
+def _clean_ai_kp_narration(narration: Any, req: PlayerActionRequest, action: str) -> str:
+    raw_text = _single_line(str(narration or ""))
+    wrapped_template = bool(re.search(r"AI[- ]?KP\s*记录了|等待下一步裁定", raw_text, flags=re.I))
+    text = raw_text
+    text = re.sub(r"^AI[- ]?KP\s*记录了[^：:]*[：:]\s*", "", text, flags=re.I).strip()
+    text = re.sub(r"等待下一步裁定[。.]?$", "现场随之出现新的反应。", text).strip()
+    text = _humanize_player_action(text, actor_name=req.actor_name, character_name=req.character_name)
+    bad_pattern = r"\bAI[- ]?KP\b|AI-KP|等待下一步裁定|(?:PC|NPC|PLAYER)\s*判断|action_text|option_id|前往[:：]|[（(]\s*(?:PC|NPC|PLAYER)\s*[）)]"
+    template_pattern = r"个人目标为准|现场线索.*自己的目标|现场线索.*判断|把现场线索.*联系起来"
+    if not text or wrapped_template or re.search(bad_pattern, text, flags=re.I) or re.search(template_pattern, text, flags=re.I):
+        return _fallback_action_narration(req, action)
+    return text[:1800]
 
 
 def _stable_stat_seed(name: str) -> random.Random:
@@ -843,8 +1460,15 @@ def _normalize_player_characters(conn) -> None:
     if not chars:
         rng = _stable_stat_seed("默认调查员")
         conn.execute(
-            "INSERT INTO characters (name, role, hp, san, inventory, personality, status) VALUES (?,?,?,?,?,?,?)",
-            ("调查员", "PC", rng.randint(70, 100), rng.randint(55, 85), "", "", "active"),
+            "INSERT INTO characters "
+            "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "调查员", "PC", rng.randint(70, 100), rng.randint(55, 85), "",
+                "", "临时调查员，等待 GM 补充身份、关系和动机。",
+                _system_value(conn, "worldview")[:2200],
+                "先观察开场局势，确认任务来源、同行者和最直接的危险。", "active",
+            ),
         )
         return
     for char in chars:
@@ -865,7 +1489,10 @@ def _normalize_player_characters(conn) -> None:
 
 def _ensure_room_opening(conn, room) -> sqlite3.Row:
     _normalize_player_characters(conn)
-    scene_id = _int_or_none(room["current_scene_id"]) or _int_or_none(_system_value(conn, "player_current_scene_id")) or _first_scene_id(conn)
+    preferred_scene = _serialize_scene_for_players(conn, _int_or_none(room["current_scene_id"]) or _int_or_none(_system_value(conn, "player_current_scene_id")))
+    if not _scene_looks_player_visible(preferred_scene):
+        preferred_scene = _first_player_visible_scene(conn)
+    scene_id = _int_or_none((preferred_scene or {}).get("id")) or _first_scene_id(conn)
     if scene_id and not _int_or_none(room["current_scene_id"]):
         conn.execute(
             "UPDATE multiplayer_rooms SET current_scene_id=?, updated_at=? WHERE id=?",
@@ -896,6 +1523,9 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     current_room_id = room_map_id or _int_or_none(_system_value(conn, "current_room_id"))
     current_scene_id = room_scene_id or player_scene_id
     current_scene = _serialize_scene_for_players(conn, current_scene_id)
+    if not _scene_looks_player_visible(current_scene):
+        current_scene = _first_player_visible_scene(conn)
+        current_scene_id = _int_or_none((current_scene or {}).get("id")) or current_scene_id
 
     claims = _character_claims_for_room(conn, room_id) if room_id else []
     room_limits = _room_seat_info(conn, room_row, claims) if room_row else {
@@ -910,7 +1540,7 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     characters = [
         dict(r)
         for r in conn.execute(
-            "SELECT id, name, role, hp, san, inventory, personality, status FROM characters ORDER BY role, name"
+            "SELECT id, name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status FROM characters ORDER BY role, name"
         ).fetchall()
     ]
     for char in characters:
@@ -928,9 +1558,16 @@ def _build_game_state(conn, room_row=None) -> dict[str, Any]:
     active_characters = [c for c in characters if (c.get("status") or "active") != "hidden"]
     playable_characters = active_characters or characters
     map_room = _serialize_map_room(conn, current_room_id)
+    nodes = [
+        _serialize_scene_for_players(conn, int(row["id"]))
+        for row in conn.execute("SELECT id FROM nodes ORDER BY id").fetchall()
+    ]
+    nodes = [node for node in nodes if node]
     return {
         "current_scene_id": current_scene_id,
         "current_scene": current_scene,
+        "nodes": nodes,
+        "all_nodes": nodes,
         "scene_image": _system_value(conn, "player_scene_image") or (current_scene or {}).get("scene_image", ""),
         "scene_prompt": _system_value(conn, "player_scene_prompt"),
         "scene_ai_text": _system_value(conn, "player_scene_ai_text"),
@@ -951,6 +1588,8 @@ def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
     room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
     if not room:
         raise fastapi.HTTPException(status_code=404, detail="房间不存在")
+    _ensure_room_campaign_loaded(conn, room)
+    room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
     members = [
         _serialize_member(r)
         for r in conn.execute(
@@ -1001,6 +1640,13 @@ def _snapshot(conn, room_id: int, message_limit: int = 80) -> dict[str, Any]:
         "character_claims": claims,
         "checkpoint_count": checkpoint_count,
     }
+
+
+def _attach_room_access(snapshot: dict[str, Any], room, request: Request) -> dict[str, Any]:
+    room_data = snapshot.get("room")
+    if isinstance(room_data, dict):
+        room_data["can_manage"] = _has_room_owner_access(room, request) or _has_gm_access(room, _room_token_from_request(request))
+    return snapshot
 
 
 def _room_state_checkpoint(conn, room, label: str = "") -> int:
@@ -1111,8 +1757,9 @@ def _rollback_room_checkpoint(conn, room) -> dict[str, Any]:
     for c in snap.get("characters") or []:
         conn.execute(
             """
-            INSERT INTO characters (id,name,role,hp,san,inventory,personality,status)
-            VALUES (?,?,?,?,?,?,?,?)
+            INSERT INTO characters
+            (id,name,role,hp,san,inventory,personality,role_brief,script_brief,opening_prompt,status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 c.get("id"),
@@ -1122,6 +1769,9 @@ def _rollback_room_checkpoint(conn, room) -> dict[str, Any]:
                 c.get("san"),
                 c.get("inventory", ""),
                 c.get("personality", ""),
+                c.get("role_brief", ""),
+                c.get("script_brief", ""),
+                c.get("opening_prompt", ""),
                 c.get("status", "active"),
             ),
         )
@@ -1210,7 +1860,12 @@ def _remember_room_event(conn, room_code: str, text: str):
     if not _append_to_memory:
         return
     try:
-        _append_to_memory(conn, f"[多人房间 {room_code}] {text}")
+        owner_row = conn.execute(
+            "SELECT owner_account_id FROM multiplayer_rooms WHERE code=?",
+            (room_code,),
+        ).fetchone()
+        owner_account_id = _int_or_none(dict(owner_row).get("owner_account_id")) if owner_row else None
+        _append_to_memory(conn, f"[多人房间 {room_code}] {text}", owner_account_id=owner_account_id)
     except Exception as exc:
         _log.debug("room memory append skipped: %s", exc)
 
@@ -1271,7 +1926,7 @@ def _ensure_member(
             display_name = _normalize_display_name(client_existing["display_name"])
             color = client_existing["color"] or color
             restored_by_client = True
-    if existing and _display_name_key(existing["display_name"]) != _display_name_key(display_name):
+    if existing and not account_bound and _display_name_key(existing["display_name"]) != _display_name_key(display_name):
         existing_claim = conn.execute(
             "SELECT id FROM multiplayer_character_claims WHERE room_id=? AND player_id=? LIMIT 1",
             (room_id, player_id),
@@ -1301,7 +1956,18 @@ def _ensure_member(
             ).fetchone()
             if name_conflict:
                 raise fastapi.HTTPException(status_code=409, detail="这个昵称已经在房间中，请使用不同昵称")
-        if not existing and room is not None:
+        restored_claim_for_player = conn.execute(
+            "SELECT id FROM multiplayer_character_claims WHERE room_id=? AND player_id=? LIMIT 1",
+            (room_id, player_id),
+        ).fetchone()
+        is_room_owner_player = False
+        if room is not None and account_bound:
+            try:
+                is_room_owner_player = int(dict(room).get("owner_account_id") or 0) == int(player_id.split(":", 1)[1])
+            except (IndexError, TypeError, ValueError):
+                is_room_owner_player = False
+        is_room_manager = bool(room is not None and (_has_gm_access(room, room_token) or is_room_owner_player))
+        if not existing and room is not None and not restored_claim_for_player and not is_room_manager:
             seat_info = _room_seat_info(conn, room)
             if seat_info["joined_player_count"] >= seat_info["max_players"]:
                 raise fastapi.HTTPException(
@@ -1540,8 +2206,14 @@ def _format_character_changes(changes: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _ai_adjudicate_json(system_prompt: str, user_payload: dict[str, Any], fallback: str) -> dict[str, Any]:
-    if not ai_provider.is_configured():
+def _ai_adjudicate_json(
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    fallback: str,
+    *,
+    owner_account_id: int | None = None,
+) -> dict[str, Any]:
+    if not ai_provider.is_configured(owner_account_id=owner_account_id):
         return {"narration": fallback, "character_updates": []}
     try:
         resp = ai_provider.chat_completion(
@@ -1552,6 +2224,7 @@ def _ai_adjudicate_json(system_prompt: str, user_payload: dict[str, Any], fallba
             temperature=0.55,
             max_tokens=520,
             json_mode=True,
+            owner_account_id=owner_account_id,
         )
         raw = _strip_json_fence(resp.choices[0].message.content or "")
         data = json.loads(raw)
@@ -1567,10 +2240,22 @@ def _ai_adjudicate_json(system_prompt: str, user_payload: dict[str, Any], fallba
         return {"narration": fallback, "character_updates": []}
 
 
-async def _ai_adjudicate_json_async(system_prompt: str, user_payload: dict[str, Any], fallback: str) -> dict[str, Any]:
-    if not ai_provider.is_configured():
+async def _ai_adjudicate_json_async(
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    fallback: str,
+    *,
+    owner_account_id: int | None = None,
+) -> dict[str, Any]:
+    if not ai_provider.is_configured(owner_account_id=owner_account_id):
         return {"narration": fallback, "character_updates": []}
-    return await asyncio.to_thread(_ai_adjudicate_json, system_prompt, user_payload, fallback)
+    return await asyncio.to_thread(
+        _ai_adjudicate_json,
+        system_prompt,
+        user_payload,
+        fallback,
+        owner_account_id=owner_account_id,
+    )
 
 
 def _roll_adjudication_request(conn, room, roll: dict[str, Any], context: str) -> tuple[str, dict[str, Any], str]:
@@ -1586,6 +2271,7 @@ def _roll_adjudication_request(conn, room, roll: dict[str, Any], context: str) -
         "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}],"
         f"\"bgm_name\":\"可选，必须从这些曲名中选择：{BGM_TRACK_NAMES_TEXT}\"}}。"
         "默认只裁定 roll.character_id 对应角色的直接后果；只有行动明确影响其他角色时才写入其他角色。"
+        "叙述要聚焦骰点造成的可观察结果、环境/NPC反应和新的行动入口；不要复述角色背景或以人物卡介绍开头。"
         "只能改已有角色；没有明确后果时 character_updates 返回空数组；不要替玩家继续行动。"
         "bgm_name 可省略；若输出，必须选择最贴近当前氛围的一首，不要自造曲名。"
     )
@@ -1600,18 +2286,24 @@ def _roll_adjudication_request(conn, room, roll: dict[str, Any], context: str) -
 
 def _ai_roll_adjudication(conn, room, roll: dict[str, Any], context: str) -> dict[str, Any]:
     system_prompt, user_payload, fallback = _roll_adjudication_request(conn, room, roll, context)
-    return _ai_adjudicate_json(system_prompt, user_payload, fallback)
+    return _ai_adjudicate_json(system_prompt, user_payload, fallback, owner_account_id=_room_owner_account_id(room))
 
 
 async def _ai_roll_adjudication_async(conn, room, roll: dict[str, Any], context: str) -> dict[str, Any]:
     system_prompt, user_payload, fallback = _roll_adjudication_request(conn, room, roll, context)
-    return await _ai_adjudicate_json_async(system_prompt, user_payload, fallback)
+    return await _ai_adjudicate_json_async(
+        system_prompt,
+        user_payload,
+        fallback,
+        owner_account_id=_room_owner_account_id(room),
+    )
 
 
 def _player_action_adjudication_request(conn, room, req: PlayerActionRequest) -> tuple[str, dict[str, Any], str]:
     room_name = room["name"]
-    action = req.action.strip()
-    fallback = f"AI-KP 记录了{req.actor_name}的行动：{action}。等待下一步裁定。"
+    raw_action = req.action.strip()
+    action = _humanize_player_action(raw_action, actor_name=req.actor_name, character_name=req.character_name)
+    fallback = _fallback_action_narration(req, action)
     state = _build_game_state(conn, room)
     system_prompt = (
         "你是多人联机 TRPG 的 AI-KP。玩家只控制自己的角色；你负责建立场景、扮演 NPC/环境、"
@@ -1623,6 +2315,12 @@ def _player_action_adjudication_request(conn, room, req: PlayerActionRequest) ->
         "\"inventory\":\"新的物品/状态文本可省略\",\"reason\":\"改动原因\"}],"
         f"\"bgm_name\":\"可选，必须从这些曲名中选择：{BGM_TRACK_NAMES_TEXT}\"}}。"
         "默认只裁定 actor.character_id 对应角色的即时后果，不要把其他玩家的开场、行动或剧情推进混在一起。"
+        "叙述要像跑团主持人：描述可观察事实、NPC/环境反应、线索、压力和行动入口；"
+        "不要以“你是……”“你的背景……”“你以……身份……”等人物卡介绍开头，也不要替玩家决定感受、想法或下一步行动。"
+        "行动文本可能来自按钮模板；先把它改写成自然中文，不要原样复述模板。"
+        "严禁输出 PC/NPC/PLAYER、PC判断、NPC判断、action_text、option_id、"
+        "“AI-KP 记录了”“等待下一步裁定”等机械字样。"
+        "如果玩家选择移动或前往节点，用一句自然场景过渡描述，不要说“前往：xxx”。"
         "没有明确规则后果时不要改角色；需要检定时提出检定而不是代替玩家宣告成功。"
         "bgm_name 可省略；若输出，必须选择最贴近当前氛围的一首，不要自造曲名。"
     )
@@ -1636,6 +2334,7 @@ def _player_action_adjudication_request(conn, room, req: PlayerActionRequest) ->
         },
         "action_type": req.action_type,
         "action": action,
+        "raw_action": raw_action,
         "context": _trim_token_text(req.context, "multiplayer_context_chars", keep_tail=True),
         "game_state": state,
     }
@@ -1644,39 +2343,17 @@ def _player_action_adjudication_request(conn, room, req: PlayerActionRequest) ->
 
 def _ai_player_action_adjudication(conn, room, req: PlayerActionRequest) -> dict[str, Any]:
     system_prompt, user_payload, fallback = _player_action_adjudication_request(conn, room, req)
-    return _ai_adjudicate_json(system_prompt, user_payload, fallback)
+    return _ai_adjudicate_json(system_prompt, user_payload, fallback, owner_account_id=_room_owner_account_id(room))
 
 
 async def _ai_player_action_adjudication_async(conn, room, req: PlayerActionRequest) -> dict[str, Any]:
     system_prompt, user_payload, fallback = _player_action_adjudication_request(conn, room, req)
-    return await _ai_adjudicate_json_async(system_prompt, user_payload, fallback)
-
-
-def _ai_dice_feedback(room_name: str, roll: dict[str, Any], context: str) -> str:
-    if not ai_provider.is_configured():
-        return _deterministic_dice_feedback(room_name, roll)
-    prompt = (
-        "你是多人联机 TRPG 的 AI-KP。请根据骰点生成 1-2 句短叙事反馈，"
-        "承认骰点和成败，不要改写规则结果，不要继续替玩家行动。"
+    return await _ai_adjudicate_json_async(
+        system_prompt,
+        user_payload,
+        fallback,
+        owner_account_id=_room_owner_account_id(room),
     )
-    user = {
-        "room": room_name,
-        "roll": roll,
-        "context": _trim_token_text(context, "multiplayer_context_chars", keep_tail=True),
-    }
-    try:
-        resp = ai_provider.chat_completion(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ],
-            temperature=0.55,
-            max_tokens=220,
-        )
-        return (resp.choices[0].message.content or "").strip() or _deterministic_dice_feedback(room_name, roll)
-    except Exception as exc:
-        _log.warning("AI dice feedback failed: %s", exc)
-        return _deterministic_dice_feedback(room_name, roll)
 
 
 async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
@@ -1687,6 +2364,7 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
         "character_id": roll.get("character_id"),
         "character_name": roll.get("character_name", ""),
     }
+    actor_payload.update(_account_username_payload(conn, roll.get("actor_id", "")))
     dice_msg = _save_message(
         conn,
         room["id"],
@@ -1741,7 +2419,8 @@ async def _roll_and_record(conn, room, req: DiceRollRequest) -> dict[str, Any]:
 
 
 async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dict[str, Any]:
-    action = req.action.strip()
+    raw_action = req.action.strip()
+    action = _humanize_player_action(raw_action, actor_name=req.actor_name, character_name=req.character_name)
     if not action:
         raise fastapi.HTTPException(status_code=400, detail="行动不能为空")
     member = conn.execute(
@@ -1752,7 +2431,10 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
     if not member or member["role"] != "gm":
         claim = _single_character_claim_for_player(conn, room, req.actor_id, "player")
         req = _request_with_claim_actor(req, claim)
+        action = _humanize_player_action(raw_action, actor_name=req.actor_name, character_name=req.character_name)
+    req = req.copy(update={"action": action})
     actor_payload = _claim_actor_payload(req.actor_id, req.actor_name, claim)
+    actor_payload.update(_account_username_payload(conn, req.actor_id))
     _room_state_checkpoint(conn, room, "action")
     player_msg = _save_message(
         conn,
@@ -1765,6 +2447,7 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
             "source": "player_action",
             **actor_payload,
             "action_type": req.action_type,
+            "raw_action": raw_action,
             "context": req.context,
             "option_id": req.option_id,
             "next_node_id": req.next_node_id,
@@ -1774,7 +2457,7 @@ async def _adjudicate_player_action(conn, room, req: PlayerActionRequest) -> dic
     await _broadcast(room["id"], {"type": "message.created", "message": player_msg})
     adjudication = await _ai_player_action_adjudication_async(conn, room, req)
     changes = _apply_character_updates(conn, adjudication.get("character_updates"))
-    narration = adjudication.get("narration") or f"AI-KP 记录了{req.actor_name}的行动：{action}。"
+    narration = _clean_ai_kp_narration(adjudication.get("narration"), req, action)
     bgm_name = _apply_bgm_recommendation(conn, adjudication)
     payload = {
         "source": "player_action",
@@ -1847,57 +2530,128 @@ def multiplayer_health():
 
 
 @multiplayer_router.get("/api/multiplayer/rooms")
-def list_rooms():
+def list_rooms(request: Request):
+    account = require_account_from_request(request)
+    owner_account_id = int(account["id"])
+    player_id = account_player_id(account)
     with safe_db() as conn:
         rooms = [
             _serialize_room_with_limits(conn, r)
-            for r in conn.execute("SELECT * FROM multiplayer_rooms ORDER BY updated_at DESC, id DESC").fetchall()
+            for r in conn.execute(
+                """
+                SELECT DISTINCT r.*
+                FROM multiplayer_rooms r
+                LEFT JOIN multiplayer_members m
+                  ON m.room_id = r.id AND m.player_id = ?
+                WHERE r.owner_account_id IS NOT NULL
+                  AND (r.owner_account_id = ? OR m.id IS NOT NULL)
+                ORDER BY r.updated_at DESC, r.id DESC
+                """,
+                (player_id, owner_account_id),
+            ).fetchall()
         ]
     return {"status": "success", "rooms": rooms}
 
 
 @multiplayer_router.post("/api/multiplayer/rooms")
-def create_room(req: RoomCreateRequest):
+def create_room(req: RoomCreateRequest, request: Request):
+    account = require_account_from_request(request)
+    owner_account_id, owner_username, owner_display_name = _account_owner_columns(account)
     with safe_db() as conn:
-        code = _room_code()
-        while conn.execute("SELECT id FROM multiplayer_rooms WHERE code=?", (code,)).fetchone():
+        raw_settings = dict(req.settings) if isinstance(req.settings, dict) else {}
+        restore_state = raw_settings.pop("restore_state", None)
+        if not _restore_state_has_room_data(restore_state):
+            restore_state = raw_settings.pop("multiplayer_room_state", None)
+        if not _restore_state_has_room_data(restore_state):
+            restore_state = _restore_state_from_save_ref(conn, raw_settings.get("room_save_path") or raw_settings.get("room_save_name") or "")
+        requested_code = _normalize_room_code(req.restore_code or raw_settings.pop("restore_code", ""))
+        if requested_code and not _restore_state_has_room_data(restore_state):
+            raise fastapi.HTTPException(status_code=400, detail="恢复房间缺少存档状态")
+        if requested_code:
+            existing_room = conn.execute("SELECT * FROM multiplayer_rooms WHERE UPPER(code)=UPPER(?)", (requested_code,)).fetchone()
+            if existing_room:
+                if not (
+                    _has_room_owner_access(existing_room, request)
+                    or _has_gm_access(existing_room, _room_token_from_request(request))
+                ):
+                    raise fastapi.HTTPException(status_code=403, detail="只有房主可以恢复当前房间进度")
+                existing_settings = _load_json(existing_room["settings"], {})
+                existing_settings.update(raw_settings)
+                settings = _normalize_room_settings(conn, existing_settings)
+                campaign_path = str(settings.get("campaign_path") or req.campaign_path or existing_room["campaign_path"] or "").strip()[:240]
+                conn.execute(
+                    """
+                    UPDATE multiplayer_rooms
+                    SET name=COALESCE(?, name),
+                        campaign_path=COALESCE(NULLIF(?, ''), campaign_path),
+                        settings=?,
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        req.name[:80] if req.name else None,
+                        campaign_path,
+                        _dump_json(settings),
+                        _now(),
+                        existing_room["id"],
+                    ),
+                )
+                _restore_room_state_into_room(conn, int(existing_room["id"]), restore_state)
+                conn.commit()
+                room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (existing_room["id"],)).fetchone()
+                return {"status": "success", **_attach_room_access(_snapshot(conn, room["id"]), room, request)}
+        code = requested_code or _room_code()
+        while conn.execute("SELECT id FROM multiplayer_rooms WHERE UPPER(code)=UPPER(?)", (code,)).fetchone():
             code = _room_code()
         room_token = _new_token()
-        settings = _normalize_room_settings(conn, req.settings)
+        settings = _normalize_room_settings(conn, raw_settings)
         cur = conn.execute(
             """
-            INSERT INTO multiplayer_rooms (code, name, gm_name, campaign_path, settings, gm_token_hash)
-            VALUES (?,?,?,?,?,?)
+            INSERT INTO multiplayer_rooms
+            (code, name, gm_name, owner_account_id, owner_username, owner_display_name, campaign_path, settings, gm_token_hash)
+            VALUES (?,?,?,?,?,?,?,?,?)
             """,
             (
                 code,
                 req.name[:80],
                 req.gm_name[:40],
+                owner_account_id,
+                owner_username,
+                owner_display_name,
                 req.campaign_path[:240],
                 _dump_json(settings),
                 _hash_token(room_token),
             ),
         )
         room_id = cur.lastrowid
+        _restore_room_state_into_room(conn, int(room_id), restore_state)
         conn.commit()
-        return {"status": "success", "room_token": room_token, **_snapshot(conn, room_id)}
+        room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone()
+        return {"status": "success", "room_token": room_token, **_attach_room_access(_snapshot(conn, room_id), room, request)}
 
 
 @multiplayer_router.get("/api/multiplayer/rooms/{room_code}")
-def get_room(room_code: str):
+def get_room(room_code: str, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
-        return {"status": "success", **_snapshot(conn, room["id"])}
+        _require_room_reader(conn, room, request)
+        return {"status": "success", **_attach_room_access(_snapshot(conn, room["id"]), room, request)}
 
 
 @multiplayer_router.patch("/api/multiplayer/rooms/{room_code}")
 async def patch_room(room_code: str, req: RoomPatchRequest, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
-        _require_gm(room, _room_token_from_request(request))
+        room_id = int(room["id"])
+        _require_gm_or_owner(room, request)
         settings = _load_json(room["settings"], {})
         if req.settings:
             settings.update(req.settings)
+        restore_state = settings.pop("restore_state", None)
+        if not _restore_state_has_room_data(restore_state):
+            restore_state = settings.pop("multiplayer_room_state", None)
+        if not _restore_state_has_room_data(restore_state):
+            restore_state = _restore_state_from_save_ref(conn, settings.get("room_save_path") or settings.get("room_save_name") or "")
         settings = _normalize_room_settings(conn, settings)
         campaign_path = str(settings.get("campaign_path") or "").strip()[:240] or None
         conn.execute(
@@ -1921,9 +2675,12 @@ async def patch_room(room_code: str, req: RoomPatchRequest, request: Request):
                 room["id"],
             ),
         )
+        _restore_room_state_into_room(conn, room_id, restore_state)
         conn.commit()
-        snap = _snapshot(conn, room["id"])
-    await _broadcast(room["id"], {"type": "room.updated", "snapshot": snap})
+        room = conn.execute("SELECT * FROM multiplayer_rooms WHERE id=?", (room_id,)).fetchone() or room
+        snap = _attach_room_access(_snapshot(conn, room_id), room, request)
+        broadcast_snap = _snapshot(conn, room_id)
+    await _broadcast(room_id, {"type": "room.updated", "snapshot": broadcast_snap})
     return {"status": "success", **snap}
 
 
@@ -1941,15 +2698,16 @@ async def join_room(room_code: str, req: JoinRoomRequest, request: Request):
             room,
             _room_token_from_request(request),
         )
-        snap = _snapshot(conn, room["id"])
+        snap = _attach_room_access(_snapshot(conn, room["id"]), room, request)
     await _broadcast(room["id"], {"type": "member.updated", "member": member})
     return {"status": "success", "member": member, "member_token": member_token, **snap}
 
 
 @multiplayer_router.get("/api/multiplayer/rooms/{room_code}/messages")
-def get_messages(room_code: str, limit: int = Query(default=120, ge=1, le=500)):
+def get_messages(room_code: str, request: Request, limit: int = Query(default=120, ge=1, le=500)):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
+        _require_room_reader(conn, room, request)
         rows = conn.execute(
             "SELECT * FROM multiplayer_messages WHERE room_id=? ORDER BY id DESC LIMIT ?",
             (room["id"], limit),
@@ -1981,6 +2739,7 @@ async def post_message(room_code: str, req: MessageCreateRequest, request: Reque
         claim = _single_character_claim_for_player(conn, room, req.sender_id, role)
         sender_name = _claim_actor_name(claim, req.sender_name)
         actor_payload = _claim_actor_payload(req.sender_id, sender_name, claim)
+        actor_payload.update(_account_username_payload(conn, req.sender_id))
         if re.match(r"^[./!！。]\s*r(?:oll)?\b|^[./!！。]\s*r\d", content, re.I):
             dice_req = DiceRollRequest(
                 expression=content,
@@ -2042,9 +2801,10 @@ async def submit_player_action(room_code: str, req: PlayerActionRequest, request
 
 
 @multiplayer_router.get("/api/multiplayer/rooms/{room_code}/state")
-def get_room_game_state(room_code: str):
+def get_room_game_state(room_code: str, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
+        _require_room_reader(conn, room, request)
         return {"status": "success", "game_state": _build_game_state(conn, room)}
 
 
@@ -2107,7 +2867,7 @@ async def claim_room_characters(room_code: str, req: CharacterClaimRequest, requ
 
         placeholders = ",".join("?" for _ in character_ids)
         rows = conn.execute(
-            f"SELECT id, name, role, hp, san, inventory, personality, status FROM characters WHERE id IN ({placeholders})",
+            f"SELECT id, name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status FROM characters WHERE id IN ({placeholders})",
             character_ids,
         ).fetchall()
         row_by_id = {int(r["id"]): r for r in rows}
@@ -2271,9 +3031,10 @@ async def post_ai_kp_event(room_code: str, req: AiEventRequest, request: Request
 
 
 @multiplayer_router.get("/api/multiplayer/rooms/{room_code}/tokens")
-def get_tokens(room_code: str):
+def get_tokens(room_code: str, request: Request):
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
+        _require_room_reader(conn, room, request)
         rows = conn.execute(
             "SELECT * FROM multiplayer_tokens WHERE room_id=? ORDER BY kind, name",
             (room["id"],),
@@ -2403,11 +3164,12 @@ async def upload_scenario(
     chunks = _chunk_text(text, max_size=max(200, min(chunk_size, 2000)), overlap=max(0, min(chunk_overlap, 300)))
     if not chunks:
         raise fastapi.HTTPException(status_code=400, detail="文本切片失败")
-    embeddings = _get_embeddings(chunks) if _get_embeddings else []
 
     with safe_db() as conn:
         room = _room_by_code(conn, room_code)
         _require_gm(room, _room_token_from_request(request))
+        owner_account_id = _room_owner_account_id(room)
+        embeddings = _get_embeddings(chunks, owner_account_id=owner_account_id) if _get_embeddings else []
         doc_title = (title.strip() or filename)[:100]
         doc_source = f"room:{room['code']}:{(source.strip() or filename)[:180]}"
         cur = conn.execute(
@@ -2554,6 +3316,7 @@ async def room_websocket(
                     claim = _single_character_claim_for_player(conn, room, req.sender_id, meta.get("role", "player"))
                     sender_name = _claim_actor_name(claim, req.sender_name)
                     actor_payload = _claim_actor_payload(req.sender_id, sender_name, claim)
+                    actor_payload.update(_account_username_payload(conn, req.sender_id))
                     if re.match(r"^[./!！。]\s*r", content, re.I):
                         dice_req = DiceRollRequest(
                             expression=content,
@@ -2638,6 +3401,12 @@ async def room_websocket(
                         (room_id, token_id),
                     ).fetchone()
                     if row:
+                        _require_member_or_gm(
+                            conn,
+                            room,
+                            row["owner_id"],
+                            _ws_query_token(meta.get("member_token", "")),
+                        )
                         conn.execute(
                             "UPDATE multiplayer_tokens SET x=?, y=?, linked_room_id=COALESCE(?, linked_room_id), updated_at=? WHERE room_id=? AND token_id=?",
                             (req.x, req.y, req.linked_room_id, _now(), room_id, token_id),
@@ -2653,6 +3422,12 @@ async def room_websocket(
                 elif msg_type == "token.upsert":
                     payload = incoming.get("payload") or {}
                     req = TokenUpsertRequest(**payload)
+                    _require_member_or_gm(
+                        conn,
+                        room,
+                        req.owner_id,
+                        _ws_query_token(meta.get("member_token", "")),
+                    )
                     token_id = req.token_id or secrets.token_hex(6)
                     conn.execute(
                         """
@@ -2710,11 +3485,23 @@ async def room_websocket(
         meta = _ws_meta.pop(websocket, None)
         if meta:
             room_id = meta["room_id"]
+            player_id = meta["player_id"]
             _ws_clients_by_room.get(room_id, set()).discard(websocket)
+            still_connected = any(
+                other_meta.get("room_id") == room_id and other_meta.get("player_id") == player_id
+                for other_meta in _ws_meta.values()
+            )
             with safe_db() as conn:
-                conn.execute(
-                    "UPDATE multiplayer_members SET connected=0,last_seen=? WHERE room_id=? AND player_id=?",
-                    (_now(), room_id, meta["player_id"]),
-                )
+                if still_connected:
+                    conn.execute(
+                        "UPDATE multiplayer_members SET connected=1,last_seen=? WHERE room_id=? AND player_id=?",
+                        (_now(), room_id, player_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE multiplayer_members SET connected=0,last_seen=? WHERE room_id=? AND player_id=?",
+                        (_now(), room_id, player_id),
+                    )
                 conn.commit()
-            await _broadcast(room_id, {"type": "member.left", "player_id": meta["player_id"]})
+            if not still_connected:
+                await _broadcast(room_id, {"type": "member.left", "player_id": player_id})

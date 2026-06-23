@@ -1,9 +1,11 @@
 const { createApp, nextTick } = Vue;
     const API_BASE_URL = window.location.protocol.startsWith('http') ? window.location.origin : 'http://localhost:8000';
+    const MULTIPLAYER_ROOM_SAVE_PREFIX = '__room_mp_';
     const readStoredJson = (storage, key, fallback) => {
       try { return JSON.parse(storage.getItem(key) || '') || fallback; }
       catch (_) { return fallback; }
     };
+    const sanitizeRoomToken = value => String(value || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
     const readOrCreateClientId = () => {
       let id = localStorage.getItem('zric-mp-client-id') || '';
       if (!id) {
@@ -53,6 +55,9 @@ const { createApp, nextTick } = Vue;
           selectedCharacterIds: Array.isArray(tabSaved.characterIds) ? tabSaved.characterIds : [],
           characterClaimBusy: false,
           characterClaimMsg: '',
+          roomSaveBusy: false,
+          roomSaveMsg: '',
+          roomSaveOk: true,
           checkpointCount: 0,
           rollbackBusy: false,
           accountToken: localStorage.getItem('zric-auth-token') || '',
@@ -69,6 +74,7 @@ const { createApp, nextTick } = Vue;
           dossierTabs: [
             { id: 'worldview', label: '世界观', icon: 'ph-globe' },
             { id: 'map', label: '地图', icon: 'ph-map-trifold' },
+            { id: 'assets', label: '图片', icon: 'ph-images' },
             { id: 'knowledge', label: '知识库', icon: 'ph-database' },
             { id: 'lore', label: '百科', icon: 'ph-books' },
             { id: 'entities', label: '实体', icon: 'ph-graph' },
@@ -84,6 +90,13 @@ const { createApp, nextTick } = Vue;
           dossierSelectedDoc: null,
           dossierDocChunks: [],
           dossierLoadingDoc: false,
+          dossierAssets: [],
+          dossierAssetsLoading: false,
+          dossierAssetPreview: null,
+          dossierAssetPreviewIndex: 0,
+          dossierAssetZoom: 1,
+          dossierAssetPanX: 0,
+          dossierAssetPanY: 0,
           mapRooms: [],
           mapEdges: [],
           mapFloors: [1],
@@ -99,11 +112,16 @@ const { createApp, nextTick } = Vue;
           dossierMapPanning: false,
           dossierMapPanStart: { x: 0, y: 0, vx: 0, vy: 0, dragged: false },
           dossierMapSuppressClick: false,
+          dossierAssetPanning: false,
+          dossierAssetPanStart: { x: 0, y: 0, px: 0, py: 0 },
         };
       },
       watch: {
         profile: { deep: true, handler() { this.saveProfile(); } },
         selectedCharacterIds() { this.saveProfile(); },
+        hasLockedCharacters(locked, wasLocked) {
+          if (locked && !wasLocked) this.refreshPlayerLayout();
+        },
         bgmVolume(value) {
           const el = this.$refs.audioEl;
           if (el) el.volume = Number(value || 0.3);
@@ -129,7 +147,10 @@ const { createApp, nextTick } = Vue;
         },
         characterOpeningText() {
           const message = this.characterOpeningMessage;
-          if (message) return message.payload?.opening || message.content || '';
+          if (message) {
+            const opening = message.payload?.opening || message.content || '';
+            return this.isLegacyCharacterOpening(opening) ? this.localCharacterOpeningText() : opening;
+          }
           return this.localCharacterOpeningText();
         },
         hasPostOpeningSceneActivity() {
@@ -222,17 +243,17 @@ const { createApp, nextTick } = Vue;
           return this.messages.filter(msg => this.messageThreadActorId(msg) === selected);
         },
         visibleThreadMessages() {
-          return [...this.selectedThreadMessages].reverse();
+          return this.messagesNewestFirst(this.selectedThreadMessages);
         },
         tableMessages() {
-          return this.messages.filter(msg => msg.kind === 'chat' || this.isPublicTableMessage(msg)).slice(-50);
+          return this.messages.filter(msg => msg.kind === 'chat' || this.isPublicTableMessage(msg));
         },
         visibleTableMessages() {
-          return [...this.tableMessages].reverse();
+          return this.messagesNewestFirst(this.tableMessages).slice(0, 50);
         },
         sceneAiMessages() {
           const currentSceneId = Number(this.gameState?.current_scene_id || this.currentScene?.id || 0);
-          return this.messages.filter(msg => {
+          const messages = this.messages.filter(msg => {
             if (msg?.kind !== 'ai') return false;
             if (msg.pending || msg.payload?.pending) return false;
             const payload = msg.payload || {};
@@ -240,7 +261,8 @@ const { createApp, nextTick } = Vue;
             if (!['player_action', 'dice', 'scene_advance'].includes(source)) return false;
             const msgSceneId = Number(payload.current_scene_id || payload.scene_id || 0);
             return !currentSceneId || !msgSceneId || msgSceneId === currentSceneId;
-          }).slice(-6).reverse();
+          });
+          return this.messagesNewestFirst(messages).slice(0, 6);
         },
         maxPlayers() {
           return Number(this.room?.max_players || this.room?.settings?.max_players || this.playableCharacters.length || 1);
@@ -250,6 +272,21 @@ const { createApp, nextTick } = Vue;
         },
         joinedPlayerCount() {
           return Number(this.room?.joined_player_count ?? this.members.length ?? 0);
+        },
+        canSaveRoom() {
+          const room = this.room || {};
+          if (!room.code) return false;
+          return !!(room.can_manage || this.roomOwnerToken(room.code));
+        },
+        dossierFilteredAssets() {
+          const q = this.dossierSearch.toLowerCase();
+          return this.dossierAssets.filter(asset => {
+            const sceneText = (asset.scenes || []).map(scene => scene.name || '').join(' ');
+            return !q || `${asset.name || ''} ${sceneText}`.toLowerCase().includes(q);
+          });
+        },
+        dossierAssetTransform() {
+          return `translate3d(${this.dossierAssetPanX}px, ${this.dossierAssetPanY}px, 0) scale(${this.dossierAssetZoom})`;
         },
         playerSlotsRemaining() {
           const remaining = Number(this.room?.player_slots_remaining);
@@ -347,6 +384,54 @@ const { createApp, nextTick } = Vue;
         this.stopPresence();
       },
       methods: {
+        escapeHtml(value = '') {
+          return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        },
+        renderCampaignRichText(value = '', imageClass = 'dossier-image-block') {
+          const source = String(value || '');
+          const parts = [];
+          let last = 0;
+          const imageRe = /!\[([^\]]*)\]\((\/api\/campaign-assets\/[^)]+)\)/g;
+          let match;
+          while ((match = imageRe.exec(source)) !== null) {
+            if (match.index > last) parts.push(this.escapeHtml(source.slice(last, match.index)));
+            const alt = this.escapeHtml(match[1] || '剧本图片');
+            const src = this.escapeHtml(match[2].replace(/\s+/g, ''));
+            parts.push(`<figure class="${imageClass}"><img src="${src}" alt="${alt}" loading="lazy"><figcaption>${alt}</figcaption></figure>`);
+            last = match.index + match[0].length;
+          }
+          if (last < source.length) parts.push(this.escapeHtml(source.slice(last)));
+          return parts.join('').replace(/\n/g, '<br>');
+        },
+        renderDossierRichText(value = '') {
+          return this.renderCampaignRichText(value, 'dossier-image-block');
+        },
+        renderSceneRichText(value = '') {
+          return this.renderCampaignRichText(value, 'scene-image-block');
+        },
+        sanitizeLogText(value = '') {
+          const imageRefRe = /!\[[^\]]*\]\((?:\/api\/campaign-assets\/|images\/)[^)]+\)|!\[[^\]]*\]\((?:\/api\/campaign-assets\/|images\/)[^\s)]*|(?:\/api\/campaign-assets\/|images\/)[^\s)]+/gi;
+          const source = String(value ?? '');
+          const hadImageRef = imageRefRe.test(source) || /<details>\s*<summary>\s*(?:natural_image|text_image)\s*<\/summary>/i.test(source);
+          imageRefRe.lastIndex = 0;
+          const cleaned = source
+            .replace(/<details>\s*<summary>\s*(?:natural_image|text_image)\s*<\/summary>[\s\S]*?<\/details>/gi, '')
+            .replace(imageRefRe, '')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{2,}/g, '\n')
+            .replace(/[ \t]{2,}/g, ' ')
+            .trim();
+          return cleaned || (hadImageRef ? '（图片已略过，可在场景或资料册中查看）' : '');
+        },
+        displayMessageContent(message) {
+          const text = typeof message === 'string' ? message : message?.content;
+          return this.sanitizeLogText(text) || '（无文本内容）';
+        },
         applyAuthSession(data) {
           const account = data?.account;
           if (!account?.player_id) return;
@@ -507,12 +592,182 @@ const { createApp, nextTick } = Vue;
           const jsonBody = !(options.body instanceof FormData);
           const headers = jsonBody ? {'Content-Type': 'application/json'} : {};
           const roomCode = this.room?.code || this.extractRoomCode(path);
+          const stored = readStoredJson(localStorage, 'zric-mp-tokens', {});
+          const roomTokens = stored.roomTokens || {};
           if (this.accountToken) headers['X-Auth-Token'] = this.accountToken;
+          if (roomCode && roomTokens[roomCode]) headers['X-Room-Token'] = roomTokens[roomCode];
           if (roomCode && this.memberTokens[roomCode]) headers['X-Member-Token'] = this.memberTokens[roomCode];
           const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } });
           const data = await res.json().catch(() => ({}));
           if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '请求失败');
           return data;
+        },
+        roomSaveName(roomCode = this.room?.code || '') {
+          const clean = sanitizeRoomToken(roomCode);
+          return clean ? `${MULTIPLAYER_ROOM_SAVE_PREFIX}${clean}` : '';
+        },
+        roomOwnerToken(roomCode = this.room?.code || '') {
+          const code = String(roomCode || '').trim();
+          if (!code) return '';
+          const stored = readStoredJson(localStorage, 'zric-mp-tokens', {});
+          return String((stored.roomTokens || {})[code] || '');
+        },
+        setRoomSaveStatus(message, ok = true) {
+          this.roomSaveMsg = message || '';
+          this.roomSaveOk = !!ok;
+          this.characterClaimMsg = this.roomSaveMsg;
+        },
+        formatAssetSize(bytes = 0) {
+          const n = Number(bytes || 0);
+          if (!n) return '0 B';
+          if (n < 1024) return `${n} B`;
+          if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+          return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        },
+        async saveRoomProgress() {
+          if (!this.room?.code || this.roomSaveBusy) return;
+          const roomCode = this.room.code;
+          const roomToken = this.roomOwnerToken(roomCode);
+          if (!roomToken && !this.room?.can_manage) {
+            this.setRoomSaveStatus('只有房主可以保存当前房间进度', false);
+            return;
+          }
+          const saveName = this.roomSaveName(roomCode);
+          if (!saveName) return;
+          this.roomSaveBusy = true;
+          this.setRoomSaveStatus('正在保存房间进度...', true);
+          try {
+            const currentSettings = this.room.settings && typeof this.room.settings === 'object' ? this.room.settings : {};
+            const baseCampaignPath = String(
+              currentSettings.campaign_path
+              || this.room.campaign_path
+              || this.gameState?.base_campaign_path
+              || this.gameState?.current_campaign_path
+              || ''
+            ).replace(/\\/g, '/');
+            const exportRes = await fetch(`${API_BASE_URL}/api/game/export`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(this.accountToken ? { 'X-Auth-Token': this.accountToken } : {}),
+                ...(roomToken ? { 'X-Room-Token': roomToken } : {}),
+              },
+              body: JSON.stringify({ save_name: saveName, room_code: roomCode, base_campaign_path: baseCampaignPath }),
+            });
+            const exportData = await exportRes.json().catch(() => ({}));
+            if (!exportRes.ok || exportData.status !== 'success') {
+              throw new Error(exportData.detail || exportData.message || '房间存档失败');
+            }
+            const patchData = await this.api(`/api/multiplayer/rooms/${encodeURIComponent(this.room.code)}`, {
+              method: 'PATCH',
+              body: JSON.stringify({
+                settings: {
+                  ...currentSettings,
+                  campaign_path: currentSettings.campaign_path || this.room.campaign_path || baseCampaignPath || '',
+                  room_save_name: exportData.folder || saveName,
+                  room_save_path: exportData.path || currentSettings.room_save_path || '',
+                },
+              }),
+            });
+            this.applySnapshot(patchData);
+            this.setRoomSaveStatus(`房间 ${this.room.code} 进度已保存`, true);
+          } catch (err) {
+            this.setRoomSaveStatus(err.message || '房间存档失败', false);
+          } finally {
+            this.roomSaveBusy = false;
+          }
+        },
+        async fetchCampaignAssets() {
+          this.dossierAssetsLoading = true;
+          try {
+            const res = await fetch(`${API_BASE_URL}/api/game/campaign-assets`, {
+              headers: this.accountToken ? { 'X-Auth-Token': this.accountToken } : {},
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok && data.status === 'success') {
+              this.dossierAssets = Array.isArray(data.assets) ? data.assets : [];
+              if (this.dossierAssetPreview) {
+                const refreshed = this.dossierAssets.find(asset => asset.name === this.dossierAssetPreview.name);
+                if (refreshed) this.dossierAssetPreview = refreshed;
+                else this.closeDossierAssetPreview();
+              }
+            } else {
+              this.dossierAssets = [];
+            }
+          } catch (_) {
+            this.dossierAssets = [];
+          } finally {
+            this.dossierAssetsLoading = false;
+          }
+        },
+        openDossierAssetPreview(asset) {
+          if (!asset) return;
+          const idx = this.dossierFilteredAssets.findIndex(item => item.name === asset.name);
+          this.dossierAssetPreviewIndex = idx >= 0 ? idx : 0;
+          this.dossierAssetPreview = asset;
+          this.resetDossierAssetView();
+        },
+        closeDossierAssetPreview() {
+          this.dossierAssetPreview = null;
+          this.resetDossierAssetView();
+        },
+        stepDossierAssetPreview(delta) {
+          const list = this.dossierFilteredAssets;
+          if (!list.length) return this.closeDossierAssetPreview();
+          const next = (this.dossierAssetPreviewIndex + delta + list.length) % list.length;
+          this.dossierAssetPreviewIndex = next;
+          this.dossierAssetPreview = list[next];
+          this.resetDossierAssetView();
+        },
+        resetDossierAssetView() {
+          this.dossierAssetZoom = 1;
+          this.dossierAssetPanX = 0;
+          this.dossierAssetPanY = 0;
+          this.dossierAssetPanning = false;
+        },
+        setDossierAssetZoom(value) {
+          const next = Math.min(5, Math.max(0.5, Number(value) || 1));
+          this.dossierAssetZoom = Math.round(next * 100) / 100;
+          if (this.dossierAssetZoom <= 1) {
+            this.dossierAssetPanX = 0;
+            this.dossierAssetPanY = 0;
+          }
+        },
+        zoomDossierAsset(delta) {
+          this.setDossierAssetZoom(this.dossierAssetZoom + delta);
+        },
+        toggleDossierAssetZoom() {
+          if (this.dossierAssetZoom <= 1.05) this.setDossierAssetZoom(2);
+          else this.resetDossierAssetView();
+        },
+        dossierAssetEventPoint(event) {
+          if (event?.touches?.length) return event.touches[0];
+          if (event?.changedTouches?.length) return event.changedTouches[0];
+          return event || { clientX: 0, clientY: 0 };
+        },
+        dossierAssetOnWheel(event) {
+          this.zoomDossierAsset(event.deltaY > 0 ? -0.15 : 0.15);
+        },
+        dossierAssetStartPan(event) {
+          if (this.dossierAssetZoom <= 1) return;
+          if (event.button !== undefined && event.button !== 0) return;
+          const point = this.dossierAssetEventPoint(event);
+          this.dossierAssetPanning = true;
+          this.dossierAssetPanStart = {
+            x: point.clientX,
+            y: point.clientY,
+            px: this.dossierAssetPanX,
+            py: this.dossierAssetPanY,
+          };
+        },
+        dossierAssetMovePan(event) {
+          if (!this.dossierAssetPanning) return;
+          const point = this.dossierAssetEventPoint(event);
+          this.dossierAssetPanX = this.dossierAssetPanStart.px + (point.clientX - this.dossierAssetPanStart.x);
+          this.dossierAssetPanY = this.dossierAssetPanStart.py + (point.clientY - this.dossierAssetPanStart.y);
+        },
+        dossierAssetEndPan() {
+          this.dossierAssetPanning = false;
         },
         async fetchStatLabels() {
           try {
@@ -605,6 +860,7 @@ const { createApp, nextTick } = Vue;
             await Promise.all([this.fetchMapData(), this.fetchWorldEntities(), this.fetchTimelines()]);
             this.scheduleDossierMapFit();
           }
+          if (tab === 'assets') await this.fetchCampaignAssets();
           if (tab === 'knowledge') {
             await this.fetchRagDocuments();
             const firstDoc = this.dossierVisibleRagDocuments[0];
@@ -627,6 +883,7 @@ const { createApp, nextTick } = Vue;
         },
         dossierTabCount(tabId) {
           if (tabId === 'map') return this.mapRooms.length || '';
+          if (tabId === 'assets') return this.dossierAssets.length || '';
           if (tabId === 'knowledge') return this.ragDocuments.filter(doc => !doc.hidden).length || '';
           if (tabId === 'lore') return this.lorebook.length || '';
           if (tabId === 'entities') return this.worldEntities.length || '';
@@ -821,7 +1078,14 @@ const { createApp, nextTick } = Vue;
         },
         applySnapshot(data) {
           this.syncJoinedMember(data);
-          this.room = data.room || this.room;
+          if (data.room) {
+            const previousCanManage = !!this.room?.can_manage;
+            const nextRoom = data.room || {};
+            this.room = {
+              ...nextRoom,
+              can_manage: nextRoom.can_manage !== undefined ? !!nextRoom.can_manage : previousCanManage,
+            };
+          }
           this.gameState = data.game_state || this.gameState || {};
           this.members = data.members || this.members;
           this.messages = data.messages || this.messages;
@@ -831,6 +1095,13 @@ const { createApp, nextTick } = Vue;
           if (this.hasLockedCharacters) this.selectedCharacterIds = [...this.lockedCharacterIds];
           this.pruneSelectedCharacters();
           this.syncBgmElement();
+          this.scrollMessages();
+        },
+        async refreshPlayerLayout() {
+          await nextTick();
+          const shell = this.$el?.querySelector?.('.solo-play-shell');
+          if (shell) void shell.offsetWidth;
+          window.dispatchEvent(new Event('resize'));
           this.scrollMessages();
         },
         syncBgmElement() {
@@ -1119,6 +1390,10 @@ const { createApp, nextTick } = Vue;
           const actor = payload.character_name || payload.actor_name || '';
           return actor ? `AI-GM · ${actor}` : (msg?.sender_name || 'AI-GM');
         },
+        tableMessageSenderName(msg) {
+          const payload = msg?.payload || {};
+          return payload.account_username || payload.username || msg?.sender_name || this.messageKindLabel(msg?.kind);
+        },
         messageBelongsToMe(msg) {
           const payload = msg?.payload || {};
           const playerId = String(this.profile.id || '');
@@ -1148,34 +1423,88 @@ const { createApp, nextTick } = Vue;
         compactText(value, max = 220) {
           return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
         },
+        isInternalSceneName(name = '') {
+          return /守秘人|GM|KP|幕后|真相|后台|导入|索引|规则说明|系统信息/i.test(String(name || ''));
+        },
+        sceneLooksPlayerVisible(scene = {}) {
+          if (!scene || this.isInternalSceneName(scene.name)) return false;
+          const sample = this.compactText(`${scene.summary || ''} ${scene.content || ''}`, 700);
+          return !/(?:守秘人|KP|GM|主持|英雄们|模组|危险的谎言|邪恶的超自然力量|玩家们|NPC角色)/i.test(sample);
+        },
+        firstPlayerVisibleScene() {
+          const scenes = this.gameState?.nodes || this.gameState?.all_nodes || [];
+          return scenes.find(scene => this.sceneLooksPlayerVisible(scene)) || scenes[0] || null;
+        },
+        cleanCharacterBriefText(value = '') {
+          return String(value || '')
+            .replace(/原始身份：剧本主要\s*(?:登场\s*)?NPC，可作为玩家扮演角色。[；;\s]*/g, '')
+            .replace(/原始身份：剧本主要\s*(?:登场\s*)?NPC[，,。；;\s]*/g, '')
+            .replace(/可作为玩家扮演角色。[；;\s]*/g, '')
+            .replace(/【(?:AI|GM|KP|系统|推演|判定|规则系统|信息隔离|时间流速|禁止事项|基本设定|核心规则|导入|编辑|后台)[^】]*】[\s\S]*?(?=\n【|$)/gi, '')
+            .split(/(?:^|\s)(?:HP|SAN|MP|生命值|理智值)\s*(?:代表|[:：])/i)[0]
+            .split(/(?:AI|GM|KP|RAG|knowledge\/|world_entities|lorebook|source_markdown|embedding|推演约束|系统提示|后台|知识库|核心规则|基本设定|禁止事项|HP\s*(?:代表|[:：])|SAN\s*(?:代表|[:：])|MP\s*(?:代表|[:：])|生命值|理智值|好感度)/i)[0]
+            .replace(/([。！？；，、,.!?;])\1+/g, '$1')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/[。；;]+$/g, '');
+        },
+        briefWithoutNamePrefix(value = '', name = '') {
+          const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          let text = this.cleanCharacterBriefText(value);
+          if (escaped) {
+            text = text
+              .replace(new RegExp(`^${escaped}\\s*[：:]\\s*`), '')
+              .replace(new RegExp(`^${escaped}\\s*[（(][^）)]*[）)]\\s*[：:。]\\s*`), '')
+              .replace(new RegExp(`^${escaped}\\s*(?:与当前事件有直接关联。)?`), '');
+          }
+          return text
+            .replace(/入场(?:后|时).*?(?:不需要预设唯一正确选择|判断下一步)[。；;]?/g, '')
+            .trim()
+            .replace(/[。；;]+$/g, '');
+        },
+        inventoryBriefText(value = '') {
+          return this.cleanCharacterBriefText(value)
+            .replace(/^(?:身份|持有|物品|资源)[:：]\s*/i, '')
+            .trim()
+            .replace(/[。；;]+$/g, '');
+        },
+        isLegacyCharacterOpening(value = '') {
+          return /角色倾向：|随身\/状态：|已经在场|原始身份：|你以.*身份进入|你的(?:性格|背景|随身)/.test(String(value || ''));
+        },
         characterSeed(char, extra = '') {
           const source = `${char?.id || ''}|${char?.name || ''}|${char?.role || ''}|${char?.personality || ''}|${char?.inventory || ''}|${extra}`;
           return Array.from(source).reduce((sum, ch, idx) => sum + ch.charCodeAt(0) * (idx + 1), 0);
         },
-        characterAngleLine(char, extra = '') {
-          const name = char?.name || '角色';
-          const role = char?.role || '角色';
-          const hooks = [
-            `${name}会先用「${role}」的专业/本能判断眼前风险。`,
-            `${name}更在意哪些细节会影响自己的秘密、目标或安全。`,
-            `${name}会从同伴的反应里寻找可以利用或必须警惕的信号。`,
-            `${name}会优先确认退路、资源，以及自己还能掌控的东西。`,
-            `${name}会把现场异常和自身经历联系起来，而不是只看表面。`,
-          ];
-          return hooks[this.characterSeed(char, extra) % hooks.length];
-        },
         localCharacterOpeningText() {
-          const char = this.selectedCharacters[0];
+          const chars = this.selectedCharacters;
+          if (!chars.length) return '';
+          const scene = this.sceneLooksPlayerVisible(this.currentScene) ? (this.currentScene || {}) : (this.firstPlayerVisibleScene() || this.currentScene || {});
+          const publicText = this.sceneLooksPlayerVisible(scene)
+            ? (scene.expanded_content || this.gameState?.scene_ai_text || scene.content || '')
+            : (this.publicSceneText || '主持端尚未写下更多场景细节。');
+          return chars.map(char => this.characterEntryBriefing(char, scene, publicText)).filter(Boolean).join('\n\n');
+        },
+        characterEntryBriefing(char, scene = {}, publicText = '') {
           if (!char) return '';
-          const scene = this.currentScene || {};
+          const name = char.name || '角色';
+          const role = char.role || '角色';
+          const roleSuffix = ['PC', 'NPC'].includes(String(role || '').toUpperCase()) ? '' : `（${role}）`;
           const sceneName = scene.name || '开场';
-          const publicText = this.publicSceneText || '主持端尚未写下更多场景细节，你先从自己的视角观察当下。';
-          const details = [`${char.name || '角色'}，你以「${char.role || '角色'}」的身份进入「${sceneName}」。`];
-          if (char.personality) details.push(`你的性格/背景提示是：${this.compactText(char.personality, 160)}。`);
-          if (char.inventory) details.push(`你当前随身/状态记录：${this.compactText(char.inventory, 160)}。`);
-          details.push(this.characterAngleLine(char, sceneName));
-          details.push(`从你的视角看，开场是这样的：${this.compactText(publicText, 420)}`);
-          details.push('你可以先用自己的角色口吻描述反应，或直接提交一次行动交给 AI-GM 单独裁定。');
+          const personality = this.cleanCharacterBriefText(char.personality);
+          const roleBrief = this.briefWithoutNamePrefix(char.role_brief, name) || this.briefWithoutNamePrefix(personality, name);
+          const scriptBrief = this.cleanCharacterBriefText(char.script_brief);
+          const openingPrompt = this.cleanCharacterBriefText(char.opening_prompt);
+          const inventory = this.inventoryBriefText(char.inventory);
+          const worldviewBrief = this.compactText(this.cleanCharacterBriefText(this.worldviewContent || ''), 780);
+          const sceneBrief = this.compactText(publicText, 420) || '主持端尚未写下更多场景细节。';
+          const scriptIntro = scriptBrief || worldviewBrief || sceneBrief;
+          const details = [
+            `剧本简介：${this.compactText(scriptIntro, 900)}`,
+            `当前开局：${sceneBrief}`,
+            `角色背景：${name}${roleSuffix}。${roleBrief ? this.compactText(roleBrief, 700) : '需要根据现场信息判断自己的立场、风险和可行动资源。'}`,
+          ];
+          if (inventory) details.push(`可用资源：${this.compactText(inventory, 300)}`);
+          details.push(`开场白：${openingPrompt ? this.compactText(openingPrompt, 500) : `${name}已经进入「${sceneName}」。先确认当前目标、可互动对象、关键线索和最紧迫的风险，再结合自身身份与资源决定下一步行动。`}`);
           return details.join('\n');
         },
         characterPerspectiveOptions(char, options, sceneText = '') {
@@ -1183,20 +1512,19 @@ const { createApp, nextTick } = Vue;
           if (!char) return list.map(opt => ({ ...opt, visible_text: opt.text, action_text: opt.text }));
           return list.map((opt, idx) => {
             const rawText = this.compactText(opt?.text, 180) || '自由行动';
-            const role = char.role || '角色';
             const name = char.name || '角色';
             const lenses = [
-              `以${role}的判断，先${rawText}`,
-              `从${name}自己的处境出发，${rawText}`,
-              `带着${role}的顾虑，尝试${rawText}`,
-              `优先确认这对${name}意味着什么，再${rawText}`,
-              `以${name}的个人目标为准，把现场线索和${role}判断联系起来，${rawText}`,
+              `${name}先${rawText}`,
+              `${name}观察周围反应后，${rawText}`,
+              `${name}带着当前顾虑，尝试${rawText}`,
+              `${name}确认眼前风险后，${rawText}`,
+              `${name}抓住当前机会，${rawText}`,
             ];
             const visibleText = lenses[(this.characterSeed(char, `${idx}|${rawText}|${sceneText}`) + idx) % lenses.length];
             return {
               ...opt,
               visible_text: visibleText,
-              action_text: `${name}（${role}）：${visibleText}`,
+              action_text: visibleText,
             };
           });
         },
@@ -1286,6 +1614,17 @@ const { createApp, nextTick } = Vue;
         },
         statusLabel(status) { return ({ active: '在场', hidden: '未登场', benched: '暂离', dead: '死亡' })[status || 'active'] || status || '在场'; },
         messageKindLabel(kind) { return ({ action: '行动', ai: 'AI-GM', dice: '骰子', state: '状态', system: '系统', chat: '公屏' })[kind] || kind || '消息'; },
+        messageSortValue(message) {
+          const numericId = Number(message?.id);
+          if (Number.isFinite(numericId) && numericId > 0) return numericId * 1000;
+          const parsed = Date.parse(message?.created_at || '');
+          if (Number.isFinite(parsed)) return parsed;
+          const localTime = String(message?.id || '').match(/(\d{12,})/);
+          return localTime ? Number(localTime[1]) : 0;
+        },
+        messagesNewestFirst(messages = []) {
+          return [...messages].sort((a, b) => this.messageSortValue(b) - this.messageSortValue(a));
+        },
         shortTime(value) {
           const text = String(value || '');
           const match = text.match(/(\d{2}:\d{2})(?::\d{2})?/);

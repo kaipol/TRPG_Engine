@@ -1,5 +1,5 @@
 /*
- * Local utility subset used by legacy static pages.
+ * Local utility subset used by bundled static pages.
  * This replaces the Tailwind CDN runtime without introducing a build step.
  */
 .fixed { position: fixed; }

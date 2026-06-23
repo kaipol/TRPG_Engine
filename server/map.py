@@ -5,7 +5,7 @@ Z.R.I.C 引擎 — 地图系统模块 (map.py)
 """
 
 import fastapi
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 import sqlite3
 import json
@@ -22,6 +22,7 @@ map_router = APIRouter(tags=["地图系统"])
 # ---------------------------------------------------------
 from contextlib import contextmanager
 from .logger import get_logger
+from .auth import require_account_from_request
 
 _log = get_logger("map")
 
@@ -38,6 +39,11 @@ def get_db_connection():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
+
+
+def _require_write_account(request: Request):
+    """地图编辑会改变共享剧本状态，允许普通账号但不允许匿名写入。"""
+    require_account_from_request(request)
 
 @contextmanager
 def safe_db():
@@ -359,7 +365,8 @@ def map_get_rooms(map_id: int = 1):
 
 
 @map_router.post("/api/map/rooms")
-def map_create_room(req: MapRoomCreateRequest):
+def map_create_room(req: MapRoomCreateRequest, request: Request):
+    _require_write_account(request)
     conn = get_db_connection()
     cur = conn.execute(
         "INSERT INTO map_rooms (map_id,label,x,y,w,h,description,state,color,node_id,floor) "
@@ -373,7 +380,8 @@ def map_create_room(req: MapRoomCreateRequest):
 
 
 @map_router.put("/api/map/rooms/{room_id}")
-def map_update_room(room_id: int, req: MapRoomUpdateRequest):
+def map_update_room(room_id: int, req: MapRoomUpdateRequest, request: Request):
+    _require_write_account(request)
     conn = get_db_connection()
     conn.execute(
         "UPDATE map_rooms SET label=?,x=?,y=?,w=?,h=?,description=?,state=?,color=?,node_id=?,floor=? "
@@ -386,7 +394,8 @@ def map_update_room(room_id: int, req: MapRoomUpdateRequest):
 
 
 @map_router.delete("/api/map/rooms/{room_id}")
-def map_delete_room(room_id: int):
+def map_delete_room(room_id: int, request: Request):
+    _require_write_account(request)
     conn = get_db_connection()
     conn.execute("DELETE FROM map_rooms WHERE id=?", (room_id,))
     conn.execute("DELETE FROM map_edges WHERE from_id=? OR to_id=?", (room_id, room_id))
@@ -395,7 +404,8 @@ def map_delete_room(room_id: int):
 
 
 @map_router.post("/api/map/edges")
-def map_create_edge(req: MapEdgeCreateRequest):
+def map_create_edge(req: MapEdgeCreateRequest, request: Request):
+    _require_write_account(request)
     conn = get_db_connection()
     exists = conn.execute(
         "SELECT id FROM map_edges WHERE map_id=? AND "
@@ -417,7 +427,8 @@ def map_create_edge(req: MapEdgeCreateRequest):
 
 
 @map_router.put("/api/map/edges/{edge_id}")
-def map_update_edge(edge_id: int, req: MapEdgeUpdateRequest):
+def map_update_edge(edge_id: int, req: MapEdgeUpdateRequest, request: Request):
+    _require_write_account(request)
     conn = get_db_connection()
     conn.execute(
         "UPDATE map_edges SET label=?,locked=?,key_item=?,edge_type=? WHERE id=?",
@@ -427,8 +438,18 @@ def map_update_edge(edge_id: int, req: MapEdgeUpdateRequest):
     return {"status": "success"}
 
 
+@map_router.delete("/api/map/edges/{edge_id}")
+def map_delete_edge(edge_id: int, request: Request):
+    _require_write_account(request)
+    conn = get_db_connection()
+    conn.execute("DELETE FROM map_edges WHERE id=?", (edge_id,))
+    conn.commit(); conn.close()
+    return {"status": "success"}
+
+
 @map_router.post("/api/map/move")
-def map_move_to_room(room_id: int, timeline_id: int | None = None):
+def map_move_to_room(room_id: int, request: Request, timeline_id: int | None = None):
+    _require_write_account(request)
     """
     玩家移动到指定房间，更新当前位置并标记为已探索。
     timeline_id 不为空时只更新该时间线的坐标（分头行动模式）；
@@ -454,7 +475,8 @@ def map_move_to_room(room_id: int, timeline_id: int | None = None):
 
 
 @map_router.post("/api/map/auto-room")
-def map_auto_room(req: MapAutoRoomRequest):
+def map_auto_room(req: MapAutoRoomRequest, request: Request):
+    _require_write_account(request)
     """推演时自动在父房间旁边生长新房间。"""
     conn = get_db_connection()
     new_id = auto_place_room(
@@ -468,7 +490,8 @@ def map_auto_room(req: MapAutoRoomRequest):
 
 
 @map_router.put("/api/map/rooms/{room_id}/state")
-def map_set_room_state(room_id: int, state: str):
+def map_set_room_state(room_id: int, state: str, request: Request):
+    _require_write_account(request)
     """快速更新房间状态（unknown/explored/locked/active）。"""
     if state not in ("unknown", "explored", "locked", "active"):
         raise fastapi.HTTPException(status_code=400, detail="非法状态值")
@@ -482,7 +505,8 @@ def map_set_room_state(room_id: int, state: str):
 # 独立地图文件 I/O API（前端可直接调用）
 # ---------------------------------------------------------
 @map_router.post("/api/map/export-file")
-def map_export_file():
+def map_export_file(request: Request):
+    _require_write_account(request)
     """将当前地图导出为独立 JSON 文件。"""
     conn = get_db_connection()
     data = export_map_data(conn)
@@ -491,7 +515,8 @@ def map_export_file():
 
 
 @map_router.post("/api/map/import-file")
-def map_import_file(data: dict):
+def map_import_file(data: dict, request: Request):
+    _require_write_account(request)
     """从前端上传的 JSON 导入地图数据（先清空旧地图）。"""
     conn = get_db_connection()
     clear_map_data(conn)

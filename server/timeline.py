@@ -9,10 +9,11 @@ import json
 import sqlite3
 import fastapi
 from contextlib import contextmanager
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from .logger import get_logger
 from . import ai_provider
+from .auth import require_account_from_request
 
 _log = get_logger("timeline")
 
@@ -97,7 +98,8 @@ def get_timelines():
 
 
 @timeline_router.post("/api/timelines")
-def create_timeline(req: TimelineCreateRequest):
+def create_timeline(req: TimelineCreateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         node_id = req.current_node_id if req.current_node_id else None
         if node_id and not conn.execute("SELECT id FROM nodes WHERE id=?", (node_id,)).fetchone():
@@ -113,7 +115,8 @@ def create_timeline(req: TimelineCreateRequest):
 
 
 @timeline_router.put("/api/timelines/{tl_id}")
-def update_timeline(tl_id: int, req: TimelineUpdateRequest):
+def update_timeline(tl_id: int, req: TimelineUpdateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute(
             "UPDATE timelines SET label=?, color=?, char_ids=?, status=? WHERE id=?",
@@ -124,7 +127,8 @@ def update_timeline(tl_id: int, req: TimelineUpdateRequest):
 
 
 @timeline_router.delete("/api/timelines/{tl_id}")
-def delete_timeline(tl_id: int):
+def delete_timeline(tl_id: int, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM timelines WHERE id=?", (tl_id,))
         conn.commit()
@@ -132,14 +136,15 @@ def delete_timeline(tl_id: int):
 
 
 @timeline_router.post("/api/timelines/{tl_id}/jump")
-def timeline_jump(tl_id: int, req: TimelineJumpRequest):
+def timeline_jump(tl_id: int, req: TimelineJumpRequest, request: Request):
+    owner_account_id = int(require_account_from_request(request)["id"])
     with safe_db() as conn:
         node = conn.execute("SELECT * FROM nodes WHERE id=?", (req.node_id,)).fetchone()
         if not node:
             raise fastapi.HTTPException(status_code=400, detail="节点不存在")
         conn.execute("UPDATE timelines SET current_node_id=? WHERE id=?", (req.node_id, tl_id))
         if _fn_tl_append_memory:
-            _fn_tl_append_memory(conn, tl_id, f"时间线跳转至场景[{node['name']}]")
+            _fn_tl_append_memory(conn, tl_id, f"时间线跳转至场景[{node['name']}]", owner_account_id=owner_account_id)
         conn.commit()
     return {"status": "success"}
 
@@ -152,7 +157,8 @@ def get_timeline_memory(tl_id: int):
 
 
 @timeline_router.put("/api/timelines/{tl_id}/memory")
-def update_timeline_memory(tl_id: int, req: StringContentRequest):
+def update_timeline_memory(tl_id: int, req: StringContentRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("UPDATE timelines SET memory=? WHERE id=?", (req.content, tl_id))
         conn.commit()
@@ -160,8 +166,9 @@ def update_timeline_memory(tl_id: int, req: StringContentRequest):
 
 
 @timeline_router.post("/api/timelines/merge")
-def merge_timelines(req: TimelineMergeRequest):
+def merge_timelines(req: TimelineMergeRequest, request: Request):
     """将 source 时间线的记忆合并入 target，然后标记 source 为 merged。"""
+    owner_account_id = int(require_account_from_request(request)["id"])
     conn = get_db_connection()
     try:
         src = conn.execute("SELECT * FROM timelines WHERE id=?", (req.source_id,)).fetchone()
@@ -183,6 +190,7 @@ def merge_timelines(req: TimelineMergeRequest):
                         f"【主线记忆】\n{merged_mem}\n\n【合并记忆（来自支线「{src['label']}」）】\n{src_mem}"}
                 ],
                 temperature=0.3, max_tokens=800,
+                owner_account_id=owner_account_id,
             )
             merged_text = resp.choices[0].message.content.strip()
         except Exception as e:
@@ -203,7 +211,8 @@ def merge_timelines(req: TimelineMergeRequest):
 
 
 @timeline_router.put("/api/timelines/{tl_id}/room")
-def set_timeline_room(tl_id: int, room_id: int | None = None):
+def set_timeline_room(tl_id: int, request: Request, room_id: int | None = None):
+    require_account_from_request(request)
     """更新时间线当前所在房间。"""
     with safe_db() as conn:
         conn.execute("UPDATE timelines SET current_room_id=? WHERE id=?", (room_id, tl_id))

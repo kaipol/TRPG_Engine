@@ -11,6 +11,7 @@ class RoomCreateRequest(BaseModel):
     name: str = Field(default="新的跑团房间", max_length=80)
     gm_name: str = Field(default="GM", max_length=40)
     campaign_path: str = Field(default="", max_length=240)
+    restore_code: str = Field(default="", max_length=80)
     settings: dict[str, Any] = Field(default_factory=dict)
 
 

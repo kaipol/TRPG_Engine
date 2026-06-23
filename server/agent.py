@@ -19,8 +19,7 @@ from .logger import get_logger
 from .entity import apply_emotion_delta, tick_emotion_decay
 from . import ai_provider
 from . import ai_cache
-from .auth import is_admin_request
-from .local_config import get_admin_credentials
+from .auth import require_account_from_request
 
 _log = get_logger("agent")
 
@@ -35,13 +34,13 @@ class NPCChatRequest(BaseModel):
 ###########################################################
 
 # ---------------------------------------------------------
-# state_desc JSON 解析器（兼容旧版纯文本）
+# state_desc JSON 解析器
 # ---------------------------------------------------------
 def _parse_state_desc(raw: str) -> dict:
     """
     解析 world_entities.state_desc 字段。
-    新版：JSON 格式 {"desc":"...", "emotion":{...}, "breakpoint":{...}, "memory":[...]}
-    旧版：纯文本 → 自动升级为 {"desc": "原文本", "emotion": {...}, "memory": []}
+    JSON 格式 {"desc":"...", "emotion":{...}, "breakpoint":{...}, "memory":[...]}。
+    纯文本会包装为 {"desc": "原文本", "emotion": {...}, "memory": []}。
     """
     if not raw:
         return {"desc": "", "emotion": {"trust": 0, "fear": 0, "irritation": 0}, "memory": []}
@@ -55,7 +54,6 @@ def _parse_state_desc(raw: str) -> dict:
             return sd
         except json.JSONDecodeError:
             pass
-    # 旧版纯文本兼容
     return {"desc": raw, "emotion": {"trust": 0, "fear": 0, "irritation": 0}, "memory": []}
 
 
@@ -92,17 +90,19 @@ _append_to_memory = None
 _tl_append_memory = None
 _get_world_entities_text = None
 _rag_retrieve = None
-_get_embeddings = None          # 兼容旧注入；运行时 NPC 记忆归档默认不再调用 embedding
+_get_embeddings = None          # 运行时 NPC 记忆归档默认不再调用 embedding
 _refresh_vector_cache = None    # rag.refresh_vector_cache
 
 _active_model: str = ai_provider.get_active_model("chat") or ""
 
 
-def _resolve_model(request_model: str | None = None) -> str:
+def _resolve_model(request_model: str | None = None, *, owner_account_id: int | None = None) -> str:
     """
     解析当前请求应使用的模型。
     优先级：请求体中的 model 参数 > 服务器全局默认值。
     """
+    if owner_account_id is not None:
+        return (request_model or ai_provider.get_active_model("chat", owner_account_id=owner_account_id) or "").strip()
     return (request_model or _active_model or ai_provider.get_active_model("chat") or "").strip()
 
 
@@ -160,6 +160,11 @@ def reset_active_model() -> str:
     global _active_model
     _active_model = ai_provider.get_active_model("chat") or ""
     return _active_model
+
+
+def _owner_id_from_request(request: Request) -> int:
+    account = require_account_from_request(request)
+    return int(account["id"])
 
 
 def _trim_text(text: str, max_chars: int, *, keep_tail: bool = False) -> str:
@@ -228,17 +233,18 @@ class ModelSwitchRequest(BaseModel):
     capability: str = "chat"
 
 @agent_router.get("/api/ai/models")
-def list_models(search: str = ""):
+def list_models(request: Request, search: str = ""):
     """列出 OpenAI 兼容端点返回的模型，可用 search 做本地过滤。"""
+    owner_id = _owner_id_from_request(request)
     models = []
     error = ""
     try:
-        models = ai_provider.list_remote_models(search)
+        models = ai_provider.list_remote_models(search, owner_account_id=owner_id)
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 
-    cfg = ai_provider.get_config()
-    configured_chat = ai_provider.get_active_model("chat") or cfg.chat_model
+    cfg = ai_provider.get_config(owner_account_id=owner_id)
+    configured_chat = ai_provider.get_active_model("chat", owner_account_id=owner_id) or cfg.chat_model
     if configured_chat and not any(m["key"] == configured_chat for m in models):
         needle = search.strip().lower()
         if not needle or needle in configured_chat.lower():
@@ -246,7 +252,7 @@ def list_models(search: str = ""):
                 "key": configured_chat,
                 "model_id": configured_chat,
                 "label": configured_chat,
-                "available": ai_provider.is_configured(),
+                "available": ai_provider.is_configured(owner_account_id=owner_id),
                 "provider": cfg.provider_name,
                 "provider_id": cfg.provider_id,
             })
@@ -254,8 +260,8 @@ def list_models(search: str = ""):
     return {
         "status": "success",
         "models": models,
-        "active": _active_model or ai_provider.get_active_model("chat"),
-        "configured": ai_provider.is_configured(),
+        "active": ai_provider.get_active_model("chat", owner_account_id=owner_id),
+        "configured": ai_provider.is_configured(owner_account_id=owner_id),
         "provider": {
             "id": cfg.provider_id,
             "name": cfg.provider_name,
@@ -267,21 +273,17 @@ def list_models(search: str = ""):
 @agent_router.post("/api/ai/models/switch")
 def switch_model(req: ModelSwitchRequest, request: Request):
     """切换当前激活的 AI 模型。"""
-    global _active_model
-    admin_username, admin_password = get_admin_credentials()
-    if not (admin_username and admin_password) or not is_admin_request(request):
-        return {"status": "error", "message": "请先在主页登录管理员账号"}
+    owner_id = _owner_id_from_request(request)
     if req.capability != "chat":
         try:
-            active = ai_provider.set_active_model(req.model, req.capability)
+            active = ai_provider.set_active_model(req.model, req.capability, owner_account_id=owner_id)
             return {"status": "success", "active": active, "label": active, "capability": req.capability}
         except Exception as e:
             return {"status": "error", "message": str(e)}
-    if not ai_provider.is_configured():
+    if not ai_provider.is_configured(owner_account_id=owner_id):
         return {"status": "error", "message": "OpenAI 兼容端点尚未配置"}
-    _active_model = req.model
-    ai_provider.set_active_model(req.model, "chat")
-    return {"status": "success", "active": _active_model, "label": _active_model}
+    active = ai_provider.set_active_model(req.model, "chat", owner_account_id=owner_id)
+    return {"status": "success", "active": active, "label": active}
 
 
 # ---------------------------------------------------------
@@ -293,17 +295,19 @@ def _call_ai(system_prompt: str, user_prompt: str,
              model_override: str | None = None,
              apply_token_policy: bool = True,
              cacheable: bool = True,
-             timeout: float = 120) -> str:
+             timeout: float = 120,
+             owner_account_id: int | None = None) -> str:
     """
     统一调用 AI 模型，返回完整文本。
     model_override：请求级模型覆盖（优先于服务器全局默认值）。
     """
-    model = _resolve_model(model_override)
+    model = _resolve_model(model_override, owner_account_id=owner_account_id)
     return _call_openai_compatible(
         system_prompt, user_prompt, temperature, max_tokens,
         json_mode, model, apply_token_policy=apply_token_policy,
         cacheable=cacheable,
         timeout=timeout,
+        owner_account_id=owner_account_id,
     )
 
 
@@ -313,12 +317,14 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
                             model_id: str = "",
                             apply_token_policy: bool = True,
                             cacheable: bool = True,
-                            timeout: float = 120) -> str:
+                            timeout: float = 120,
+                            owner_account_id: int | None = None) -> str:
     """调用当前 OpenAI 兼容端点。"""
     cache_metadata = None
     if cacheable:
         try:
             cache_key, cache_metadata = ai_cache.key_for_request(
+                owner_account_id=owner_account_id,
                 model=model_id,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -345,6 +351,7 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
             json_mode=json_mode,
             timeout=timeout,
             apply_token_policy=apply_token_policy,
+            owner_account_id=owner_account_id,
         )
         result = response.choices[0].message.content
         if not result:
@@ -363,14 +370,15 @@ def _call_openai_compatible(system_prompt: str, user_prompt: str,
 def _stream_ai_sse(system_prompt: str, user_prompt: str,
                    temperature: float = 0.8, max_tokens: int = 2000,
                    model_override: str | None = None,
-                   apply_token_policy: bool = True):
+                   apply_token_policy: bool = True,
+                   owner_account_id: int | None = None):
     """
     生成器：流式调用 AI，yield SSE 格式的 data 行。
     支持 OpenAI 兼容端点 (stream=True)。
     最终 yield 一个 [DONE] 事件。
     """
     full_text = ""
-    model = _resolve_model(model_override)
+    model = _resolve_model(model_override, owner_account_id=owner_account_id)
 
     try:
         response = ai_provider.chat_completion(
@@ -383,6 +391,7 @@ def _stream_ai_sse(system_prompt: str, user_prompt: str,
             max_tokens=max_tokens,
             stream=True,
             apply_token_policy=apply_token_policy,
+            owner_account_id=owner_account_id,
         )
         for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -499,7 +508,7 @@ _DYNAMIC_OPTIONS_JSON_SCHEMA = """{
     {
       "text": "选项简述（20字内）",
       "node_name": "新场景标题（15字内）",
-      "node_content": "场景骨架（约60字，包含关键动作、感官反馈、情绪反应等核心锚点，仅当必要时才补充环境描写）",
+      "node_content": "场景骨架（约60字，包含关键动作、感官反馈、可观察后果和行动入口，仅当必要时才补充环境描写）",
       "stat_changes": [{"char_name": "角色名", "hp_delta": 0, "san_delta": 0, "inventory_append": "", "inventory_remove": "", "reason": "原因(10字内)"}],
       "entity_updates": "该分支导致的实体状态变化",
       "emotion_deltas": [{"npc_name": "NPC名字", "trust": 0, "fear": 0, "irritation": 0}],
@@ -629,6 +638,12 @@ _INSTRUCTION_MIXED = """
 【字段省略】没有变化的字段直接省略，不要写空数组或 null。
 【概率判定】每个分支必须输出 likelihood 字段，格式为"极高/高/中等/低/极低（理由）"。综合 thought_process 的五步推理评估，理由不超过15字。不要输出数字概率。"""
 
+_SOURCE_MATERIAL_GUARD = """
+=== 资料使用边界 ===
+- 知识库、设定词条和原始资料只作为主持参考，不得整段照抄到玩家可见叙事。
+- 不得输出 HTML 标签、表格源码、LaTeX/Markdown 控制符、OCR 页眉页脚或“材料/类型/来源”这类资料索引。
+- 遇到电报、信件、档案、表格等手卡资料时，只提炼为角色当前能观察到的自然叙事或关键线索。"""
+
 
 def _build_dynamic_system_prompt(worldview, party_status, relevant_lore,
                                   session_memory, l1_context,
@@ -696,6 +711,7 @@ GM 认为当前剧情节奏需要加速。在本次推演中：
 【相关设定词条】
 {relevant_lore}
 {f"【知识库检索结果（L3 长期记忆 + 背景设定）】{chr(10)}{rag_context}" if rag_context else ""}
+{_SOURCE_MATERIAL_GUARD}
 
 === 性格交互协议（对话模式强化）===
 {persona if persona else "根据 NPC 的已有设定推演其社交反应，注意其说话方式、肢体语言和心理状态的一致性。"}
@@ -729,6 +745,7 @@ GM 认为当前剧情节奏需要加速。在本次推演中：
 【相关设定词条】
 {relevant_lore}
 {f"【知识库检索结果（L3 长期记忆 + 背景设定）】{chr(10)}{rag_context}" if rag_context else ""}
+{_SOURCE_MATERIAL_GUARD}
 
 {_INSTRUCTION_ACTION}
 
@@ -759,6 +776,7 @@ GM 认为当前剧情节奏需要加速。在本次推演中：
 【相关设定词条】
 {relevant_lore}
 {f"【知识库检索结果（L3 长期记忆 + 背景设定）】{chr(10)}{rag_context}" if rag_context else ""}
+{_SOURCE_MATERIAL_GUARD}
 {persona}
 
 {_INSTRUCTION_MIXED}
@@ -776,7 +794,8 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
                                   player_action: str, current_node_id: int,
                                   timeline_id: int | None = None,
                                   tl_id_for_memory: int | None = None,
-                                  action_type: str = "mixed"):
+                                  action_type: str = "mixed",
+                                  owner_account_id: int | None = None):
     """
     Phase 1：推演完成后立刻执行。
     AI 返回 60 字短叙事 node_content + 副作用，创建节点和选项。
@@ -798,7 +817,7 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
     if not conn.execute("SELECT id FROM nodes WHERE id = ?", (current_node_id,)).fetchone():
         raise ValueError("节点不存在")
 
-    # ── 兼容旧版全局字段：如果 branches 里没有 per-branch 副作用，从全局字段回填 ──
+    # 允许模型把副作用放在全局字段；后续统一回填到每个分支。
     global_stat_changes = parsed.get("stat_changes") if isinstance(parsed, dict) else None
     global_entity_updates = parsed.get("entity_updates", "") if isinstance(parsed, dict) else ""
     global_map_actions = parsed.get("map_actions") if isinstance(parsed, dict) else None
@@ -885,7 +904,16 @@ def _post_process_dynamic_result(conn, parsed: dict, scene_name: str,
     ai_summary = " / ".join(b.get("text", "") for b in branches)[:300]
     if _l1_append:
         prefix = f"{type_tag}{scene_name}" if not tl_id_for_memory else f"{type_tag}TL{tl_id_for_memory}:{scene_name}"
-        _l1_append(conn, prefix, player_action, f"[待选择] {ai_summary}", thought_process, "", timeline_id=tl_id_for_memory)
+        _l1_append(
+            conn,
+            prefix,
+            player_action,
+            f"[待选择] {ai_summary}",
+            thought_process,
+            "",
+            timeline_id=tl_id_for_memory,
+            owner_account_id=owner_account_id,
+        )
 
     conn.commit()
     return new_options, None, [], {"moved_to": None, "new_room": None, "unlocked_edge": None, "errors": []}, thought_process, ""
@@ -899,12 +927,13 @@ class ApplyBranchEffectsRequest(BaseModel):
     allow_ai_extraction: bool = False  # 游玩点击默认不跑额外实体抽取模型
 
 @agent_router.post("/api/ai/apply-branch-effects")
-def apply_branch_effects(req: ApplyBranchEffectsRequest):
+def apply_branch_effects(req: ApplyBranchEffectsRequest, http_request: Request):
     """
     当玩家点击某个 AI 生成的分支选项时，前端调用此接口。
     从 pending_effects 表中提取该节点的副作用 payload 并执行。
     执行完后删除记录（防止重复执行）。
     """
+    owner_account_id = _owner_id_from_request(http_request)
     conn = get_db_connection()
     try:
         node = conn.execute("SELECT * FROM nodes WHERE id=?", (req.node_id,)).fetchone()
@@ -912,30 +941,19 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
             conn.close()
             return {"status": "skipped", "message": "节点不存在"}
 
-        # 从独立表读取副作用（兼容旧版 __FX__ 机制）
+        # 从 pending_effects 读取副作用。
         fx_row = conn.execute(
             "SELECT id, payload FROM pending_effects WHERE node_id=?", (req.node_id,)
         ).fetchone()
 
-        if fx_row:
-            # 新版：从 pending_effects 表读取
-            try:
-                fx = json.loads(fx_row["payload"])
-            except json.JSONDecodeError:
-                conn.close()
-                return {"status": "error", "message": "副作用数据损坏"}
-        else:
-            # 兼容旧版：尝试从 nodes.summary 的 __FX__ 前缀读取
-            summary = node["summary"] or ""
-            if "__FX__" not in summary:
-                conn.close()
-                return {"status": "skipped", "message": "无待执行副作用"}
-            fx_json = summary.split("__FX__", 1)[1]
-            try:
-                fx = json.loads(fx_json)
-            except json.JSONDecodeError:
-                conn.close()
-                return {"status": "error", "message": "副作用数据损坏（旧版格式）"}
+        if not fx_row:
+            conn.close()
+            return {"status": "skipped", "message": "无待执行副作用"}
+        try:
+            fx = json.loads(fx_row["payload"])
+        except json.JSONDecodeError:
+            conn.close()
+            return {"status": "error", "message": "副作用数据损坏"}
 
         action_type = fx.get("action_type", "mixed")
         timeline_id = fx.get("timeline_id")
@@ -1000,20 +1018,22 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
             ).fetchone()
             if _existing_npc:
                 conn.execute(
-                    "UPDATE characters SET hp=?, san=?, inventory=? WHERE id=?",
-                    (npc_hp, npc_san, npc_inv, _existing_npc["id"]))
+                    "UPDATE characters SET hp=?, san=?, inventory=?, personality=COALESCE(NULLIF(personality,''), ?), role_brief=COALESCE(NULLIF(role_brief,''), ?) WHERE id=?",
+                    (npc_hp, npc_san, npc_inv, npc_back[:1600], npc_back[:1800], _existing_npc["id"]))
                 npc_id = _existing_npc["id"]
             else:
                 npc_id = conn.execute(
-                    "INSERT INTO characters (name, role, hp, san, inventory) VALUES (?, 'NPC', ?, ?, ?)",
-                    (npc_name, npc_hp, npc_san, npc_inv)).lastrowid
+                    "INSERT INTO characters "
+                    "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+                    "VALUES (?, 'NPC', ?, ?, ?, ?, ?, '', '', 'active')",
+                    (npc_name, npc_hp, npc_san, npc_inv, npc_back[:1600], npc_back[:1800])).lastrowid
             spawned_npc = {"id": npc_id, "name": npc_name, "role": "NPC",
                            "hp": npc_hp, "san": npc_san, "inventory": npc_inv, "backstory": npc_back}
             mem_text = f"NPC [{npc_name}] 登场于 [{scene_name}]。{npc_back}"
             if tl_id_for_memory and _tl_append_memory:
-                _tl_append_memory(conn, tl_id_for_memory, mem_text)
+                _tl_append_memory(conn, tl_id_for_memory, mem_text, owner_account_id=owner_account_id)
             elif _append_to_memory:
-                _append_to_memory(conn, mem_text)
+                _append_to_memory(conn, mem_text, owner_account_id=owner_account_id)
 
         # ── 执行 map_actions ──
         if action_type != "dialogue" and _process_map_actions and _get_current_room_id:
@@ -1023,21 +1043,23 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
             if map_result.get("moved_to"):
                 mem = f"移动至[{map_result['moved_to']['label']}]"
                 if tl_id_for_memory and _tl_append_memory:
-                    _tl_append_memory(conn, tl_id_for_memory, mem)
+                    _tl_append_memory(conn, tl_id_for_memory, mem, owner_account_id=owner_account_id)
                 elif _append_to_memory:
-                    _append_to_memory(conn, f"玩家{mem}。")
+                    _append_to_memory(conn, f"玩家{mem}。", owner_account_id=owner_account_id)
             if map_result.get("new_room"):
                 mem = f"发现新区域[{map_result['new_room']['label']}]"
                 if tl_id_for_memory and _tl_append_memory:
-                    _tl_append_memory(conn, tl_id_for_memory, mem)
+                    _tl_append_memory(conn, tl_id_for_memory, mem, owner_account_id=owner_account_id)
                 elif _append_to_memory:
-                    _append_to_memory(conn, mem + "。")
+                    _append_to_memory(conn, mem + "。", owner_account_id=owner_account_id)
 
         # ── 执行实体提取 ──
         if req.allow_ai_extraction and _ai_extract_and_upsert_entities and entity_updates_text:
             _ai_extract_and_upsert_entities(
                 conn, scene_name, node["content"] or "", player_action, entity_updates_text,
-                timeline_label="主线" if not tl_id_for_memory else f"TL{tl_id_for_memory}")
+                timeline_label="主线" if not tl_id_for_memory else f"TL{tl_id_for_memory}",
+                owner_account_id=owner_account_id,
+            )
 
         # ── 执行情绪状态机 (emotion_deltas) ──
         emotion_deltas = fx.get("emotion_deltas", [])
@@ -1053,7 +1075,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
                 ).fetchone()
                 if not entity_row:
                     continue
-                # 解析 state_desc JSON（兼容旧纯文本格式）
+                # 解析 state_desc JSON；纯文本会包装为 desc 字段。
                 sd = _parse_state_desc(entity_row["state_desc"])
                 emo = sd.get("emotion", {"trust": 0, "fear": 0, "irritation": 0})
                 # 先衰减，再叠加（烈度穿透阻尼 + trust 背叛放大）
@@ -1172,9 +1194,9 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
         skeleton = fx.get("skeleton", node["name"] or "")
         mem = f"{type_tag}[{scene_name}] {player_action}→{skeleton}"
         if tl_id_for_memory and _tl_append_memory:
-            _tl_append_memory(conn, tl_id_for_memory, mem)
+            _tl_append_memory(conn, tl_id_for_memory, mem, owner_account_id=owner_account_id)
         elif _append_to_memory:
-            _append_to_memory(conn, mem)
+            _append_to_memory(conn, mem, owner_account_id=owner_account_id)
 
         # 清除 Phase 1 的"待选择"快照（已被上面的确定结果取代，避免 L1 冗余）
         conn.execute(
@@ -1183,13 +1205,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
         )
 
         # ── 清除副作用记录（防重复执行） ──
-        # 新版：删除 pending_effects 表中的记录
         conn.execute("DELETE FROM pending_effects WHERE node_id=?", (req.node_id,))
-        # 兼容旧版：如果 summary 中有 __FX__ 残留也清除
-        summary = node["summary"] or ""
-        if "__FX__" in summary:
-            clean_summary = player_action[:100] if player_action else ""
-            conn.execute("UPDATE nodes SET summary=? WHERE id=?", (clean_summary, req.node_id))
 
         conn.commit()
         conn.close()
@@ -1218,7 +1234,7 @@ def apply_branch_effects(req: ApplyBranchEffectsRequest):
 #
 # 【调用顺序】先 apply-branch-effects（执行副作用，返回 fx_context + skeleton），
 #   再 expand-branch（用前端传入的 fx_context + 最新状态生成叙事）。
-#   expand 接受可选 fx_context 参数；若未传，则兜底从 pending_effects 读取（向后兼容）。
+#   expand 接受可选 fx_context 参数；若未传，则从 pending_effects 读取。
 # ---------------------------------------------------------
 class ExpandBranchRequest(BaseModel):
     node_id: int              # 玩家选择的目标节点 ID
@@ -1312,8 +1328,13 @@ def _build_expand_prompts(conn, req, node_name: str, current_content: str,
 - 基于下方【分支骨架】进行润色扩写，将其转化为富有代入感的文字描述。
 - 弹性字数：字数由事件的内容量自然决定（短至三五十字、长至百余字均可），绝对不要刻意凑字数。
 - {style_hint}
+- 场景推进要像跑团主持人设置场景：描述可观察事实、NPC动作、线索、压力和可互动对象，再留下行动入口。
+- 不要以“你是……”“你的性格/背景……”“你以……身份……”等人物卡介绍开头；角色背景只作为反应依据，不在正文复述。
+- 不要替玩家决定感受、想法或下一步行动。
 - 保留骨架中的所有关键细节（动作、伤害程度、环境元素），不得矛盾
 - 必须与【确定结果】中的数值变化一致——不得编造额外的 HP/物品/空间变化
+- 知识库和设定词条只作为参考，不得整段照抄资料、手卡、电报、表格或档案原文。
+- 不得输出 HTML 标签、表格源码、LaTeX/Markdown 控制符、OCR 页眉页脚或“材料/类型/来源”等资料索引。
 - 承接父场景的内容和氛围，保持叙事连贯,给出自然的动作收尾或留白
 - 不要输出 JSON，直接输出纯文本场景描写
 - 不要加任何前缀、标题或解释"""
@@ -1335,7 +1356,7 @@ def _build_expand_prompts(conn, req, node_name: str, current_content: str,
 
 
 @agent_router.post("/api/ai/expand-branch")
-def expand_branch_content(req: ExpandBranchRequest):
+def expand_branch_content(req: ExpandBranchRequest, http_request: Request):
     """
     60字短叙事 Phase 3：将玩家选中分支的60字骨架润色为完整场景叙事。
 
@@ -1355,7 +1376,7 @@ def expand_branch_content(req: ExpandBranchRequest):
         current_content = node["content"] or ""
 
         # fx_context 优先使用前端传入（apply 已执行后由前端回传）；
-        # 否则兜底从 pending_effects 读取（向后兼容旧调用顺序）。
+        # 否则从 pending_effects 读取当前待执行副作用。
         if req.fx_context:
             fx_context = req.fx_context
             action_type = req.action_type or "mixed"
@@ -1373,9 +1394,15 @@ def expand_branch_content(req: ExpandBranchRequest):
             conn, req, node_name, current_content, fx_context, action_type
         )
 
-        expanded_text = _call_ai(system_prompt, user_prompt,
-                                  temperature=0.7, max_tokens=1000, json_mode=False,
-                                  model_override=req.model)
+        expanded_text = _call_ai(
+            system_prompt,
+            user_prompt,
+            temperature=0.7,
+            max_tokens=1000,
+            json_mode=False,
+            model_override=req.model,
+            owner_account_id=_owner_id_from_request(http_request),
+        )
 
         # 写回 nodes.content
         conn.execute("UPDATE nodes SET expanded_content=? WHERE id=?", (expanded_text, req.node_id))
@@ -1403,7 +1430,7 @@ def expand_branch_content(req: ExpandBranchRequest):
 
 
 @agent_router.post("/api/ai/expand-branch/stream")
-def expand_branch_stream(req: ExpandBranchStreamRequest):
+def expand_branch_stream(req: ExpandBranchStreamRequest, http_request: Request):
     """
     60字短叙事 Phase 3 的流式版本——前端可用打字机效果展示场景叙事生成过程。
 
@@ -1421,7 +1448,7 @@ def expand_branch_stream(req: ExpandBranchStreamRequest):
     current_content = node["content"] or ""
 
     # fx_context 优先使用前端传入（apply 已执行后由前端回传）；
-    # 否则兜底从 pending_effects 读取（向后兼容旧调用顺序）。
+    # 否则从 pending_effects 读取当前待执行副作用。
     if req.fx_context:
         fx_context = req.fx_context
         action_type = req.action_type or "mixed"
@@ -1443,11 +1470,14 @@ def expand_branch_stream(req: ExpandBranchStreamRequest):
     )
     conn.close()
 
+    owner_account_id = _owner_id_from_request(http_request)
+
     def generate():
         full_text = ""
         for sse_line in _stream_ai_sse(system_prompt, user_prompt,
                                         temperature=0.7, max_tokens=1000,
-                                        model_override=req.model):
+                                        model_override=req.model,
+                                        owner_account_id=owner_account_id):
             yield sse_line
             try:
                 data = json.loads(sse_line.replace("data: ", "").strip())
@@ -1497,35 +1527,38 @@ class ExpandTextRequest(BaseModel):
 # SSE 流式推演端点（核心）
 # ---------------------------------------------------------
 @agent_router.post("/api/ai/dynamic-options")
-def dynamic_options_handler(request: DynamicActionRequest):
+def dynamic_options_handler(req: DynamicActionRequest, http_request: Request):
     """
     AI 分支推演。非流式模式（JSON 完整返回）。
     用于需要精确解析 JSON 的场景（如 response_format=json_object）。
     """
+    owner_account_id = _owner_id_from_request(http_request)
     conn = get_db_connection()
-    ctx = build_system_context(conn, request.scene_name, request.content, request.player_action)
+    ctx = build_system_context(conn, req.scene_name, req.content, req.player_action)
     worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context = ctx
 
     system_prompt = _build_dynamic_system_prompt(
         worldview, party_status, relevant_lore, session_memory,
         l1_context, world_entities_text, rag_context, map_context,
-        action_type=request.action_type,
-        gm_correction=request.gm_correction,
-        mood=request.mood,
-        force_thrust=request.force_thrust,
+        action_type=req.action_type,
+        gm_correction=req.gm_correction,
+        mood=req.mood,
+        force_thrust=req.force_thrust,
     )
-    user_prompt = f"当前场景：{request.scene_name}\n场景内容：{request.content}\n玩家动作：{request.player_action}\n先思考，再生成分支。"
+    user_prompt = f"当前场景：{req.scene_name}\n场景内容：{req.content}\n玩家动作：{req.player_action}\n先思考，再生成分支。"
 
     try:
         ai_result = _call_ai(system_prompt, user_prompt, temperature=0.8, max_tokens=980,
-                             json_mode=True, model_override=request.model)
+                             json_mode=True, model_override=req.model,
+                             owner_account_id=owner_account_id)
 
         parsed = json_repair.loads(ai_result)
         conn2 = get_db_connection()
         new_options, spawned_npc, applied_changes, map_result, thought_process, entity_updates_text = \
-            _post_process_dynamic_result(conn2, parsed, request.scene_name,
-                                         request.player_action, request.current_node_id,
-                                         action_type=request.action_type)
+            _post_process_dynamic_result(conn2, parsed, req.scene_name,
+                                         req.player_action, req.current_node_id,
+                                         action_type=req.action_type,
+                                         owner_account_id=owner_account_id)
         conn2.close()
 
         return {
@@ -1543,7 +1576,7 @@ def dynamic_options_handler(request: DynamicActionRequest):
 
 
 @agent_router.post("/api/ai/dynamic-options/stream")
-def dynamic_options_stream(request: DynamicActionRequest):
+def dynamic_options_stream(req: DynamicActionRequest, http_request: Request):
     """
     SSE 流式推演端点。
     前端通过 EventSource / fetch + ReadableStream 消费。
@@ -1553,7 +1586,7 @@ def dynamic_options_stream(request: DynamicActionRequest):
       data: {"type":"result","data":{...}}           ← 后处理结果（节点/NPC/状态等）
     """
     conn = get_db_connection()
-    ctx = build_system_context(conn, request.scene_name, request.content, request.player_action)
+    ctx = build_system_context(conn, req.scene_name, req.content, req.player_action)
     worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context = ctx
     conn.close()
 
@@ -1562,19 +1595,21 @@ def dynamic_options_stream(request: DynamicActionRequest):
     system_prompt = _build_dynamic_system_prompt(
         worldview, party_status, relevant_lore, session_memory,
         l1_context, world_entities_text, rag_context, map_context,
-        action_type=request.action_type,
-        gm_correction=request.gm_correction,
-        mood=request.mood,
-        force_thrust=request.force_thrust,
+        action_type=req.action_type,
+        gm_correction=req.gm_correction,
+        mood=req.mood,
+        force_thrust=req.force_thrust,
     )
-    user_prompt = f"当前场景：{request.scene_name}\n场景内容：{request.content}\n玩家动作：{request.player_action}\n先思考，再生成分支。\n注意：你必须只输出 JSON，不要有任何额外文字或 markdown 代码块。"
+    user_prompt = f"当前场景：{req.scene_name}\n场景内容：{req.content}\n玩家动作：{req.player_action}\n先思考，再生成分支。\n注意：你必须只输出 JSON，不要有任何额外文字或 markdown 代码块。"
+    owner_account_id = _owner_id_from_request(http_request)
 
     def generate():
         full_text = ""
         # Phase 1: 流式输出 AI 文本
         for sse_line in _stream_ai_sse(system_prompt, user_prompt,
                                         temperature=0.8, max_tokens=980,
-                                        model_override=request.model):
+                                        model_override=req.model,
+                                        owner_account_id=owner_account_id):
             yield sse_line
             # 提取 full_text
             try:
@@ -1592,9 +1627,10 @@ def dynamic_options_stream(request: DynamicActionRequest):
                 parsed = json_repair.loads(_m.group() if _m else full_text)
                 conn2 = get_db_connection()
                 new_options, spawned_npc, applied_changes, map_result, thought_process, entity_updates_text = \
-                    _post_process_dynamic_result(conn2, parsed, request.scene_name,
-                                                 request.player_action, request.current_node_id,
-                                                 action_type=request.action_type)
+                    _post_process_dynamic_result(conn2, parsed, req.scene_name,
+                                                 req.player_action, req.current_node_id,
+                                                 action_type=req.action_type,
+                                                 owner_account_id=owner_account_id)
                 conn2.close()
 
                 result_data = {
@@ -1618,9 +1654,10 @@ def dynamic_options_stream(request: DynamicActionRequest):
 # 扩写端点
 # ---------------------------------------------------------
 @agent_router.post("/api/ai/expand-text")
-def expand_scene_text(request: ExpandTextRequest):
+def expand_scene_text(req: ExpandTextRequest, http_request: Request):
+    owner_account_id = _owner_id_from_request(http_request)
     conn = get_db_connection()
-    ctx = build_system_context(conn, request.scene_name, request.content)
+    ctx = build_system_context(conn, req.scene_name, req.content)
     worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context = ctx
     conn.close()
 
@@ -1639,30 +1676,33 @@ def expand_scene_text(request: ExpandTextRequest):
 {relevant_lore}
 {f"【知识库检索结果】{chr(10)}{rag_context}" if rag_context else ""}
 
-请结合上述所有信息扩写当前场景的细节（150字左右）。扩写内容必须与世界观和角色状态一致，沉浸式文本，不要出现markdown格式或特殊符号。"""
+请结合上述所有信息扩写当前场景的细节（150字左右）。扩写内容必须与世界观和角色状态一致，沉浸式文本，不要出现markdown格式或特殊符号。
+知识库只作主持参考，不得照抄资料、手卡、电报、HTML表格、LaTeX、OCR页眉页脚或“材料/类型/来源”等资料索引。"""
 
     try:
         generated = _call_ai(system_prompt,
-                             f"场景：{request.scene_name}\n描述：{request.content}",
+                             f"场景：{req.scene_name}\n描述：{req.content}",
                              temperature=0.7, max_tokens=1000, json_mode=False,
-                             model_override=request.model)
+                             model_override=req.model,
+                             owner_account_id=owner_account_id)
 
         # 精炼记忆
         try:
             merged_note = _call_ai(
                 "你是跑团记录员。将下方【原始描述】和【扩写补充】合并为一条不超过80字的精炼场景记忆，"
                 "保留所有新增细节，去除重复内容，用第三人称叙述，不加任何前缀或解释。如果有重要关键词（如地点、NPC、物品等）务必保留。输出必须简洁且信息量大，适合记录在游戏记忆中供后续检索。",
-                f"【场景名】{request.scene_name}\n【原始描述】{request.content}\n【扩写补充】{generated}",
+                f"【场景名】{req.scene_name}\n【原始描述】{req.content}\n【扩写补充】{generated}",
                 temperature=0.2, max_tokens=120, json_mode=False,
-                model_override=request.model
+                model_override=req.model,
+                owner_account_id=owner_account_id,
             ).replace('\n', ' ')
         except Exception as e:
             _log.debug("扩写记忆精炼 AI 调用失败: %s", e)
-            merged_note = f"{request.scene_name}的场景细节已补充。"
+            merged_note = f"{req.scene_name}的场景细节已补充。"
 
         conn2 = get_db_connection()
         if _append_to_memory:
-            _append_to_memory(conn2, f"【{request.scene_name}】{merged_note}")
+            _append_to_memory(conn2, f"【{req.scene_name}】{merged_note}", owner_account_id=owner_account_id)
         conn2.close()
         return {"status": "success", "generated_text": generated}
     except Exception as e:
@@ -1673,10 +1713,10 @@ def expand_scene_text(request: ExpandTextRequest):
 # 扩写流式端点
 # ---------------------------------------------------------
 @agent_router.post("/api/ai/expand-text/stream")
-def expand_scene_text_stream(request: ExpandTextRequest):
+def expand_scene_text_stream(req: ExpandTextRequest, http_request: Request):
     """流式扩写——前端可用打字机效果实时显示。"""
     conn = get_db_connection()
-    ctx = build_system_context(conn, request.scene_name, request.content)
+    ctx = build_system_context(conn, req.scene_name, req.content)
     worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context = ctx
     conn.close()
 # ==========================================
@@ -1705,15 +1745,19 @@ def expand_scene_text_stream(request: ExpandTextRequest):
         f"{f'【地图空间感知】{chr(10)}{map_context}{chr(10)}' if map_context else ''}"
         f"【剧情记忆流】\n{session_memory}\n"
         f"请结合上述信息扩写当前场景的细节（150字左右），与世界观和角色状态一致。"
+        f"知识库只作主持参考，不得照抄资料、手卡、电报、HTML表格、LaTeX、OCR页眉页脚或资料索引。"
     )
 
     # 线性拼接，形成最终推演 Prompt
     system_prompt = f"{static_prefix}{rag_infix}{dynamic_suffix}"
 
+    owner_account_id = _owner_id_from_request(http_request)
+
     def generate():
         for sse_line in _stream_ai_sse(system_prompt,
-                                       f"场景：{request.scene_name}\n玩家动作：{request.content}",
-                                       temperature=0.7, max_tokens=1000):
+                                       f"场景：{req.scene_name}\n玩家动作：{req.content}",
+                                       temperature=0.7, max_tokens=1000,
+                                       owner_account_id=owner_account_id):
             yield sse_line
 
     from fastapi.responses import StreamingResponse
@@ -1722,12 +1766,12 @@ def expand_scene_text_stream(request: ExpandTextRequest):
 ##########################################################################
 # 将此路由追加到 agent.py 末尾
 @agent_router.post("/api/ai/npc-chat/stream")
-def npc_chat_stream(request: NPCChatRequest):
+def npc_chat_stream(req: NPCChatRequest, http_request: Request):
     """NPC 专属短信/微信聊天流式端点"""
     conn = get_db_connection()
     
     # 获取 NPC 档案与情绪状态
-    npc_row = conn.execute("SELECT state_desc FROM world_entities WHERE name=? AND entity_type='npc'", (request.npc_name,)).fetchone()
+    npc_row = conn.execute("SELECT state_desc FROM world_entities WHERE name=? AND entity_type='npc'", (req.npc_name,)).fetchone()
     
     npc_persona = ""
     if npc_row:
@@ -1739,12 +1783,12 @@ def npc_chat_stream(request: NPCChatRequest):
         npc_persona = "【系统提示】这是一个未知 NPC，请根据名字自行推断语气。"
     policy = ai_provider.get_token_policy()
     npc_persona = _trim_text(npc_persona, int(policy.get("npc_persona_chars") or 0), keep_tail=True)
-    chat_history = _trim_text(request.chat_history, int(policy.get("npc_history_chars") or 0), keep_tail=True)
+    chat_history = _trim_text(req.chat_history, int(policy.get("npc_history_chars") or 0), keep_tail=True)
 
     conn.close()
 
     # 微信聊天专属 Prompt 约束
-    system_prompt = f"""你现在是跑团游戏中的角色：【{request.npc_name}】。
+    system_prompt = f"""你现在是跑团游戏中的角色：【{req.npc_name}】。
 玩家正在通过类似微信的手机通讯软件和你进行文字聊天。
 
 {npc_persona}
@@ -1756,10 +1800,12 @@ def npc_chat_stream(request: NPCChatRequest):
 4. 每次回复尽量简短（10-50字），符合现代人发消息的习惯。
 5. 绝对不要打破第四面墙，你不知道自己是游戏角色。"""
 
-    user_prompt = f"【近期聊天记录】\n{chat_history}\n\n玩家发来新消息：{request.player_message}\n请直接回复你的消息内容："
+    user_prompt = f"【近期聊天记录】\n{chat_history}\n\n玩家发来新消息：{req.player_message}\n请直接回复你的消息内容："
+
+    owner_account_id = _owner_id_from_request(http_request)
 
     def generate():
-        for sse_line in _stream_ai_sse(system_prompt, user_prompt, temperature=0.7, max_tokens=150):
+        for sse_line in _stream_ai_sse(system_prompt, user_prompt, temperature=0.7, max_tokens=150, owner_account_id=owner_account_id):
             yield sse_line
 
     from fastapi.responses import StreamingResponse
@@ -1775,7 +1821,7 @@ class NPCChatCommitRequest(BaseModel):
 
 
 @agent_router.post("/api/ai/npc-chat/commit")
-def npc_chat_commit(request: NPCChatCommitRequest):
+def npc_chat_commit(req: NPCChatCommitRequest, http_request: Request):
     """
     聊天结束后调用：
     1. 用 AI 推断本次对话的情绪变化（emotion_deltas）和 NPC 记忆（一句话）
@@ -1786,7 +1832,7 @@ def npc_chat_commit(request: NPCChatCommitRequest):
     with safe_db() as conn:
         entity_row = conn.execute(
             "SELECT id, state_desc FROM world_entities WHERE name=? AND entity_type='npc'",
-            (request.npc_name,)
+            (req.npc_name,)
         ).fetchone()
         if not entity_row:
             return {"status": "skipped", "reason": "NPC not found in world_entities"}
@@ -1796,7 +1842,7 @@ def npc_chat_commit(request: NPCChatCommitRequest):
         current_desc = _trim_text(sd.get("desc", ""), int(ai_provider.get_token_policy().get("npc_persona_chars") or 0), keep_tail=True)
 
         # ── 调用 AI 推断情绪增量与记忆 ──────────────────────────────────────
-        sys_p = f"""你是游戏系统的情绪分析模块。根据一段微信聊天记录，判断 NPC【{request.npc_name}】的情绪变化，并用第一人称写下一条简短记忆。如果出现重要关键词（如地点、NPC、物品等）务必保留。
+        sys_p = f"""你是游戏系统的情绪分析模块。根据一段微信聊天记录，判断 NPC【{req.npc_name}】的情绪变化，并用第一人称写下一条简短记忆。如果出现重要关键词（如地点、NPC、物品等）务必保留。
 
 NPC 背景：{current_desc}
 当前情绪：信任={emo.get('trust',0)} 恐惧={emo.get('fear',0)} 烦躁={emo.get('irritation',0)}
@@ -1804,9 +1850,15 @@ NPC 背景：{current_desc}
 输出严格 JSON，不要多余文字：
 {{"trust_delta": <整数 -25~25>, "fear_delta": <整数 -25~25>, "irritation_delta": <整数 -25~25>, "memory": "<20字内第一人称记忆>"}}"""
 
-        usr_p = f"玩家说：{request.player_message}\n{request.npc_name}回复：{request.npc_reply}"
+        usr_p = f"玩家说：{req.player_message}\n{req.npc_name}回复：{req.npc_reply}"
 
-        raw = _call_ai(sys_p, usr_p, temperature=0.3, max_tokens=120)
+        raw = _call_ai(
+            sys_p,
+            usr_p,
+            temperature=0.3,
+            max_tokens=120,
+            owner_account_id=_owner_id_from_request(http_request),
+        )
 
         # 解析 AI 输出
         trust_d = fear_d = irr_d = 0
@@ -1844,11 +1896,11 @@ NPC 背景：{current_desc}
         # 持久化本轮对话消息
         conn.execute(
             "INSERT INTO npc_chat_logs (npc_name, sender, message, created_at) VALUES (?,?,?,?)",
-            (request.npc_name, "player", request.player_message, ts)
+            (req.npc_name, "player", req.player_message, ts)
         )
         conn.execute(
             "INSERT INTO npc_chat_logs (npc_name, sender, message, created_at) VALUES (?,?,?,?)",
-            (request.npc_name, "npc", request.npc_reply, ts)
+            (req.npc_name, "npc", req.npc_reply, ts)
         )
         conn.commit()
 

@@ -15,24 +15,24 @@ import fastapi
 
 _BASE_DIR = ""
 _CAMPAIGNS_DIR = ""
-_LEGACY_CAMPAIGN_VALIDATOR: Callable[[str], bool] | None = None
+_CAMPAIGN_VALIDATOR: Callable[[str], bool] | None = None
 
 
 def configure_campaign_storage(
     base_dir: str,
     campaigns_dir: str,
-    legacy_campaign_validator: Callable[[str], bool],
+    campaign_validator: Callable[[str], bool],
 ) -> None:
-    global _BASE_DIR, _CAMPAIGNS_DIR, _LEGACY_CAMPAIGN_VALIDATOR
+    global _BASE_DIR, _CAMPAIGNS_DIR, _CAMPAIGN_VALIDATOR
     _BASE_DIR = os.path.realpath(base_dir)
     _CAMPAIGNS_DIR = os.path.realpath(campaigns_dir)
-    _LEGACY_CAMPAIGN_VALIDATOR = legacy_campaign_validator
+    _CAMPAIGN_VALIDATOR = campaign_validator
 
 
 def _require_configured() -> tuple[str, str, Callable[[str], bool]]:
-    if not _BASE_DIR or not _CAMPAIGNS_DIR or not _LEGACY_CAMPAIGN_VALIDATOR:
+    if not _BASE_DIR or not _CAMPAIGNS_DIR or not _CAMPAIGN_VALIDATOR:
         raise RuntimeError("campaign storage has not been configured")
-    return _BASE_DIR, _CAMPAIGNS_DIR, _LEGACY_CAMPAIGN_VALIDATOR
+    return _BASE_DIR, _CAMPAIGNS_DIR, _CAMPAIGN_VALIDATOR
 
 
 def format_mtime(path: str) -> str:
@@ -149,7 +149,7 @@ def ensure_save_readable(folder_path: str, account: dict | None) -> dict:
 
 
 def resolve_campaign_folder_name(campaign_name: str) -> tuple[str, str, str]:
-    _base_dir, campaigns_dir, legacy_campaign_validator = _require_configured()
+    _base_dir, campaigns_dir, campaign_validator = _require_configured()
     name = urllib.parse.unquote((campaign_name or "").strip())
     if not name or os.path.isabs(name) or "\x00" in name or "/" in name or "\\" in name or name in {".", ".."}:
         raise fastapi.HTTPException(status_code=400, detail="非法存档名称")
@@ -160,7 +160,7 @@ def resolve_campaign_folder_name(campaign_name: str) -> tuple[str, str, str]:
     except ValueError:
         raise fastapi.HTTPException(status_code=400, detail="非法存档路径") from None
     campaign_json = os.path.join(folder, "campaign.json")
-    if not os.path.isdir(folder) or not legacy_campaign_validator(campaign_json):
+    if not os.path.isdir(folder) or not campaign_validator(campaign_json):
         raise fastapi.HTTPException(status_code=404, detail="存档不存在或格式无效")
     return name, folder, campaign_json
 
@@ -216,7 +216,7 @@ def campaign_asset_url(campaign_name: str, asset_name: str) -> str:
 
 
 def resolve_campaign_asset(campaign_name: str, asset_name: str) -> str:
-    _base_dir, campaigns_dir, _legacy_campaign_validator = _require_configured()
+    _base_dir, campaigns_dir, _campaign_validator = _require_configured()
     if not campaign_name or "/" in campaign_name or "\\" in campaign_name:
         raise fastapi.HTTPException(status_code=400, detail="非法剧本名")
     campaign_root = os.path.realpath(os.path.join(campaigns_dir, campaign_name))
@@ -246,14 +246,14 @@ def resolve_campaign_asset(campaign_name: str, asset_name: str) -> str:
     if os.path.isfile(direct_target):
         return direct_target
 
-    legacy_assets_root = os.path.realpath(os.path.join(campaign_root, "assets"))
-    legacy_target = os.path.realpath(os.path.join(legacy_assets_root, clean_asset_name))
+    assets_root = os.path.realpath(os.path.join(campaign_root, "assets"))
+    asset_target = os.path.realpath(os.path.join(assets_root, clean_asset_name))
     try:
-        if os.path.commonpath([legacy_assets_root, legacy_target]) != legacy_assets_root:
+        if os.path.commonpath([assets_root, asset_target]) != assets_root:
             raise ValueError
     except ValueError:
         raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
-    if os.path.isfile(legacy_target):
-        return legacy_target
+    if os.path.isfile(asset_target):
+        return asset_target
 
     raise fastapi.HTTPException(status_code=404, detail="资源不存在")

@@ -8,11 +8,11 @@
 
 ## Brand
 - Personality: Quiet command center for live TRPG play; technical, focused, and a little arcane.
-- Trust signals: Clear engine/provider status, deterministic save/load actions, visible room code for remote play.
+- Trust signals: Clear engine/provider status, deterministic save/load actions, visible room code for remote play, explicit room-owner API ownership in multiplayer.
 - Avoid: Dense admin-style module grids during active narration, decorative controls, and forcing players into editing forms just to read campaign context.
 
 ## Product goals
-- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players; keep solo and multiplayer play conceptually consistent as AI-GM plus player-controlled story characters; make world/map/knowledge references readable from the top bar.
+- Goals: Keep in-play actions immediately available; make campaign setup automatic after load; support room-code remote players; keep solo and multiplayer play conceptually consistent as AI-GM plus player-controlled story characters; make world/map/knowledge references readable from the top bar; scope AI usage to the active account or multiplayer room owner; let multiplayer members play through the room owner's AI provider without configuring their own API.
 - Non-goals: Marketing landing pages, separate duplicate control surfaces, speech input/output.
 - Success signals: A player can load a campaign, choose a role, read world/map/knowledge context from the top bar, and hand actions to AI-GM; a GM can still open the console, start a room, choose a model intentionally, and edit campaign systems without confusing those edit forms with player reading surfaces.
 
@@ -41,7 +41,7 @@
 
 ## Components
 - Existing components to reuse: btn, inp, panel, tag, modal overlays, model picker menu.
-- New/changed components: Solo player table, role picker, compact header model picker, top-bar dossier viewer, draggable map viewer, game settings modal, multiplayer room strip.
+- New/changed components: Solo player table, role picker, compact header model picker, top-bar dossier viewer, draggable map viewer, game settings modal, multiplayer room strip, widened responsive launch shell, expanded launch campaign work area.
 - Variants and states: Connected/disconnected room, loading, empty model list, public/hidden knowledge documents, map floor switching, advanced settings collapsed.
 - Token/component ownership: Keep inline CSS patterns in web/index.html until the app is split into components.
 
@@ -54,7 +54,7 @@
 
 ## Responsive behavior
 - Supported breakpoints/devices: Desktop-first GM console with guarded overflow on small screens.
-- Layout adaptations: Header reference controls wrap as a compact group; dossier panels switch from side navigation to horizontal tabs on small screens.
+- Layout adaptations: Header reference controls wrap as a compact group; dossier panels switch from side navigation to horizontal tabs on small screens; launch/config screen uses a wide three-column desktop shell, a two-column tablet layout, and a stacked full-width mobile flow.
 - Touch/hover differences: Main commands remain button-sized; dossier maps support drag and wheel/gesture-like zoom; advanced editing tools live in modal lists.
 
 ## Interaction states

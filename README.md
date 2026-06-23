@@ -132,13 +132,13 @@ Windows 本地启动后程序会自动打开主入口；Linux 服务器启动不
 
 首次使用 AI 功能时，在前端配置面板填写 OpenAI 兼容端点。前端支持保存多个 OpenAI 兼容供应商 profile，并写入本地 `config.json`。该文件包含本地 API Key、启动端口、网页端配置项和服务端运行项，已在 `.gitignore` 中忽略。
 
-`config.json` 是唯一的本地运行配置源。项目不再读取 `.env` 中的 `OPENAI_COMPAT_*` 配置，避免同一密钥和模型在两处漂移。首次启动或首次保存配置时会写出包含默认值和 `//` 注释的 `config.json`；旧版 `openai_providers.json` 如存在会被读取并迁移到新文件。
+`config.json` 是唯一的本地运行配置源。项目不再读取 `.env` 中的 `OPENAI_COMPAT_*` 配置，避免同一密钥和模型在两处漂移。首次启动或首次保存配置时会写出包含默认值和 `//` 注释的 `config.json`。
 
-远程部署时，更新 API Key、切换供应商、获取草稿模型、修改 Token 策略、AI 缓存，以及剧本导入/重新识别/删除/迁移包导入导出都受管理员账号保护。请在 `config.json` 的 `security.admin_username` 和 `security.admin_password` 中配置管理员账号，重启服务后在主页使用该账号登录。普通注册账号只能游玩单人或多人模式，不能修改系统设置。
+远程部署时，登录账号可以保存自己的 OpenAI 兼容供应商、上传/重新识别/删除自己导入的剧本，并会使用自己的供应商执行剧本识别；不同账号不能查看或修改彼此的供应商配置。多人房间成员使用房主账号的供应商配置进行 AI-GM 裁定，不需要额外配置 API。
 
 剧本导入优先使用 MinerU。若 MinerU 未返回正文，系统会先尝试把 PDF 直接发给配置的“剧本解析模型”，要求模型识别 PDF 并输出结构化 JSON，用于写入场景、角色、百科、世界实体、地图和知识库；如果兼容端点不支持 PDF 文件输入，则退回本地提取文本与页面/内嵌图片，再一起发送给多模态模型兜底。
 
-`config.json` 中新增的运行项只覆盖网页端不能直接配置的服务端设置，例如 `security.admin_username/admin_password`、`campaign_import`、`rag`、`multiplayer` 限制和 `server.allowed_origins`。网页端已有入口的供应商、模型、Token 策略和 AI 缓存仍由前端配置面板保存，不需要手动改这些字段。
+`config.json` 中新增的运行项只覆盖网页端不能直接配置的服务端设置，例如 `campaign_import`、`rag`、`multiplayer` 限制和 `server.allowed_origins`。网页端已有入口的供应商、模型、Token 策略和 AI 缓存仍由前端配置面板保存，不需要手动改这些字段。
 
 模型配置区提供统一的“获取全部模型”按钮。获取成功后，Chat、Embedding、Image 和“剧本解析模型”每个模型输入框都会出现自己的下拉框；下拉框顶部带搜索框，可以在已获取模型中筛选并点击填入对应模型 ID。
 
@@ -172,7 +172,7 @@ E:\TRPG_Engine
 
 - AI 推演：OpenAI 兼容 chat 模型、模型列表获取、搜索、选择与多供应商切换。
 - 剧本导入：支持 PDF、DOCX、DOC、TXT、Markdown 导入；PDF/Word 优先通过 MinerU 提取正文和图片资源，失败时启用剧本解析模型多模态兜底。
-- 剧本迁移：管理员可将已解析的 `campaigns/<剧本名>` 导出为 ZIP 迁移包，并在另一台服务器导入。
+- 剧本迁移：剧本所有者可将已解析的 `campaigns/<剧本名>` 导出为 ZIP 迁移包，并在另一台服务器导入。
 - RAG 知识库：文档切片、embedding、关键词加向量混合检索。
 - 图像生成：统一使用 OpenAI 兼容供应商配置。
 - 记忆系统：短期工作区、长期记忆折叠、世界实体状态注入。
@@ -261,7 +261,6 @@ python -m py_compile main.py (Get-ChildItem server -Recurse -Filter *.py).FullNa
 不要提交本地运行数据或凭据：
 
 - `config.json`
-- `openai_providers.json`（旧版本地配置，存在时会迁移）
 - `.runtime/`
 - `.venv/`
 - `campaigns/*/mp_map_*`

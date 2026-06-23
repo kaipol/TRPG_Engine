@@ -30,6 +30,7 @@ from .trpgdice.component.roll.dice import (
     roll_d66,
 )
 from .trpgdice.component.spells import query_spell
+from .auth import require_account_from_request
 
 
 dice_router = fastapi.APIRouter(prefix="/api/dice", tags=["骰子规则服务"])
@@ -79,12 +80,13 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _record_to_memory(enabled: bool, text: str):
+def _record_to_memory(enabled: bool, text: str, request: fastapi.Request):
     if not enabled or not _append_to_memory or not _db_file:
         return
+    account = require_account_from_request(request)
     conn = sqlite3.connect(_db_file, timeout=10)
     try:
-        _append_to_memory(conn, f"[骰子服务] {text}")
+        _append_to_memory(conn, f"[骰子服务] {text}", owner_account_id=int(account["id"]))
         conn.commit()
     finally:
         conn.close()
@@ -182,7 +184,7 @@ class InitiativeAddRequest(BaseModel):
 
 
 @dice_router.post("/roll")
-def roll_expression(req: RollRequest):
+def roll_expression(req: RollRequest, request: fastapi.Request):
     expression = normalize_dice_expression(req.expression)
     total, detail = parse_dice_expression(expression)
     if total is None:
@@ -220,12 +222,12 @@ def roll_expression(req: RollRequest):
         "summary": summary,
         "created_at": _now(),
     }
-    _record_to_memory(req.record_to_memory, summary)
+    _record_to_memory(req.record_to_memory, summary, request)
     return result
 
 
 @dice_router.post("/coc/check")
-def coc_check(req: CocCheckRequest):
+def coc_check(req: CocCheckRequest, request: fastapi.Request):
     display_skill, target_value = prepare_skill_check(req.skill_name, req.skill_value)
     results: list[dict[str, Any]] = []
     for _ in range(req.roll_times):
@@ -244,7 +246,7 @@ def coc_check(req: CocCheckRequest):
     summary = f"{req.actor_name} 进行 {display_skill} 检定：{result_text}"
     if req.reason:
         summary += f"；{req.reason}"
-    _record_to_memory(req.record_to_memory, summary)
+    _record_to_memory(req.record_to_memory, summary, request)
     return {
         "status": "success",
         "actor_name": req.actor_name,
@@ -258,7 +260,7 @@ def coc_check(req: CocCheckRequest):
 
 
 @dice_router.post("/coc/versus")
-def coc_versus(req: VersusRequest):
+def coc_versus(req: VersusRequest, request: fastapi.Request):
     left_roll, left_detail = _roll_coc_d100()
     right_roll, right_detail = _roll_coc_d100()
     left_outcome = get_roll_result(left_roll, req.left_value, req.group_id)
@@ -291,7 +293,7 @@ def coc_versus(req: VersusRequest):
         f"对抗检定：{req.left_name} {left_roll}/{req.left_value} {left_outcome}；"
         f"{req.right_name} {right_roll}/{req.right_value} {right_outcome}；胜者：{winner}"
     )
-    _record_to_memory(req.record_to_memory, summary)
+    _record_to_memory(req.record_to_memory, summary, request)
     return {
         "status": "success",
         "left": {"name": req.left_name, "roll": left_roll, "target": req.left_value, "detail": left_detail, "outcome": left_outcome},
@@ -302,11 +304,11 @@ def coc_versus(req: VersusRequest):
 
 
 @dice_router.post("/coc/san")
-def coc_san(req: SanCheckRequest):
+def coc_san(req: SanCheckRequest, request: fastapi.Request):
     chara_data = {"attributes": {"san": req.san}}
     roll, san_value, result_msg, loss, new_san, expr = san_check(chara_data, req.loss_formula)
     summary = f"{req.actor_name} SAN Check：{roll}/{san_value} {result_msg}，损失 {loss}（{expr}），剩余 {new_san}"
-    _record_to_memory(req.record_to_memory, summary)
+    _record_to_memory(req.record_to_memory, summary, request)
     return {
         "status": "success",
         "roll": roll,
@@ -329,7 +331,8 @@ def coc_insanity(kind: str = "temporary"):
 
 
 @dice_router.post("/coc/rule")
-def set_coc_rule(group_id: str = "main", command: str = " "):
+def set_coc_rule(request: fastapi.Request, group_id: str = "main", command: str = " "):
+    require_account_from_request(request)
     return {"status": "success", "result": modify_coc_great_sf_rule_command(group_id, command or " ")}
 
 
@@ -349,9 +352,9 @@ def tool_fireball(ring: int = 3):
 
 
 @dice_router.post("/tool/choose")
-def tool_choose(req: ChoiceRequest):
+def tool_choose(req: ChoiceRequest, request: fastapi.Request):
     result = choose_option(req.options)
-    _record_to_memory(req.record_to_memory, f"随机选择：{result}")
+    _record_to_memory(req.record_to_memory, f"随机选择：{result}", request)
     return {"status": "success", "result": result}
 
 
@@ -384,7 +387,8 @@ def spell_lookup(q: str = ""):
 
 
 @dice_router.post("/initiative/add")
-def initiative_add(req: InitiativeAddRequest):
+def initiative_add(req: InitiativeAddRequest, request: fastapi.Request):
+    require_account_from_request(request)
     value, name = _initiative.parse_roll(req.expression, req.name)
     item = InitiativeItem(name=name or req.name, init_value=value, player_id=req.player_id)
     _initiative.add_item(req.group_id, item)
@@ -392,12 +396,14 @@ def initiative_add(req: InitiativeAddRequest):
 
 
 @dice_router.post("/initiative/next")
-def initiative_next(group_id: str = "main"):
+def initiative_next(request: fastapi.Request, group_id: str = "main"):
+    require_account_from_request(request)
     item = _initiative.next_turn(group_id)
     return {"status": "success", "current": item.__dict__ if item else None, "list": _initiative.format_list(group_id)}
 
 
 @dice_router.post("/initiative/clear")
-def initiative_clear(group_id: str = "main"):
+def initiative_clear(request: fastapi.Request, group_id: str = "main"):
+    require_account_from_request(request)
     _initiative.clear(group_id)
     return {"status": "success", "list": _initiative.format_list(group_id)}

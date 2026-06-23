@@ -8,15 +8,17 @@ import math
 import json
 import time
 import hashlib
+import html
 import re
 import sqlite3
 import threading
 from collections import OrderedDict
 import fastapi
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from .logger import get_logger
 from . import ai_provider
+from .auth import require_account_from_request
 from .document_extraction import extract_text_document
 
 _log = get_logger("rag")
@@ -63,6 +65,11 @@ def get_db_connection():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
+
+
+def _owner_id_from_request(request: Request) -> int:
+    account = require_account_from_request(request)
+    return int(account["id"])
 
 
 # ---------------------------------------------------------
@@ -121,6 +128,37 @@ class RagSearchRequest(BaseModel):
 # 核心函数：切片、embedding、检索
 # ---------------------------------------------------------
 
+def sanitize_knowledge_text(text: str) -> str:
+    """Convert extractor HTML/LaTeX artifacts to readable plain text for RAG."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not value:
+        return ""
+    value = re.sub(r"</(?:tr|p|div|li|h[1-6])\s*>", "\n", value, flags=re.I)
+    value = re.sub(r"</(?:td|th)\s*>", " | ", value, flags=re.I)
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.I)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = html.unescape(value)
+    value = re.sub(r"\$=\s*\\mathbf\{([^}]+)\}\s*=\$", r"= \1 =", value)
+    value = re.sub(r"\$\\mathbf\{([^}]+)\}\$", r"\1", value)
+    value = re.sub(r"\\([*_{}\[\]()#+.!-])", r"\1", value)
+    value = re.sub(
+        r"CLASS OF SERVICE DESIRED\s*\|.*?PATBOXIDE SHOULD CHECKCLASS OF SERVICE DISRUED\s*\|?",
+        "",
+        value,
+        flags=re.I | re.S,
+    )
+    value = re.sub(
+        r"CLASS OF SERVICE DESIRED\s*\|.*?(?:DEFERRED|DISRUED)\s*(?:\|?</td?)?",
+        "",
+        value,
+        flags=re.I | re.S,
+    )
+    value = re.sub(r"</?td\b[^>\n]*(?:>|$)", "", value, flags=re.I)
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    return value
+
 def chunk_text(text: str, max_size: int = 600, overlap: int = 0) -> list[str]:
     """
     语义切分：
@@ -129,7 +167,7 @@ def chunk_text(text: str, max_size: int = 600, overlap: int = 0) -> list[str]:
     3. 段落超过 max_size 时，按中文/英文句号切分
     4. 保留标点符号，不丢失语义边界
     """
-    text = text.strip()
+    text = sanitize_knowledge_text(text).strip()
     if not text:
         return []
 
@@ -208,14 +246,14 @@ def _extract_sparse_terms(query_text: str, max_terms: int = 12) -> list[str]:
     return terms[:max_terms]
 
 
-def _embedding_cache_scope() -> tuple[str, str]:
+def _embedding_cache_scope(owner_account_id: int | None = None) -> tuple[str, str]:
     """Cache keys must follow the active provider/model, otherwise vectors may be incompatible."""
     try:
-        cfg = ai_provider.get_config()
+        cfg = ai_provider.get_config(owner_account_id=owner_account_id)
         provider_id = cfg.provider_id
     except Exception:
         provider_id = ""
-    return provider_id, ai_provider.get_active_model("embedding") or ""
+    return provider_id, ai_provider.get_active_model("embedding", owner_account_id=owner_account_id) or ""
 
 
 def _embedding_cache_key(text: str, scope: tuple[str, str]) -> tuple[str, str, str]:
@@ -258,15 +296,15 @@ def _wait_for_embedding_slot():
     _last_embedding_call_at = time.monotonic()
 
 
-def get_embeddings(texts: list[str]) -> list[list[float]]:
+def get_embeddings(texts: list[str], *, owner_account_id: int | None = None) -> list[list[float]]:
     """
     调用统一 OpenAI 兼容端点获取 embedding 向量。
     带缓存、去重和 rate-limit 保护，避免运行中同一查询反复触发 embedding。
     """
-    if not texts or not ai_provider.get_active_model("embedding"):
+    if not texts or not ai_provider.get_active_model("embedding", owner_account_id=owner_account_id):
         return []
 
-    scope = _embedding_cache_scope()
+    scope = _embedding_cache_scope(owner_account_id=owner_account_id)
     all_embeddings: list[list[float]] = [[] for _ in texts]
     missing: OrderedDict[tuple[str, str, str], dict] = OrderedDict()
 
@@ -294,7 +332,7 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
             try:
                 with _embedding_api_lock:
                     _wait_for_embedding_slot()
-                    resp = ai_provider.embedding_create(batch)
+                    resp = ai_provider.embedding_create(batch, owner_account_id=owner_account_id)
                 items = sorted(resp.data, key=lambda x: x.index)
                 batch_embeddings: list[list[float]] = [[] for _ in batch]
                 for item in items:
@@ -492,7 +530,8 @@ def refresh_vector_cache():
 # ---------------------------------------------------------
 def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
                      vec_threshold: float = 0.3,
-                     allow_dense: bool = True) -> list[dict]:
+                     allow_dense: bool = True,
+                     owner_account_id: int | None = None) -> list[dict]:
     """
     混合检索：Sparse（关键词匹配）+ 可选 Dense（向量语义检索）。
     返回 [{"score": float, "chunk_text": str, "title": str, ...}, ...]
@@ -595,7 +634,7 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
 
     if dense_quota > 0:
         try:
-            query_vecs = get_embeddings([query_text])
+            query_vecs = get_embeddings([query_text], owner_account_id=owner_account_id)
         except Exception as e:
             _log.warning("RAG 检索 embedding 失败: %s", e)
             query_vecs = []
@@ -643,16 +682,23 @@ def _hybrid_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
 
 
 def rag_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
-                 allow_dense: bool = False) -> str:
+                 allow_dense: bool = False,
+                 owner_account_id: int | None = None) -> str:
     """
     检索最相关的 top_k 个切片，格式化为 prompt 注入文本。
     运行时默认只使用关键词/实体/标题检索，不调用 embedding。
     """
-    results = _hybrid_retrieve(conn, query_text, top_k=top_k, allow_dense=allow_dense)
+    results = _hybrid_retrieve(
+        conn,
+        query_text,
+        top_k=top_k,
+        allow_dense=allow_dense,
+        owner_account_id=owner_account_id,
+    )
     if not results:
         return ""
     return "\n\n".join(
-        f"[来源：{r['title']}]\n{r['chunk_text']}" for r in results
+        f"[来源：{r['title']}]\n{sanitize_knowledge_text(r['chunk_text'])}" for r in results
     )
 
 
@@ -660,9 +706,17 @@ def rag_retrieve(conn, query_text: str, top_k: int = RAG_TOP_K,
 # REST API 端点
 # ---------------------------------------------------------
 @rag_router.get("/api/rag/documents")
-def rag_list_documents():
+def rag_list_documents(request: Request, include_hidden: int = 0):
+    show_hidden = bool(include_hidden)
+    if show_hidden:
+        _owner_id_from_request(request)
     conn = get_db_connection()
-    docs = conn.execute("SELECT * FROM rag_documents ORDER BY created_at DESC").fetchall()
+    query = "SELECT * FROM rag_documents"
+    params = ()
+    if not show_hidden:
+        query += " WHERE hidden=0"
+    query += " ORDER BY created_at DESC"
+    docs = conn.execute(query, params).fetchall()
     result = []
     for d in docs:
         chunk_count = conn.execute(
@@ -690,8 +744,9 @@ def rag_get_document(doc_id: int):
 
 
 @rag_router.post("/api/rag/ingest")
-def rag_ingest(req: RagIngestRequest):
+def rag_ingest(req: RagIngestRequest, request: Request):
     """导入文档：切片 → embedding → 写入数据库。带 rate-limit 保护。"""
+    owner_account_id = _owner_id_from_request(request)
     t0 = time.time()
 
     chunks = chunk_text(req.text, max_size=req.chunk_size, overlap=req.chunk_overlap)
@@ -705,7 +760,7 @@ def rag_ingest(req: RagIngestRequest):
     )
     doc_id = cur.lastrowid
 
-    all_embeddings = get_embeddings(chunks)
+    all_embeddings = get_embeddings(chunks, owner_account_id=owner_account_id)
 
     for idx, chunk in enumerate(chunks):
         emb = all_embeddings[idx] if idx < len(all_embeddings) else []
@@ -733,6 +788,7 @@ def rag_ingest(req: RagIngestRequest):
 
 @rag_router.post("/api/rag/upload")
 async def rag_upload(
+    request:       Request,
     file:          UploadFile = File(...),
     title:         str        = Form(""),
     source:        str        = Form(""),
@@ -741,6 +797,7 @@ async def rag_upload(
     hidden:        int        = Form(0),
 ):
     """上传 TXT / Markdown / PDF / Word 文件并导入知识库。"""
+    owner_account_id = _owner_id_from_request(request)
     t0 = time.time()
     filename = file.filename or "unknown"
     raw = await file.read()
@@ -771,7 +828,7 @@ async def rag_upload(
     )
     doc_id = cur.lastrowid
 
-    all_embeddings = get_embeddings(chunks)
+    all_embeddings = get_embeddings(chunks, owner_account_id=owner_account_id)
     for idx, chunk in enumerate(chunks):
         emb = all_embeddings[idx] if idx < len(all_embeddings) else []
         conn.execute(
@@ -798,7 +855,8 @@ async def rag_upload(
 
 
 @rag_router.delete("/api/rag/documents/{doc_id}")
-def rag_delete_document(doc_id: int):
+def rag_delete_document(doc_id: int, request: Request):
+    _owner_id_from_request(request)
     conn = get_db_connection()
     conn.execute("DELETE FROM rag_chunks WHERE doc_id=?", (doc_id,))
     conn.execute("DELETE FROM rag_documents WHERE id=?", (doc_id,))
@@ -809,7 +867,8 @@ def rag_delete_document(doc_id: int):
 
 
 @rag_router.patch("/api/rag/documents/{doc_id}/hidden")
-def rag_toggle_hidden(doc_id: int, hidden: int):
+def rag_toggle_hidden(doc_id: int, hidden: int, request: Request):
+    _owner_id_from_request(request)
     """设置文档的隐藏状态（hidden=0 公开，hidden=1 隐藏）。"""
     conn = get_db_connection()
     conn.execute("UPDATE rag_documents SET hidden=? WHERE id=?", (1 if hidden else 0, doc_id))
@@ -819,8 +878,9 @@ def rag_toggle_hidden(doc_id: int, hidden: int):
 
 
 @rag_router.post("/api/rag/search")
-def rag_search(req: RagSearchRequest):
+def rag_search(req: RagSearchRequest, request: Request):
     """独立检索接口，供前端测试知识库效果；默认模拟运行时的无 embedding 检索。"""
+    owner_account_id = _owner_id_from_request(request) if req.use_dense else None
     query = f"{req.scene_name} {req.content}"
     conn = get_db_connection()
     effective_top_k = req.top_k if req.top_k > 0 else RAG_TOP_K * 2
@@ -830,6 +890,7 @@ def rag_search(req: RagSearchRequest):
         top_k=effective_top_k,
         vec_threshold=0.0 if req.use_dense else 0.3,
         allow_dense=req.use_dense,
+        owner_account_id=owner_account_id,
     )
     conn.close()
     return {"status": "success", "results": results}

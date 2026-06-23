@@ -7,9 +7,27 @@ from datetime import datetime, timedelta
 from typing import Callable, Any
 import json
 import os
+import re
 import shutil
 import threading
 import uuid
+
+
+CAMPAIGN_LIST_FIELDS = {
+    "characters",
+    "nodes",
+    "options",
+    "lorebook",
+    "triggers",
+    "world_entities",
+    "timelines",
+    "rag_library",
+    "memory_l1",
+    "pending_effects",
+    "npc_chat_logs",
+    "knowledge_documents",
+}
+MAP_LIST_FIELDS = {"map_rooms", "map_edges"}
 
 
 @dataclass(frozen=True)
@@ -74,10 +92,10 @@ class CampaignImportWorkflow:
             [bytes, str, str, bool, Callable[[int, str, list[str]], None] | None],
             tuple[str, list[str], list[str]],
         ],
-        ai_convert_campaign: Callable[[str, str, list[str]], tuple[dict, dict, list[str]]],
+        ai_convert_campaign: Callable[[str, str, list[str], int | None], tuple[dict, dict, list[str]]],
         logger,
         multimodal_extract_campaign_document: Callable[
-            [bytes, str, str, Callable[[int, str, list[str]], None] | None],
+            [bytes, str, str, Callable[[int, str, list[str]], None] | None, int | None],
             tuple[str, list[str], list[str]] | tuple[str, list[str], list[str], dict | None],
         ] | None = None,
         convert_structured_campaign_payload: Callable[[str, str, list[str], dict], tuple[dict, dict, list[str]]] | None = None,
@@ -323,6 +341,7 @@ class CampaignImportWorkflow:
                     filename,
                     assets_dir,
                     on_vision_progress,
+                    metadata.get("owner_account_id"),
                 )
                 if len(vision_result) == 4:
                     vision_text, vision_assets, vision_warnings, structured_payload = vision_result
@@ -360,8 +379,17 @@ class CampaignImportWorkflow:
             if structured_payload and self.convert_structured_campaign_payload:
                 campaign_data, map_data, ai_warnings = self.convert_structured_campaign_payload(campaign_name, text, asset_urls, structured_payload)
             else:
-                campaign_data, map_data, ai_warnings = self.ai_convert_campaign(campaign_name, text, asset_urls)
+                campaign_data, map_data, ai_warnings = self.ai_convert_campaign(
+                    campaign_name,
+                    text,
+                    asset_urls,
+                    metadata.get("owner_account_id"),
+                )
             warnings.extend(ai_warnings)
+            text = self._normalize_import_asset_references(text, campaign_name, extracted_assets)
+            campaign_data = self._normalize_import_asset_references(campaign_data, campaign_name, extracted_assets)
+            map_data = self._normalize_import_asset_references(map_data, campaign_name, extracted_assets)
+            campaign_data, map_data = self._normalize_import_payload(campaign_data, map_data)
 
             self._update(job_id, progress=84, step="write", message="写入 campaign.json / map.json / 分段知识库", warnings=warnings)
             knowledge_files = self._write_knowledge_documents(
@@ -467,8 +495,17 @@ class CampaignImportWorkflow:
             ]
             asset_urls = [self.campaign_asset_url(campaign_name, name) for name in asset_names]
             self._update(job_id, progress=30, step="convert", message="重新结构化剧本、角色、地图与知识库", warnings=warnings)
-            campaign_data, map_data, ai_warnings = self.ai_convert_campaign(campaign_name, text, asset_urls)
+            campaign_data, map_data, ai_warnings = self.ai_convert_campaign(
+                campaign_name,
+                text,
+                asset_urls,
+                metadata.get("owner_account_id"),
+            )
             warnings.extend(ai_warnings)
+            text = self._normalize_import_asset_references(text, campaign_name, asset_names)
+            campaign_data = self._normalize_import_asset_references(campaign_data, campaign_name, asset_names)
+            map_data = self._normalize_import_asset_references(map_data, campaign_name, asset_names)
+            campaign_data, map_data = self._normalize_import_payload(campaign_data, map_data)
 
             for filename in ("campaign.json", "map.json", "manifest.json"):
                 path = os.path.join(folder_path, filename)
@@ -575,6 +612,72 @@ class CampaignImportWorkflow:
         except ValueError:
             return False
 
+    def _asset_reference_map(self, campaign_name: str, asset_names: list[str]) -> dict[str, str]:
+        refs: dict[str, str] = {}
+        for name in asset_names:
+            if not name:
+                continue
+            url = self.campaign_asset_url(campaign_name, name)
+            refs[name] = url
+            refs[os.path.basename(name)] = url
+            stem, _ext = os.path.splitext(os.path.basename(name))
+            if stem:
+                refs[stem] = url
+        return refs
+
+    def _normalize_import_asset_references(self, value: Any, campaign_name: str, asset_names: list[str]) -> Any:
+        refs = self._asset_reference_map(campaign_name, asset_names)
+        if isinstance(value, str):
+            text = re.sub(
+                r"\n?<details>\s*<summary>(?:natural_image|text_image)</summary>.*?</details>\s*",
+                "\n",
+                value,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
+            def repl(match: re.Match) -> str:
+                alt = match.group(1) or ""
+                raw_path = match.group(2) or ""
+                basename = os.path.basename(raw_path.replace("\\", "/"))
+                stem, _ext = os.path.splitext(basename)
+                target = refs.get(basename) or refs.get(stem)
+                if not target and stem:
+                    for key, url in refs.items():
+                        key_stem, _key_ext = os.path.splitext(os.path.basename(key))
+                        if stem.startswith(key_stem) or key_stem.startswith(stem):
+                            target = url
+                            break
+                if not target:
+                    return match.group(0)
+                return f"![{alt}]({target})"
+
+            text = re.sub(r"!\[([^\]]*)\]\((?:\./)?(images/[^)]+)\)", repl, text, flags=re.IGNORECASE)
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+            return text
+        if isinstance(value, list):
+            return [self._normalize_import_asset_references(item, campaign_name, asset_names) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._normalize_import_asset_references(item, campaign_name, asset_names)
+                for key, item in value.items()
+            }
+        return value
+
+    def _normalize_import_payload(self, campaign_data: Any, map_data: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        campaign = campaign_data if isinstance(campaign_data, dict) else {}
+        map_payload = map_data if isinstance(map_data, dict) else {}
+
+        for key in CAMPAIGN_LIST_FIELDS:
+            if not isinstance(campaign.get(key), list):
+                campaign[key] = []
+        for key in MAP_LIST_FIELDS:
+            if not isinstance(map_payload.get(key), list):
+                map_payload[key] = []
+
+        campaign["worldview"] = str(campaign.get("worldview") or "【默认世界观】")
+        campaign["session_memory"] = str(campaign.get("session_memory") or "【跑团记忆日志已初始化】\n")
+        return campaign, map_payload
+
     def _fallback_knowledge_documents(self, _title: str, text: str) -> list[dict[str, str]]:
         return [{
             "title": "原始剧本文档",
@@ -679,7 +782,8 @@ class CampaignImportWorkflow:
                 data = json.load(f)
             if isinstance(data, dict):
                 node_parts = []
-                for node in data.get("nodes", []):
+                nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+                for node in nodes:
                     if isinstance(node, dict):
                         node_parts.append(
                             f"# {node.get('name') or '场景'}\n\n"

@@ -6,7 +6,7 @@ import os
 
 import fastapi
 from fastapi import APIRouter
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
@@ -42,15 +42,6 @@ _REQUIRED_ASSET_FILES = (
     "multiplayer-app.js",
     "tailwind-lite.css",
 )
-_LEGACY_ROOT_ASSET_ALIASES = {
-    "index.css": "/assets/index.css",
-    "index-app.js": "/assets/index-app.js",
-    "multiplayer.css": "/assets/multiplayer.css",
-    "multiplayer-app.js": "/assets/multiplayer-app.js",
-    "tailwind-lite.css": "/assets/tailwind-lite.css",
-}
-
-
 class NoStoreStaticFiles(StaticFiles):
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
@@ -179,36 +170,6 @@ def serve_favicon():
 @static_router.get("/api/debug/static-assets")
 def debug_static_assets():
     return static_assets_status()
-
-
-def _redirect_legacy_root_asset(asset_name: str):
-    target = _LEGACY_ROOT_ASSET_ALIASES[asset_name]
-    return RedirectResponse(target, status_code=308, headers=_NO_STORE_HEADERS)
-
-
-@static_router.get("/index.css", include_in_schema=False)
-def redirect_legacy_index_css():
-    return _redirect_legacy_root_asset("index.css")
-
-
-@static_router.get("/index-app.js", include_in_schema=False)
-def redirect_legacy_index_app_js():
-    return _redirect_legacy_root_asset("index-app.js")
-
-
-@static_router.get("/multiplayer.css", include_in_schema=False)
-def redirect_legacy_multiplayer_css():
-    return _redirect_legacy_root_asset("multiplayer.css")
-
-
-@static_router.get("/multiplayer-app.js", include_in_schema=False)
-def redirect_legacy_multiplayer_app_js():
-    return _redirect_legacy_root_asset("multiplayer-app.js")
-
-
-@static_router.get("/tailwind-lite.css", include_in_schema=False)
-def redirect_legacy_tailwind_lite_css():
-    return _redirect_legacy_root_asset("tailwind-lite.css")
 
 
 @static_router.get("/{filename}")

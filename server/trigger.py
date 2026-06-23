@@ -2,7 +2,7 @@
 Z.R.I.C 引擎 — 触发器系统模块 (trigger.py)
 
 支持功能：
-- DAG 条件树：{"op": "and|or|not", "children": [...]}，旧 AND 列表自动迁移
+- DAG 条件树：{"op": "and|or|not", "children": [...]}
 - fire_count / cooldown / prerequisite_trigger_ids / exclude_trigger_ids
 - trigger_judgements 表记录 AI 推理过程（含 prompt_hash 去重缓存）
 """
@@ -15,12 +15,13 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import fastapi
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
 
 from .logger import get_logger
 from .rag import refresh_vector_cache
 from . import ai_provider
+from .auth import require_account_from_request
 
 _log = get_logger("trigger")
 
@@ -42,6 +43,20 @@ def configure_trigger(db_file: str, chat_client=None,
     _fn_get_system_context = fn_get_system_context
     _fn_append_to_memory = fn_append_to_memory
     _ensure_schema()
+
+
+def _account_owner_id(request: Request) -> int:
+    account = require_account_from_request(request)
+    return int(account["id"])
+
+
+def _append_memory(conn, text: str, *, owner_account_id: int | None = None) -> None:
+    if not _fn_append_to_memory:
+        return
+    try:
+        _fn_append_to_memory(conn, text, owner_account_id=owner_account_id)
+    except TypeError:
+        _fn_append_to_memory(conn, text)
 
 
 def get_db_connection():
@@ -127,7 +142,7 @@ class TriggerCreateRequest(BaseModel):
     label: str = "未命名触发器"
     target_node_id: int = 0             # passive 模式可为 0（无跳转目标）
     mode: str = "soft"                  # soft | hard | passive
-    conditions: list | dict = []        # 接受列表（旧）或树（新）
+    conditions: dict = Field(default_factory=dict)
     cond_type: str = ""
     cond_value: str = ""
     cooldown: int = 0
@@ -140,7 +155,7 @@ class TriggerUpdateRequest(BaseModel):
     label: str
     target_node_id: int = 0
     mode: str
-    conditions: list | dict = []
+    conditions: dict = Field(default_factory=dict)
     cond_type: str = ""
     cond_value: str = ""
     cooldown: int = 0
@@ -160,22 +175,13 @@ class CheckTriggersRequest(BaseModel):
 # 条件树：解析 & 规范化
 # ---------------------------------------------------------
 def _parse_condition_tree(raw: str | None) -> dict:
-    """
-    将数据库 conditions 字段解析为标准树节点。
-    旧格式 [...] 自动升级为 {"op": "and", "children": [...]}。
-    """
+    """将数据库 conditions 字段解析为标准树节点。"""
     if not raw:
         return {"op": "and", "children": []}
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {"op": "and", "children": []}
-
-    if isinstance(data, list):
-        # 旧 AND 列表
-        leaves = [{"type": c.get("type", ""), "value": c.get("value", "")}
-                  for c in data if c.get("type")]
-        return {"op": "and", "children": leaves}
 
     if isinstance(data, dict) and "op" in data:
         return data
@@ -188,16 +194,6 @@ def _normalize_conditions(req) -> str:
     conds = getattr(req, "conditions", [])
     if isinstance(conds, dict) and "op" in conds:
         return json.dumps(conds, ensure_ascii=False)
-    if isinstance(conds, list) and conds:
-        leaves = [{"type": c.type if hasattr(c, "type") else c.get("type",""),
-                   "value": c.value if hasattr(c, "value") else c.get("value","")}
-                  for c in conds]
-        return json.dumps({"op": "and", "children": leaves}, ensure_ascii=False)
-    # 旧单字段回退
-    if getattr(req, "cond_type", ""):
-        return json.dumps({"op": "and", "children": [
-            {"type": req.cond_type, "value": req.cond_value}
-        ]}, ensure_ascii=False)
     return json.dumps({"op": "and", "children": []}, ensure_ascii=False)
 
 
@@ -344,7 +340,8 @@ def _eval_tree_3val(node: dict, scene_id: int, chars: list, all_inv: str,
 # ---------------------------------------------------------
 def _batch_judge_ai(values: list[str], scene_name: str, scene_content: str,
                     conn, trigger_id: int | None = None,
-                    scene_id: int = 0) -> dict[str, bool]:
+                    scene_id: int = 0,
+                    owner_account_id: int | None = None) -> dict[str, bool]:
     """
     返回 {value: bool} 字典。
     AI 成功时写入 trigger_judgements（审计用）；降级/失败时不落库，避免污染。
@@ -405,6 +402,7 @@ def _batch_judge_ai(values: list[str], scene_name: str, scene_content: str,
             temperature=0.1,
             max_tokens=600 + 10 * n,
             response_format={"type": "json_object"},
+            owner_account_id=owner_account_id,
         )
         if resp.choices[0].finish_reason == "length":
             _log.warning("AI 触发器推理被截断，降级为全 False，不写缓存")
@@ -443,9 +441,10 @@ def _batch_judge_ai(values: list[str], scene_name: str, scene_content: str,
 # ---------------------------------------------------------
 # AI 即时生成节点内容辅助
 # ---------------------------------------------------------
-def _generate_node_ai(prompt: str, scene_name: str, conn) -> dict | None:
+def _generate_node_ai(prompt: str, scene_name: str, conn,
+                      owner_account_id: int | None = None) -> dict | None:
     """使用 AI 即兴生成一个剧情节点，返回 {name, content} 或 None（失败时）。"""
-    if not _fn_get_system_context or not ai_provider.is_configured():
+    if not _fn_get_system_context or owner_account_id is None or not ai_provider.is_configured(owner_account_id=owner_account_id):
         return None
     try:
         worldview, party_status, _, session_memory, \
@@ -480,6 +479,7 @@ def _generate_node_ai(prompt: str, scene_name: str, conn) -> dict | None:
             temperature=0.75,
             max_tokens=400,
             response_format={"type": "json_object"},
+            owner_account_id=owner_account_id,
         )
         if resp.choices[0].finish_reason == "length":
             _log.warning("gen_node AI 截断")
@@ -499,7 +499,8 @@ def _generate_node_ai(prompt: str, scene_name: str, conn) -> dict | None:
 # ---------------------------------------------------------
 def _execute_actions(actions_raw: str, conn, trigger_id: int,
                      scene_id: int, scene_name: str,
-                     allow_ai: bool = False) -> dict:
+                     allow_ai: bool = False,
+                     owner_account_id: int | None = None) -> dict:
     """
     动作类型一览：
       set_flag      — {key, value}：写入 game_flags 表
@@ -563,7 +564,7 @@ def _execute_actions(actions_raw: str, conn, trigger_id: int,
             elif atype == "add_memory":
                 text = str(act.get("text", "")).strip()
                 if text and _fn_append_to_memory:
-                    _fn_append_to_memory(conn, text)
+                    _append_memory(conn, text, owner_account_id=owner_account_id)
                     _log.info("触发器 %d add_memory: %s…", trigger_id, text[:40])
                     side_effects["log"].append(f"📝 记忆已写入：{text[:30]}…" if len(text) > 30 else f"📝 记忆已写入：{text}")
 
@@ -651,7 +652,7 @@ def _execute_actions(actions_raw: str, conn, trigger_id: int,
                 prompt   = str(act.get("prompt", "")).strip()
                 nav_mode = str(act.get("mode", "soft")).strip()
                 if prompt:
-                    result = _generate_node_ai(prompt, scene_name, conn)
+                    result = _generate_node_ai(prompt, scene_name, conn, owner_account_id=owner_account_id)
                     if result:
                         cur = conn.execute(
                             "INSERT INTO nodes (name, summary, content) VALUES (?,?,?)",
@@ -814,8 +815,13 @@ def _execute_actions(actions_raw: str, conn, trigger_id: int,
                     side_effects["log"].append(f"🧑 NPC「{name}」已存在，跳过")
                     continue
                 conn.execute(
-                    "INSERT INTO characters (name, role, hp, san, inventory, status) VALUES (?,?,?,?,?,?)",
-                    (name, "NPC", hp, san, inventory, "active")
+                    "INSERT INTO characters "
+                    "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        name, "NPC", hp, san, inventory, desc[:1600],
+                        (desc or f"{name}，新登场的 NPC")[:1800], "", "", "active",
+                    )
                 )
                 state_desc = json.dumps({
                     "desc":       desc or f"{name}，新登场的 NPC",
@@ -904,7 +910,8 @@ def _action_types(actions_raw: str) -> set[str]:
 # ---------------------------------------------------------
 def _check_trigger(trigger_row, scene_id: int, scene_name: str,
                    scene_content: str, chars: list, all_inv: str,
-                   ai_cache: dict, conn, allow_ai: bool = False) -> bool:
+                   ai_cache: dict, conn, allow_ai: bool = False,
+                   owner_account_id: int | None = None) -> bool:
     t = trigger_row
 
     # ── 前驱：所有前驱触发器必须已 fire ────────────────────────────────────
@@ -963,7 +970,8 @@ def _check_trigger(trigger_row, scene_id: int, scene_name: str,
     if new_ai:
         unique = list(dict.fromkeys(new_ai))
         batch = _batch_judge_ai(unique, scene_name, scene_content, conn,
-                                trigger_id=t["id"], scene_id=scene_id)
+                                trigger_id=t["id"], scene_id=scene_id,
+                                owner_account_id=owner_account_id)
         ai_cache.update(batch)
 
     return _eval_tree(tree, scene_id, chars, all_inv, ai_cache)
@@ -996,7 +1004,8 @@ def get_triggers():
 
 
 @trigger_router.post("/api/game/trigger")
-def create_trigger(req: TriggerCreateRequest):
+def create_trigger(req: TriggerCreateRequest, request: Request):
+    _account_owner_id(request)
     with safe_db() as conn:
         if req.target_node_id and req.mode != "passive" and not _has_gen_node_action(req.actions):
             if not conn.execute("SELECT id FROM nodes WHERE id=?", (req.target_node_id,)).fetchone():
@@ -1020,7 +1029,8 @@ def create_trigger(req: TriggerCreateRequest):
 
 
 @trigger_router.put("/api/game/trigger/{tid}")
-def update_trigger(tid: int, req: TriggerUpdateRequest):
+def update_trigger(tid: int, req: TriggerUpdateRequest, request: Request):
+    _account_owner_id(request)
     with safe_db() as conn:
         if req.target_node_id and req.mode != "passive" and not _has_gen_node_action(req.actions):
             if not conn.execute("SELECT id FROM nodes WHERE id=?", (req.target_node_id,)).fetchone():
@@ -1046,7 +1056,8 @@ def update_trigger(tid: int, req: TriggerUpdateRequest):
 
 
 @trigger_router.delete("/api/game/trigger/{tid}")
-def delete_trigger(tid: int):
+def delete_trigger(tid: int, request: Request):
+    _account_owner_id(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM triggers WHERE id=?", (tid,))
         conn.commit()
@@ -1054,7 +1065,8 @@ def delete_trigger(tid: int):
 
 
 @trigger_router.post("/api/game/trigger/{tid}/reset")
-def reset_trigger(tid: int):
+def reset_trigger(tid: int, request: Request):
+    _account_owner_id(request)
     with safe_db() as conn:
         conn.execute(
             "UPDATE triggers SET fired=0, fire_count=0, last_fired_at=0 WHERE id=?",
@@ -1065,7 +1077,8 @@ def reset_trigger(tid: int):
 
 
 @trigger_router.post("/api/game/triggers/reset-all")
-def reset_all_triggers():
+def reset_all_triggers(request: Request):
+    _account_owner_id(request)
     """将所有触发器重置为未触发状态（调试用）。"""
     with safe_db() as conn:
         conn.execute("UPDATE triggers SET fired=0, fire_count=0, last_fired_at=0")
@@ -1084,8 +1097,9 @@ def get_trigger_judgements(limit: int = 50):
 
 
 @trigger_router.post("/api/game/check-triggers")
-def check_triggers(req: CheckTriggersRequest):
+def check_triggers(req: CheckTriggersRequest, request: Request):
     """检查所有符合条件的触发器（DAG 条件树）。"""
+    owner_account_id = _account_owner_id(request)
     conn = get_db_connection()
     try:
         # 取未永久封锁的触发器：
@@ -1112,7 +1126,8 @@ def check_triggers(req: CheckTriggersRequest):
         for t in pending:
             if not _check_trigger(t, req.scene_id, req.scene_name,
                                    req.scene_content, chars, all_inv,
-                                   ai_cache, conn, req.allow_ai):
+                                   ai_cache, conn, req.allow_ai,
+                                   owner_account_id=owner_account_id):
                 continue
             if not req.allow_ai and _action_types(t["actions"] if "actions" in t.keys() else "[]") == {"gen_node"}:
                 continue
@@ -1120,7 +1135,8 @@ def check_triggers(req: CheckTriggersRequest):
             # ── 执行触发器动作副作用，收集前端需感知的副作用 ───────────────────
             side = _execute_actions(
                 t["actions"] if "actions" in t.keys() else "[]",
-                conn, t["id"], req.scene_id, req.scene_name, req.allow_ai
+                conn, t["id"], req.scene_id, req.scene_name, req.allow_ai,
+                owner_account_id=owner_account_id
             )
             text_injections.extend(side["text_injections"])
             option_injections.extend(side["option_injections"])
@@ -1173,18 +1189,20 @@ def check_triggers(req: CheckTriggersRequest):
             if t["mode"] != "passive" and _fn_append_to_memory:
                 if side["generated_nodes"]:
                     gn = side["generated_nodes"][0]
-                    _fn_append_to_memory(
+                    _append_memory(
                         conn,
-                        f"触发「{t['label']}」，进入「{gn['node_name']}」。"  #触发+触发器名称
+                        f"触发「{t['label']}」，进入「{gn['node_name']}」。",
+                        owner_account_id=owner_account_id,
                     )
                 elif t["target_node_id"]:
                     target_node = conn.execute(
                         "SELECT name FROM nodes WHERE id=?", (t["target_node_id"],)
                     ).fetchone()
                     scene_label = target_node["name"] if target_node else f"场景{t['target_node_id']}"
-                    _fn_append_to_memory(
+                    _append_memory(
                         conn,
-                        f"触发「{t['label']}」，场景切换至「{scene_label}」。"
+                        f"触发「{t['label']}」，场景切换至「{scene_label}」。",
+                        owner_account_id=owner_account_id,
                     )
 
         conn.commit()

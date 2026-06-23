@@ -10,7 +10,6 @@ from typing import Any
 
 
 CONFIG_FILE_NAME = "config.json"
-LEGACY_CONFIG_FILE_NAME = "openai_providers.json"
 DEFAULT_CONFIG_VERSION = 1
 DEFAULT_SERVER_HOST = "0.0.0.0"
 DEFAULT_SERVER_PORT = 8000
@@ -23,8 +22,6 @@ DEFAULT_AI_CACHE_ENABLED = True
 DEFAULT_AI_CACHE_MAX_ENTRIES = 512
 DEFAULT_AUTO_OPEN_BROWSER = True
 DEFAULT_ALLOW_FILE_ORIGIN = False
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = ""
 DEFAULT_CAMPAIGN_IMPORT_AI_TIMEOUT_SECONDS = 45.0
 DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND = "mineru-open-api"
 DEFAULT_CAMPAIGN_IMPORT_MINERU_TIMEOUT_SECONDS = 900.0
@@ -66,10 +63,6 @@ DEFAULT_LOCAL_CONFIG = {
         "allowed_origins": [],
         "allow_file_origin": DEFAULT_ALLOW_FILE_ORIGIN,
     },
-    "security": {
-        "admin_username": DEFAULT_ADMIN_USERNAME,
-        "admin_password": DEFAULT_ADMIN_PASSWORD,
-    },
     "campaign_import": {
         "ai_timeout_seconds": DEFAULT_CAMPAIGN_IMPORT_AI_TIMEOUT_SECONDS,
         "mineru_command": DEFAULT_CAMPAIGN_IMPORT_MINERU_COMMAND,
@@ -94,6 +87,7 @@ DEFAULT_LOCAL_CONFIG = {
         "max_room_players": DEFAULT_MAX_ROOM_PLAYERS,
     },
     "active_provider": DEFAULT_PROVIDER_ID,
+    "active_provider_by_account": {},
     "token_policy_mode": DEFAULT_TOKEN_POLICY_MODE,
     "ai_cache": {
         "enabled": DEFAULT_AI_CACHE_ENABLED,
@@ -114,10 +108,6 @@ def resolve_base_dir() -> str:
 
 def provider_store_path(base_dir: str | None = None) -> Path:
     return Path(base_dir or resolve_base_dir()) / CONFIG_FILE_NAME
-
-
-def legacy_provider_store_path(base_dir: str | None = None) -> Path:
-    return Path(base_dir or resolve_base_dir()) / LEGACY_CONFIG_FILE_NAME
 
 
 def _clone(value: Any) -> Any:
@@ -175,6 +165,11 @@ def _normalize_provider_record(raw: Any, fallback_id: str = DEFAULT_PROVIDER_ID)
     record = _clone(DEFAULT_PROVIDER_RECORD)
     if not isinstance(raw, dict):
         raw = {}
+    owner_account_id = raw.get("owner_account_id")
+    try:
+        owner_account_id = int(owner_account_id) if owner_account_id not in (None, "") else None
+    except (TypeError, ValueError):
+        owner_account_id = None
     record.update({
         "id": str(raw.get("id") or fallback_id).strip() or fallback_id,
         "name": str(raw.get("name") or raw.get("id") or fallback_id).strip() or fallback_id,
@@ -186,6 +181,10 @@ def _normalize_provider_record(raw: Any, fallback_id: str = DEFAULT_PROVIDER_ID)
         "campaign_model": str(raw.get("campaign_model") or "").strip(),
         "image_size": str(raw.get("image_size") or DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
     })
+    if owner_account_id is not None:
+        record["owner_account_id"] = owner_account_id
+        record["owner_username"] = str(raw.get("owner_username") or "").strip()
+        record["owner_display_name"] = str(raw.get("owner_display_name") or "").strip()
     return record
 
 
@@ -253,14 +252,6 @@ def normalize_server_settings(raw: Any) -> dict[str, Any]:
         "auto_open_browser": normalize_bool(server.get("auto_open_browser"), DEFAULT_AUTO_OPEN_BROWSER),
         "allowed_origins": normalize_origin_list(server.get("allowed_origins")),
         "allow_file_origin": normalize_bool(server.get("allow_file_origin"), DEFAULT_ALLOW_FILE_ORIGIN),
-    }
-
-
-def normalize_security_settings(raw: Any) -> dict[str, Any]:
-    security = raw if isinstance(raw, dict) else {}
-    return {
-        "admin_username": str(security.get("admin_username") or DEFAULT_ADMIN_USERNAME).strip() or DEFAULT_ADMIN_USERNAME,
-        "admin_password": str(security.get("admin_password") or DEFAULT_ADMIN_PASSWORD),
     }
 
 
@@ -349,16 +340,19 @@ def normalize_local_config(raw: dict[str, Any] | None = None) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     cfg = _clone(DEFAULT_LOCAL_CONFIG)
     for key, value in raw.items():
+        if key == "security":
+            continue
         if key not in cfg:
             cfg[key] = value
 
     cfg["server"] = normalize_server_settings(raw.get("server"))
-    cfg["security"] = normalize_security_settings(raw.get("security"))
     cfg["campaign_import"] = normalize_campaign_import_settings(raw.get("campaign_import"))
     cfg["rag"] = normalize_rag_settings(raw.get("rag"))
     cfg["multiplayer"] = normalize_multiplayer_settings(raw.get("multiplayer"))
     cfg["config_version"] = raw.get("config_version") or DEFAULT_CONFIG_VERSION
     cfg["active_provider"] = str(raw.get("active_provider") or DEFAULT_PROVIDER_ID).strip() or DEFAULT_PROVIDER_ID
+    active_by_account = raw.get("active_provider_by_account")
+    cfg["active_provider_by_account"] = active_by_account if isinstance(active_by_account, dict) else {}
     cfg["token_policy_mode"] = str(raw.get("token_policy_mode") or DEFAULT_TOKEN_POLICY_MODE).strip() or DEFAULT_TOKEN_POLICY_MODE
     cfg["ai_cache"] = normalize_ai_cache_settings(raw.get("ai_cache"))
 
@@ -390,9 +384,6 @@ def _config_jsonc_text(data: dict[str, Any]) -> str:
         "  // FastAPI 服务运行配置；修改后需要重新启动。\n"
         "  // allowed_origins 为空时自动允许当前端口的 localhost / 127.0.0.1。\n"
         f"  \"server\": {_json_block(cfg['server'])},\n\n"
-        "  // 管理员保护配置。填写 admin_username/admin_password 后，该账号可在主页登录并修改系统配置。\n"
-        "  // admin_password 留空时系统设置修改会被禁用。\n"
-        f"  \"security\": {_json_block(cfg['security'])},\n\n"
         "  // 剧本导入配置。MinerU 会先 OCR/提取图片，然后调用剧本解析模型转换为可玩剧本。\n"
         "  // mineru_model 留空时使用官方 CLI 自动模型选择；mineru_token/base_url/source/verbose 仅在显式配置时写入。\n"
         "  // mineru_token 属于敏感凭据，优先建议用 mineru-open-api auth 或 MINERU_TOKEN；如填写到此文件，不要提交到 Git。\n"
@@ -404,6 +395,8 @@ def _config_jsonc_text(data: dict[str, Any]) -> str:
         "  // 以下字段由网页配置面板维护，通常不需要手动修改。\n"
         "  // 当前使用的 OpenAI 兼容供应商 id，必须对应 providers[].id。\n"
         f"  \"active_provider\": {json.dumps(cfg['active_provider'], ensure_ascii=False)},\n\n"
+        "  // 各登录账号自己的活动供应商 id。普通账号只能看到和修改自己创建的供应商。\n"
+        f"  \"active_provider_by_account\": {_json_block(cfg['active_provider_by_account'])},\n\n"
         "  // 游玩过程的 Token 策略：full / balanced / frugal。\n"
         f"  \"token_policy_mode\": {json.dumps(cfg['token_policy_mode'], ensure_ascii=False)},\n\n"
         "  // 非流式 AI 响应缓存设置；max_entries 范围 16-10000。\n"
@@ -417,14 +410,9 @@ def _config_jsonc_text(data: dict[str, Any]) -> str:
 
 def read_local_config(base_dir: str | None = None) -> dict[str, Any]:
     path = provider_store_path(base_dir)
-    legacy_path = legacy_provider_store_path(base_dir)
     try:
         if path.exists():
             return normalize_local_config(_read_config_file(path))
-        if legacy_path.exists():
-            data = normalize_local_config(_read_config_file(legacy_path))
-            write_local_config(data, base_dir)
-            return data
     except Exception:
         return normalize_local_config()
     return normalize_local_config()
@@ -509,20 +497,17 @@ def ensure_local_config(base_dir: str | None = None) -> Path:
     else:
         try:
             raw = _read_config_file(path)
-            required_sections = ("server", "security", "campaign_import", "rag", "multiplayer")
+            required_sections = ("server", "campaign_import", "rag", "multiplayer")
             missing_section = any(not isinstance(raw.get(section), dict) for section in required_sections)
+            has_security_section = "security" in raw
             missing_server_keys = (
                 isinstance(raw.get("server"), dict)
                 and any(key not in raw["server"] for key in ("auto_open_browser", "allowed_origins", "allow_file_origin"))
             )
-            missing_security_keys = (
-                isinstance(raw.get("security"), dict)
-                and any(key not in raw["security"] for key in ("admin_username", "admin_password"))
-            )
             rewrite_campaign_import = _campaign_import_needs_rewrite(raw.get("campaign_import"))
             providers = raw.get("providers") if isinstance(raw.get("providers"), list) else []
             missing_provider_keys = any(isinstance(p, dict) and "campaign_model" not in p for p in providers)
-            if missing_section or missing_server_keys or missing_security_keys or rewrite_campaign_import or missing_provider_keys:
+            if missing_section or has_security_section or missing_server_keys or rewrite_campaign_import or missing_provider_keys:
                 write_local_config(normalize_local_config(raw), base_dir)
         except Exception:
             write_local_config(read_local_config(base_dir), base_dir)
@@ -613,25 +598,6 @@ def get_allowed_origins(base_dir: str | None = None, server_port: int | None = N
 
 def get_auto_open_browser(base_dir: str | None = None) -> bool:
     return bool(get_server_settings(base_dir).get("auto_open_browser"))
-
-
-def get_security_settings(base_dir: str | None = None) -> dict[str, Any]:
-    data = read_local_config(base_dir)
-    settings = normalize_security_settings(data.get("security"))
-    env_admin_username = os.environ.get("ZRIC_ADMIN_USERNAME", "").strip()
-    if env_admin_username:
-        settings["admin_username"] = env_admin_username
-    env_admin_password = os.environ.get("ZRIC_ADMIN_PASSWORD", "")
-    if env_admin_password:
-        settings["admin_password"] = env_admin_password
-    return settings
-
-def get_admin_credentials(base_dir: str | None = None) -> tuple[str, str]:
-    settings = get_security_settings(base_dir)
-    return (
-        str(settings.get("admin_username") or "").strip(),
-        str(settings.get("admin_password") or ""),
-    )
 
 
 def get_campaign_import_settings(base_dir: str | None = None) -> dict[str, Any]:

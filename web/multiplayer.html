@@ -11,7 +11,7 @@
 <body>
   <div id="app" class="app">
     <audio ref="audioEl" loop :src="bgmUrl"></audio>
-    <header class="topbar">
+    <header class="topbar multiplayer-topbar">
       <div class="brand">
         <div class="brand-mark">Z</div>
         <div style="min-width:0">
@@ -23,13 +23,16 @@
         <template v-if="room">房间 {{ room.code }} · {{ room.name }}</template>
         <template v-else>输入房间码后开始</template>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+      <div class="app-topbar-actions" style="display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
         <div class="top-lore-actions">
           <button @click="openDossierPanel('worldview')" class="btn btn-ghost btn-sm top-lore-btn" title="查看世界观">
             <i class="ph ph-globe" style="font-size:15px"></i> 世界观
           </button>
           <button @click="openDossierPanel('map')" class="btn btn-ghost btn-sm top-lore-btn" title="查看地图">
             <i class="ph ph-map-trifold" style="font-size:15px"></i> 地图
+          </button>
+          <button @click="openDossierPanel('assets')" class="btn btn-ghost btn-sm top-lore-btn" title="查看导入图片">
+            <i class="ph ph-images" style="font-size:15px"></i> 图片
           </button>
           <button @click="openDossierPanel('knowledge')" class="btn btn-ghost btn-sm top-lore-btn" title="查看知识库">
             <i class="ph ph-database" style="font-size:15px"></i> 知识库
@@ -45,13 +48,16 @@
           </button>
         </div>
         <div class="status"><span class="dot" :class="{on: wsConnected}"></span>{{ wsConnected ? '实时同步中' : '未连接' }}</div>
+        <button class="btn btn-ghost btn-sm" @click="saveRoomProgress" :disabled="!room || roomSaveBusy" :title="canSaveRoom ? '保存当前房间进度' : '只有房主可以保存当前房间进度'">
+          <i :class="roomSaveBusy ? 'ph ph-circle-notch' : 'ph ph-floppy-disk'" :style="roomSaveBusy ? 'animation:spin 1s linear infinite;font-size:15px' : 'font-size:15px'"></i> {{ roomSaveBusy ? '保存中' : '存档' }}
+        </button>
         <button class="btn btn-ghost btn-sm" @click="showSettings=true" title="设置">
           <i class="ph ph-sliders-horizontal" style="font-size:15px"></i> 设置
         </button>
       </div>
     </header>
 
-    <main class="solo-play-shell">
+    <main class="solo-play-shell" :class="{selecting: room && !hasLockedCharacters}">
       <aside class="solo-panel">
         <section class="solo-section stack">
           <div class="tag" style="display:flex;align-items:center;gap:6px;color:var(--blue)">
@@ -71,7 +77,7 @@
           <div v-else class="auth-card">
             <div style="display:flex;flex-direction:column;gap:4px;line-height:1.55">
               <strong style="color:#f5edd8">请先在主界面登录或注册账号</strong>
-              <span class="small">账号用于区分同房间玩家，并管理你的私有存档。</span>
+              <span class="small">账号用于区分同房间玩家；AI-GM 使用房主的供应商配置。</span>
             </div>
             <a class="btn-info" href="/" style="text-decoration:none;text-align:center">
               <i class="ph ph-arrow-left"></i> 回到选择剧本页
@@ -90,10 +96,12 @@
           <div v-if="room" class="room-card">
             <strong style="color:#f5edd8">{{ room.name }}</strong>
             <div class="small">{{ wsConnected ? '已同步' : '连接中' }}</div>
+            <div class="small" style="margin-top:6px;color:var(--muted)">AI-GM 使用房主的 API 配置，成员无需单独配置。</div>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft)">
               <span class="small">入场 {{ joinedPlayerCount }} / {{ maxPlayers }} · 选角 {{ claimedPlayerCount }} / {{ maxPlayers }}</span>
               <span class="small" :style="{color: roomSeatTone}">{{ roomSeatLabel }}</span>
             </div>
+            <div v-if="roomSaveMsg" class="small" style="margin-top:8px" :style="{color: roomSaveOk ? 'var(--good)' : 'var(--bad)'}">{{ roomSaveMsg }}</div>
           </div>
         </section>
 
@@ -121,7 +129,7 @@
           </div>
         </section>
 
-        <div class="solo-scroll" v-if="room && !hasLockedCharacters">
+        <div class="solo-scroll solo-character-picker" v-if="room && !hasLockedCharacters">
           <button v-for="char in playableCharacters" :key="char.id" @click="toggleCharacter(char.id)" class="solo-character-card" :disabled="isCharacterDisabled(char)" :class="{selected: isCharacterSelected(char.id), locked: isClaimedByOther(char), 'own-locked': isOwnClaim(char)}">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
               <strong style="font-size:14px;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ char.name }}</strong>
@@ -137,7 +145,7 @@
             <i class="ph ph-users" style="font-size:36px;display:block;margin-bottom:10px;opacity:.25"></i>
             暂无可选角色
           </div>
-          <button v-if="playableCharacters.length" class="btn-primary" style="width:100%;margin-top:10px" @click="claimCharacters" :disabled="claimButtonDisabled">
+          <button v-if="playableCharacters.length" class="btn-primary solo-confirm-button" style="width:100%;margin-top:10px" @click="claimCharacters" :disabled="claimButtonDisabled">
             <i :class="characterClaimBusy?'ph ph-circle-notch':'ph ph-check-circle'" :style="characterClaimBusy?'animation:spin 1s linear infinite':''"></i>
             {{ claimButtonText }}
           </button>
@@ -147,10 +155,10 @@
             <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto">
               <div v-for="msg in visibleTableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
-                  <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+                  <span style="font-weight:800">{{ tableMessageSenderName(msg) }}</span>
                   <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
                 </div>
-                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ displayMessageContent(msg) }}</div>
               </div>
               <div v-if="!visibleTableMessages.length" class="small">暂无其他同桌动态</div>
             </div>
@@ -176,10 +184,10 @@
             <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto">
               <div v-for="msg in visibleTableMessages" :key="msg.id" class="solo-message" :class="msg.kind" style="margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px;color:var(--muted)">
-                  <span style="font-weight:800">{{ msg.sender_name || messageKindLabel(msg.kind) }}</span>
+                  <span style="font-weight:800">{{ tableMessageSenderName(msg) }}</span>
                   <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
                 </div>
-                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+                <div style="font-size:12px;line-height:1.55;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ displayMessageContent(msg) }}</div>
               </div>
               <div v-if="!visibleTableMessages.length" class="small">暂无其他同桌动态</div>
             </div>
@@ -191,7 +199,7 @@
         </div>
       </aside>
 
-      <section class="solo-scene">
+      <section v-if="!room || hasLockedCharacters" class="solo-scene">
         <div v-if="!room" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:var(--faint)">
           <i class="ph ph-door-open" style="font-size:56px;opacity:.22"></i>
           <p style="font-size:14px;margin:0">等待房间连接</p>
@@ -214,14 +222,14 @@
                   <i class="ph ph-map-pin"></i> 场景 {{ currentScene?.id ? '#' + currentScene.id : '' }}
                 </div>
                 <h1 style="font-family:'Noto Serif SC','Microsoft YaHei',serif;font-size:30px;font-weight:700;color:#f5edd8;line-height:1.2;margin:0 0 16px">{{ primarySceneTitle }}</h1>
-                <p class="scene-content">{{ primarySceneText || '主持端载入场景后会同步到这里。' }}</p>
+                <div class="scene-content" v-html="renderSceneRichText(primarySceneText || '主持端载入场景后会同步到这里。')"></div>
                 <div v-if="showCharacterOpening && publicSceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-map-pin"></i> 公共场景</div>
-                  <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ publicSceneText }}</p>
+                  <div style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0" v-html="renderSceneRichText(publicSceneText)"></div>
                 </div>
                 <div v-else-if="gameState.scene_ai_text && gameState.scene_ai_text !== primarySceneText" style="margin-top:16px;background:rgba(91,156,245,.05);border:1px solid rgba(91,156,245,.15);border-radius:8px;padding:14px 16px">
                   <div class="tag" style="color:#5b9cf5;display:flex;align-items:center;gap:6px;margin-bottom:8px"><i class="ph ph-sparkle"></i> 追加细节</div>
-                  <p style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0">{{ gameState.scene_ai_text }}</p>
+                  <div style="font-size:15px;line-height:1.8;color:#a5b4fc;white-space:pre-wrap;margin:0" v-html="renderSceneRichText(gameState.scene_ai_text)"></div>
                 </div>
                 <div v-if="sceneAiMessages.length" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
                   <div class="tag" style="color:var(--gold);display:flex;align-items:center;gap:6px"><i class="ph ph-sparkle"></i> 最新 AI 裁决</div>
@@ -230,7 +238,7 @@
                       <span style="font-weight:800;color:var(--gold)">{{ sceneMessageActorName(msg) }}</span>
                       <span style="font-family:ui-monospace,Consolas,monospace">{{ shortTime(msg.created_at) }}</span>
                     </div>
-                    <div style="font-size:14px;line-height:1.7;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+                    <div style="font-size:14px;line-height:1.7;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ displayMessageContent(msg) }}</div>
                   </div>
                 </div>
               </div>
@@ -274,7 +282,7 @@
         </template>
       </section>
 
-      <aside class="solo-panel right">
+      <aside v-if="!room || hasLockedCharacters" class="solo-panel right">
         <section class="solo-section">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
             <div class="tag" style="display:flex;align-items:center;gap:6px"><i class="ph ph-heartbeat"></i> 角色状态</div>
@@ -322,9 +330,9 @@
             </div>
             <div v-if="msg.pending || msg.payload?.pending" class="pending-line">
               <i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i>
-              <span>{{ msg.content }}</span>
+              <span>{{ displayMessageContent(msg) }}</span>
             </div>
-            <div v-else style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ msg.content }}</div>
+            <div v-else style="font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere">{{ displayMessageContent(msg) }}</div>
           </div>
           <div v-if="!visibleThreadMessages.length" style="text-align:center;color:var(--faint);font-size:13px;line-height:1.7;padding:30px 10px">
             <i class="ph ph-sparkle" style="font-size:34px;display:block;margin-bottom:10px;opacity:.24"></i>
@@ -481,7 +489,7 @@
                         <strong style="color:#f5edd8">{{ dossierSelectedRoom.label }}</strong>
                         <span class="tag">{{ {unknown:'未探索',explored:'已探索',locked:'上锁',active:'当前位置'}[dossierSelectedRoom.state] || dossierSelectedRoom.state }}</span>
                       </div>
-                      <div class="small" style="white-space:pre-wrap;color:#9ca3af">{{ dossierSelectedRoom.description || '暂无地点描述。' }}</div>
+                      <div class="dossier-prose" style="font-size:12px;line-height:1.7" v-html="renderDossierRichText(dossierSelectedRoom.description || '暂无地点描述。')"></div>
                     </div>
                     <button v-for="room in mapVisibleRooms" :key="'dossier-room-list-'+room.id"
                             @click="dossierSelectMapRoom(room, true)"
@@ -498,12 +506,50 @@
               </div>
             </template>
 
+            <template v-else-if="dossierTab==='assets'">
+              <div style="padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                  <div style="font-size:17px;font-weight:700;color:#f5edd8">导入图片</div>
+                  <div style="font-size:12px;color:#4b5563;margin-top:3px">剧本导入时识别或上传的图片资源，点击缩略图可原位放大查看。</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                  <input v-model.trim="dossierSearch" class="inp" placeholder="搜索图片或场景…" style="width:min(280px,68vw);font-size:12px">
+                  <button @click="fetchCampaignAssets" class="btn btn-ghost btn-sm">
+                    <i class="ph ph-arrows-clockwise"></i> 刷新
+                  </button>
+                </div>
+              </div>
+              <div class="dossier-scroll">
+                <div v-if="dossierAssetsLoading" class="dossier-empty">
+                  <i class="ph ph-circle-notch" style="animation:spin 1s linear infinite"></i> 正在读取图片资源…
+                </div>
+                <div v-else-if="!dossierFilteredAssets.length" class="dossier-empty">
+                  当前剧本暂无可查看图片资源。
+                </div>
+                <div v-else class="dossier-asset-grid">
+                  <button v-for="asset in dossierFilteredAssets"
+                          :key="'dossier-asset-'+asset.name"
+                          @click="openDossierAssetPreview(asset)"
+                          class="dossier-asset-card">
+                    <div class="dossier-asset-thumb">
+                      <img :src="asset.url" :alt="asset.name" loading="lazy">
+                    </div>
+                    <div class="dossier-asset-meta">
+                      <div style="font-size:13px;font-weight:700;color:#f5edd8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ asset.name }}</div>
+                      <div class="small">{{ formatAssetSize(asset.size_bytes) }}<span v-if="asset.updated_at"> · {{ asset.updated_at }}</span></div>
+                      <div class="small" style="margin-top:4px" v-if="asset.scenes?.length">场景：{{ asset.scenes.map(scene => scene.name).join(' / ') }}</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </template>
+
             <template v-else-if="dossierTab==='knowledge'">
               <div style="padding:16px 22px;border-bottom:1px solid var(--line)">
                 <div style="font-size:17px;font-weight:700;color:#f5edd8">公开知识库</div>
                 <div style="font-size:12px;color:#4b5563;margin-top:3px">这里展示非隐藏 RAG 文档；隐藏文档留给触发器或 GM 管理区。</div>
               </div>
-              <div style="flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr)">
+              <div class="dossier-knowledge-layout">
                 <aside class="dossier-side-list" style="border-left:none;border-right:1px solid var(--line)">
                   <div style="padding:12px;border-bottom:1px solid var(--line)">
                     <input v-model.trim="dossierSearch" class="inp" placeholder="搜索文档标题或来源…" style="font-size:12px">
@@ -530,7 +576,7 @@
                         <div style="font-size:12px;color:#4b5563;margin-top:4px">{{ dossierSelectedDoc.source || '无来源标注' }} · {{ dossierDocChunks.length }} 个切片</div>
                       </div>
                     </div>
-                    <div v-if="dossierDocChunks.length" class="dossier-prose">{{ dossierDocText }}</div>
+                    <div v-if="dossierDocChunks.length" class="dossier-prose" v-html="renderDossierRichText(dossierDocText)"></div>
                     <div v-else class="dossier-empty">此文档暂无可读切片。</div>
                   </template>
                 </section>
@@ -547,7 +593,7 @@
                 <div v-if="!dossierFilteredLore.length" class="dossier-empty">暂无匹配百科词条。</div>
                 <div v-for="item in dossierFilteredLore" :key="'dossier-lore-'+item.id" class="dossier-card">
                   <div style="font-size:13px;font-weight:800;color:#a78bfa;margin-bottom:8px">{{ item.keywords }}</div>
-                  <div style="font-size:13px;color:#c9cdd6;line-height:1.8;white-space:pre-wrap">{{ item.content }}</div>
+                  <div class="dossier-prose" style="font-size:13px;line-height:1.8" v-html="renderDossierRichText(item.content)"></div>
                 </div>
               </div>
             </template>
@@ -616,6 +662,52 @@
               <i class="ph ph-speaker-high" style="color:var(--faint);font-size:13px"></i>
             </div>
           </section>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="dossierAssetPreview" class="asset-lightbox" @click.self="closeDossierAssetPreview">
+      <div class="asset-lightbox-frame">
+        <div class="asset-lightbox-head">
+          <div style="min-width:0">
+            <div class="tag" style="color:var(--gold);display:flex;align-items:center;gap:6px;margin-bottom:6px">
+              <i class="ph ph-image"></i> 图片预览
+            </div>
+            <div class="asset-lightbox-title">{{ dossierAssetPreview.name }}</div>
+            <div class="asset-lightbox-sub">
+              {{ formatAssetSize(dossierAssetPreview.size_bytes) }}
+              <span v-if="dossierAssetPreview.updated_at"> · {{ dossierAssetPreview.updated_at }}</span>
+              <span v-if="dossierAssetPreview.scenes?.length"> · {{ dossierAssetPreview.scenes.map(scene => scene.name).join(' / ') }}</span>
+            </div>
+          </div>
+          <div class="asset-lightbox-tools">
+            <button class="btn btn-ghost btn-icon" @click.stop="zoomDossierAsset(-0.2)" title="缩小"><i class="ph ph-magnifying-glass-minus"></i></button>
+            <span class="asset-lightbox-zoom">{{ (dossierAssetZoom * 100).toFixed(0) }}%</span>
+            <button class="btn btn-ghost btn-icon" @click.stop="zoomDossierAsset(0.2)" title="放大"><i class="ph ph-magnifying-glass-plus"></i></button>
+            <button class="btn btn-ghost btn-icon" @click.stop="resetDossierAssetView" title="重置"><i class="ph ph-corners-out"></i></button>
+            <button class="btn btn-ghost btn-icon" @click="closeDossierAssetPreview" title="关闭"><i class="ph ph-x"></i></button>
+          </div>
+        </div>
+        <div class="asset-lightbox-body"
+             @wheel.prevent="dossierAssetOnWheel"
+             @dblclick.prevent="toggleDossierAssetZoom"
+             @mousedown.prevent="dossierAssetStartPan"
+             @mousemove.prevent="dossierAssetMovePan"
+             @mouseup.prevent="dossierAssetEndPan"
+             @mouseleave.prevent="dossierAssetEndPan"
+             @touchstart.prevent="dossierAssetStartPan"
+             @touchmove.prevent="dossierAssetMovePan"
+             @touchend.prevent="dossierAssetEndPan">
+          <img :src="dossierAssetPreview.url" :alt="dossierAssetPreview.name" :style="{ transform: dossierAssetTransform, cursor: dossierAssetZoom > 1 ? (dossierAssetPanning ? 'grabbing' : 'grab') : 'zoom-in' }">
+          <button @click.stop="stepDossierAssetPreview(-1)" :disabled="dossierFilteredAssets.length<2" class="asset-lightbox-nav prev" title="上一张">
+            <i class="ph ph-caret-left"></i>
+          </button>
+          <button @click.stop="stepDossierAssetPreview(1)" :disabled="dossierFilteredAssets.length<2" class="asset-lightbox-nav next" title="下一张">
+            <i class="ph ph-caret-right"></i>
+          </button>
+        </div>
+        <div class="asset-lightbox-foot">
+          <span class="small">滚轮缩放，拖拽平移，双击快速切换缩放。</span>
         </div>
       </div>
     </div>

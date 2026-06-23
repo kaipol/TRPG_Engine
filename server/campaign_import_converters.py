@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import re
 from typing import Callable
@@ -36,6 +37,34 @@ def _clean_import_text(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{4,}", "\n\n\n", text)
     return text.strip()
+
+
+def _clean_player_visible_scene_text(text: str, limit: int = 6000) -> str:
+    """Strip document extraction artifacts from node text shown during play."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not value:
+        return ""
+    image_refs: list[str] = []
+
+    def keep_image(match: re.Match) -> str:
+        image_refs.append(match.group(0))
+        return f"@@ZRIC_IMAGE_{len(image_refs) - 1}@@"
+
+    value = re.sub(r"!\[[^\]]*\]\(/api/campaign-assets/[^)]+\)", keep_image, value)
+    value = re.sub(r"<table\b[^>]*>.*?</table>", "\n", value, flags=re.I | re.S)
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.I)
+    value = re.sub(r"</(?:p|div|li|tr|h[1-6])\s*>", "\n", value, flags=re.I)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = html.unescape(value)
+    value = re.sub(r"\$=\s*\\mathbf\{([^}]+)\}\s*=\$", r"= \1 =", value)
+    value = re.sub(r"\$\\mathbf\{([^}]+)\}\$", r"\1", value)
+    value = re.sub(r"\\([*_{}\[\]()#+.!-])", r"\1", value)
+    value = re.sub(r"(?m)^\s*(?:类型\s*[:：]\s*\w+|材料\s*\d+)\s*$", "", value)
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    for idx, image in enumerate(image_refs):
+        value = value.replace(f"@@ZRIC_IMAGE_{idx}@@", image)
+    return value[:limit]
 
 
 def _slug_filename(value: str, fallback: str, ext: str = ".md") -> str:
@@ -217,6 +246,9 @@ def build_structured_knowledge_documents(title: str, campaign: dict, map_data: d
                 f"- SAN：{char.get('san', 80)}",
                 f"- 状态：{char.get('status') or 'active'}",
                 f"- 物品/属性：{char.get('inventory') or '无'}",
+                f"- 剧本简介：{char.get('script_brief') or '无'}",
+                f"- 角色背景：{char.get('role_brief') or '无'}",
+                f"- 开场白：{char.get('opening_prompt') or '无'}",
                 "",
                 str(char.get("personality") or "无角色描述"),
                 "",
@@ -304,6 +336,276 @@ def _pick_lines(text: str, pattern: str, limit: int = 30) -> list[str]:
 def _shorten(text: str, limit: int) -> str:
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     return value[:limit]
+
+
+def _clean_character_profile_text(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"原始身份：剧本主要\s*(?:登场\s*)?NPC，可作为玩家扮演角色。[；;\s]*", "", value)
+    value = re.sub(r"原始身份：剧本主要\s*(?:登场\s*)?NPC[，,。；;\s]*", "", value)
+    value = re.sub(r"可作为玩家扮演角色。[；;\s]*", "", value)
+    value = re.sub(r"([。！？；，、,.!?;])\1+", r"\1", value)
+    value = re.sub(r"\s+\n", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip(" \t\n。；;")
+
+
+def _player_facing_brief_text(text: str, limit: int = 2400) -> str:
+    """Strip importer/runtime instructions from text shown to players."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(
+        r"【(?:AI|GM|KP|系统|推演|判定|规则系统|信息隔离|时间流速|禁止事项|基本设定|核心规则|导入|编辑|后台)[^】]*】.*?(?=\n【|\Z)",
+        "",
+        value,
+        flags=re.S | re.I,
+    )
+    value = re.split(r"(?:^|\n|\s)(?:HP|SAN|MP|生命值|理智值)\s*(?:代表|[:：])", value, maxsplit=1, flags=re.I)[0]
+    value = re.split(
+        r"(?:^|\n|\s)(?:核心规则|基本设定|禁止事项|AI\s*推演约束|GM行为准则|信息隔离原则)\s*[:：]",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    cleaned_lines: list[str] = []
+    internal_terms = re.compile(
+        r"(?:AI|GM|KP|守秘人|主持端|知识库|knowledge/|RAG|向量|embedding|推演约束|系统提示|后台|触发器|节点\s*content|source_markdown|world_entities|lorebook|核心规则|基本设定|禁止事项|HP\s*(?:代表|[:：])|SAN\s*(?:代表|[:：])|MP\s*(?:代表|[:：])|生命值|理智值|好感度)",
+        re.I,
+    )
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if internal_terms.search(line):
+            continue
+        if re.match(r"^(?:[-*]\s*)?(?:\d+[.、]\s*)?(?:不|必须|严禁|禁止|可引用|保持|输出|场景|职场线|超自然线索|金钱系统|天气影响|语言[:：])", line):
+            continue
+        cleaned_lines.append(line)
+    value = _clean_character_profile_text("\n".join(cleaned_lines))
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+
+def _first_text(raw: dict, *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return _player_facing_brief_text(value)
+    return ""
+
+
+def _join_brief_parts(*parts: str) -> str:
+    return _clean_character_profile_text("\n".join(str(part or "").strip() for part in parts if str(part or "").strip()))
+
+
+def _public_role_suffix(role: str) -> str:
+    label = str(role or "").strip()
+    if not label or label.upper() in {"PC", "NPC"}:
+        return ""
+    return f"（{label}）"
+
+
+def _character_related_context(campaign: dict, name: str, limit: int = 900) -> str:
+    if not name:
+        return ""
+    pieces: list[str] = []
+    for entity in campaign.get("world_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_text = " ".join(str(entity.get(key) or "") for key in ("name", "location", "state_desc"))
+        if name in entity_text:
+            pieces.append(_player_facing_brief_text(entity_text, limit))
+    for lore in campaign.get("lorebook") or []:
+        if not isinstance(lore, dict):
+            continue
+        lore_text = " ".join(str(lore.get(key) or "") for key in ("keywords", "content"))
+        if name in lore_text:
+            pieces.append(_player_facing_brief_text(lore_text, limit))
+    return _shorten("\n".join(p for p in pieces if p), limit)
+
+
+def _is_internal_scene_name(name: str) -> bool:
+    return bool(re.search(r"(?:守秘人|GM|KP|幕后|真相|后台|导入|索引|规则说明|系统信息)", str(name or ""), re.I))
+
+
+def _opening_scene_excerpt(campaign: dict, limit: int = 650) -> str:
+    for node in campaign.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if _is_internal_scene_name(str(node.get("name") or "")):
+            continue
+        text = _clean_character_profile_text(
+            f"{node.get('name') or '开场'}：{node.get('summary') or node.get('content') or ''}"
+        )
+        if text:
+            return _shorten(_player_facing_brief_text(text, limit), limit)
+    return ""
+
+
+def _campaign_signal_text(campaign: dict, limit: int = 5000) -> str:
+    parts = [
+        str(campaign.get("_title") or campaign.get("title") or campaign.get("name") or ""),
+        str(campaign.get("worldview") or ""),
+    ]
+    for node in (campaign.get("nodes") or [])[:6]:
+        if isinstance(node, dict):
+            parts.append(str(node.get("name") or ""))
+            parts.append(str(node.get("summary") or ""))
+            parts.append(str(node.get("content") or "")[:700])
+    for lore in (campaign.get("lorebook") or [])[:12]:
+        if isinstance(lore, dict):
+            parts.append(str(lore.get("keywords") or ""))
+            parts.append(str(lore.get("content") or "")[:400])
+    return _shorten(_clean_character_profile_text("\n".join(parts)), limit)
+
+
+def _signal_score(text: str, patterns: tuple[str, ...]) -> int:
+    score = 0
+    for pattern in patterns:
+        score += len(re.findall(pattern, text, re.I))
+    return score
+
+
+def _opening_focus_hint(campaign: dict) -> str:
+    text = _campaign_signal_text(campaign)
+    categories = [
+        (
+            _signal_score(text, (
+                r"恋", r"爱情", r"约会", r"心动", r"舞会", r"婚", r"情侣", r"情感", r"告白",
+                r"恋曲", r"暧昧", r"都市恋爱", r"好感度", r"亲密", r"羁绊", r"职场成长",
+                r"设计", r"项目", r"客户",
+            )),
+            "先观察关系张力、当前任务、对方意图与私下目标",
+        ),
+        (
+            _signal_score(text, (r"规则", r"怪谈", r"守则", r"禁令", r"违禁", r"违反", r"惩罚", r"山神", r"仪式", r"红线")),
+            "先确认规则边界、违禁风险、可信提示和安全退路",
+        ),
+        (
+            _signal_score(text, (r"调查", r"案件", r"侦探", r"失踪", r"谋杀", r"线索", r"真相", r"嫌疑", r"证据", r"委托")),
+            "先梳理已知事实、可询问对象、可调查地点和最容易消失的线索",
+        ),
+        (
+            _signal_score(text, (r"恐怖", r"诅咒", r"邪神", r"怪物", r"梦魇", r"祭祀", r"神话", r"克苏鲁", r"认知污染", r"致命", r"诡异")),
+            "先确认异常征兆、直接危险、退路和掌握关键情报的人",
+        ),
+        (
+            _signal_score(text, (r"战争", r"军事", r"武器", r"公司", r"商业", r"拍卖", r"政治", r"交易", r"竞标", r"资本", r"法律")),
+            "先判断利益格局、各方底牌、可谈判筹码和迫近风险",
+        ),
+        (
+            _signal_score(text, (r"魔法", r"王国", r"遗迹", r"冒险", r"神殿", r"龙", r"骑士", r"奇幻", r"地下城")),
+            "先确认任务目标、地形威胁、可用资源和同行者立场",
+        ),
+        (
+            _signal_score(text, (r"科幻", r"飞船", r"实验", r"机器", r"AI", r"人工智能", r"赛博", r"太空", r"未来", r"研究")),
+            "先确认技术异常、系统限制、可用设备和失控后果",
+        ),
+    ]
+    top_score, hint = max(categories, key=lambda item: item[0])
+    if top_score > 0:
+        return hint
+    return "先确认当前目标、可互动对象、关键线索和最紧迫的风险"
+
+
+def _opening_scene_name(campaign: dict) -> str:
+    for node in campaign.get("nodes") or []:
+        if isinstance(node, dict):
+            name = str(node.get("name") or "").strip()
+            if name and not _is_internal_scene_name(name):
+                return name[:80]
+    return "开场"
+
+
+def _enrich_character_briefs(campaign: dict) -> dict:
+    worldview = _shorten(_player_facing_brief_text(campaign.get("worldview") or "", 1200), 900)
+    opening_scene = _opening_scene_excerpt(campaign)
+    opening_name = _opening_scene_name(campaign)
+    focus_hint = _opening_focus_hint(campaign)
+    for char in campaign.get("characters") or []:
+        if not isinstance(char, dict):
+            continue
+        name = str(char.get("name") or "角色").strip()
+        role = str(char.get("role") or "角色").strip()
+        personality = _player_facing_brief_text(char.get("personality") or "", 1000)
+        inventory = _player_facing_brief_text(char.get("inventory") or "", 600)
+        related = _character_related_context(campaign, name)
+        role_brief = _player_facing_brief_text(char.get("role_brief") or "", 1800)
+        script_brief = _player_facing_brief_text(char.get("script_brief") or "", 2400)
+        opening_prompt = _player_facing_brief_text(char.get("opening_prompt") or "", 800)
+
+        if len(role_brief) < 80:
+            role_brief = _join_brief_parts(
+                f"身份与立场：{personality}" if personality else "",
+                f"相关关系与线索：{related}" if related else "",
+            ) or personality or inventory
+        if len(role_brief) < 100:
+            role_brief = _join_brief_parts(
+                role_brief,
+                f"入场关联：{name}与当前事件存在直接联系，需要在关系、立场或已知信息中找到自己的切入点。",
+            )
+        if len(script_brief) < 140:
+            script_brief = _join_brief_parts(
+                worldview if worldview else "",
+                f"故事从「{opening_name}」展开：{opening_scene}" if opening_scene else "",
+            ) or opening_scene or worldview
+        if len(script_brief) < 180:
+            script_brief = _join_brief_parts(
+                script_brief,
+                f"进入剧本后，玩家会先接触当前场景中的人物、线索、压力和可互动对象。",
+            )
+        if len(opening_prompt) < 30:
+            opening_prompt = (
+                f"{name}进入「{opening_name}」。{focus_hint}。"
+            )
+
+        char["role_brief"] = _shorten(_player_facing_brief_text(role_brief, 1800), 1800)
+        char["script_brief"] = _shorten(_player_facing_brief_text(script_brief, 2400), 2400)
+        char["opening_prompt"] = _shorten(_player_facing_brief_text(opening_prompt, 800), 800)
+    return campaign
+
+
+GM_SCENE_GUIDANCE = """
+【GM 场景主持口吻】
+- 参考跑团主持的常规做法：场景先给可观察处境、地点、压力、线索和可互动对象，再把控制权交还玩家。
+- 节点 content 是给 GM/AI-GM 主持的场景材料，不是给某个角色朗读的人物卡。
+- 不要让每个场景以「你是……」「你的性格/背景……」「你以……身份进入……」「你的随身/状态……」开头。
+- 角色的身份、背景、秘密、动机、技能和物品只写入 characters.inventory/personality/role_brief/script_brief/opening_prompt 与 world_entities.state_desc；不要复制到每个节点开头。
+- 角色完整介绍只用于玩家选角确认后的入场简报：script_brief 只写剧本背景与开局公开处境，不写“作为某角色”或行动建议；role_brief 只写该角色身份、关系、动机、秘密和优势，不重复剧本简介、姓名前缀、资源清单或通用行动建议；opening_prompt 写 1-2 句可直接朗读的角色入场提示，不重复剧本简介和角色背景。
+- script_brief、role_brief、opening_prompt 是直接显示给玩家看的文本，只写角色可知道的故事背景、当前处境、关系线和行动切入；严禁写 AI、GM/KP/守秘人、PC/NPC 技术标签、HP/SAN 规则、知识库路径、RAG、推演约束、系统提示、导入说明、后台编辑说明、核心规则或基本设定。
+- characters.personality 只写实际性格、背景、动机和秘密，不要写「原始身份：剧本主要 NPC，可作为玩家扮演角色」这类导入说明。
+- 输出文本不要重复标点，尤其避免「。。」「；；」。
+- 场景开头应像主持人设置场景：1 句地点和当前局面，1-3 个可观察细节，随后给线索/冲突/行动入口。
+- 描述外部事实、感官线索、NPC 动作和环境变化；不要替玩家决定感受、想法或下一步行动。
+- 可针对角色在选项或备注里提供“某类角色可能注意到”的线索，但不要用第二人称长段介绍角色。
+""".strip()
+
+
+def _strip_character_card_opening(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    lines = value.splitlines()
+    removed = 0
+
+    def is_card_line(line: str) -> bool:
+        clean = line.strip()
+        if not clean:
+            return removed > 0
+        patterns = [
+            r"^.{0,28}你以[「“][^」”]{1,40}[」”]的身份进入",
+            r"^.{0,28}你是[^。；;\n]{1,90}[。；;]?$",
+            r"^你的?(?:性格|背景|身份|职业|技能|动机|秘密|随身|状态|物品|装备)[^。；;\n]{0,180}[。；;]?$",
+            r"^你当前(?:随身|状态|物品|装备)[^。；;\n]{0,180}[。；;]?$",
+            r"^从你的视角看[^：:]{0,20}[：:]",
+            r"^你可以(?:先)?用(?:这个|自己的)?角色",
+            r"^你可以先.*交给\s*AI[- ]?GM",
+        ]
+        return any(re.search(pattern, clean) for pattern in patterns)
+
+    while lines and removed < 8 and is_card_line(lines[0]):
+        lines.pop(0)
+        removed += 1
+    cleaned = "\n".join(lines).strip()
+    return cleaned or value
 
 
 def _extract_number(text: str, labels: tuple[str, ...], default: int) -> int:
@@ -522,27 +824,95 @@ def _normalize_character(raw: dict, fallback_name: str = "角色") -> dict:
     except (TypeError, ValueError):
         san = 80
     inventory_parts = [
-        str(raw.get("inventory") or raw.get("items") or "").strip(),
+        _clean_character_profile_text(raw.get("inventory") or raw.get("items") or ""),
         f"属性：{stats['attrs']}" if stats["attrs"] else "",
     ]
     personality_parts = [
-        str(raw.get("personality") or raw.get("description") or raw.get("background") or "").strip(),
+        _clean_character_profile_text(raw.get("personality") or raw.get("description") or raw.get("background") or ""),
         f"技能：{stats['skills']}" if stats["skills"] else "",
-        f"动机：{raw.get('motivation')}" if raw.get("motivation") else "",
-        f"秘密：{raw.get('secret')}" if raw.get("secret") else "",
+        f"动机：{_clean_character_profile_text(raw.get('motivation'))}" if raw.get("motivation") else "",
+        f"秘密：{_clean_character_profile_text(raw.get('secret'))}" if raw.get("secret") else "",
     ]
+    role_brief = _first_text(
+        raw,
+        "role_brief",
+        "character_brief",
+        "character_background",
+        "role_background",
+        "profile",
+        "background_intro",
+    )
+    script_brief = _first_text(
+        raw,
+        "script_brief",
+        "campaign_brief",
+        "scenario_brief",
+        "module_brief",
+        "story_brief",
+        "story_intro",
+    )
+    opening_prompt = _first_text(raw, "opening_prompt", "opening", "opening_line", "opening_statement")
     role = str(raw.get("role") or _infer_role(blob, "NPC")).upper()
     if role not in {"PC", "NPC"}:
         role = "PC" if "玩家" in role or "调查" in role else "NPC"
+    personality = _shorten(_clean_character_profile_text("\n".join(part for part in personality_parts if part)), 1600)
+    inventory = _shorten(_clean_character_profile_text("；".join(part for part in inventory_parts if part)), 800)
     return {
         "name": name,
         "role": role,
         "hp": hp,
         "san": san,
-        "inventory": _shorten("；".join(part for part in inventory_parts if part), 800),
-        "personality": _shorten("\n".join(part for part in personality_parts if part), 1600),
+        "inventory": inventory,
+        "personality": personality,
+        "role_brief": _shorten(role_brief or personality, 1800),
+        "script_brief": _shorten(script_brief, 2400),
+        "opening_prompt": _shorten(opening_prompt, 800),
         "status": str(raw.get("status") or "active")[:32],
     }
+
+
+def _has_named_playable_character(characters: list[dict]) -> bool:
+    for char in characters:
+        if char.get("role") != "PC":
+            continue
+        name = str(char.get("name") or "").strip()
+        if name and name not in CORE_PC_NAMES:
+            return True
+    return False
+
+
+def _playable_characters_from_entities(values: list[dict], limit: int = 24) -> list[dict]:
+    result: list[dict] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(values, start=1):
+        if not isinstance(item, dict):
+            continue
+        entity_type = str(item.get("entity_type") or item.get("type") or "").strip().lower()
+        if entity_type and entity_type not in {"pc", "npc", "character", "person", "人物", "角色"}:
+            continue
+        name = _normalize_name(item.get("name") or item.get("title") or "")
+        if not name or name in CORE_PC_NAMES:
+            continue
+        if re.search(r"^(地点|线索|道具|物品|组织|规则|章节|场景|房间|区域|地图)", name):
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        desc = str(item.get("state_desc") or item.get("description") or item.get("content") or "").strip()
+        desc = _clean_character_profile_text(desc)
+        result.append(_normalize_character({
+            "name": name,
+            "role": "PC",
+            "hp": item.get("hp", 100),
+            "san": item.get("san", 80),
+            "inventory": item.get("inventory", ""),
+            "personality": desc or "剧本主要登场人物，适合作为玩家角色。",
+            "status": item.get("status") or "active",
+        }, f"角色 {idx}"))
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _normalize_lore_entries(values: list[dict], fallback: list[dict]) -> list[dict]:
@@ -644,13 +1014,18 @@ def _campaign_structure_prompt(filename: str, *, source_hint: str = "") -> str:
 - 列出主要章节、场景、地点、NPC、PC、组织、怪物/威胁、物品、线索、规则、时间线、真相和结局。
 - 对每个场景判断：入口条件、地点、在场人物、可见信息、隐藏信息、可调查线索、判定、失败/成功后果、可前往地点。
 - 对角色判断：PC/NPC、公开信息、秘密、动机、关系、属性/技能/HP/SAN/物品。
+- characters 是“玩家可选择的扮演角色池”，不是只记录原文写明的调查员。没有预设 PC 时，必须按剧本题材和剧情职能，从核心登场人物、行动发起者、见证者、关系纽带、调查者、守护者、竞争者、知情者、边缘卷入者或与危机有直接利害关系的人中挑选适合扮演的角色写入 characters，并将 role 设为 PC。
+- 同一人物如果在剧情中仍是 NPC，也必须同时写入 world_entities，entity_type 使用 npc，并在 state_desc 中保留其剧情立场、秘密、动机和关系。
 
 阶段 3 - 可玩结构设计：
 - 把章节和地点拆成 nodes。节点不是摘要，必须能让 GM 直接主持。
 - 把调查路径、空间移动、剧情推进、关键选择整理为 options；保证从节点 1 可以到达主要节点。
 - 把地点整理为 map_rooms，并用 node_id 绑定最相关节点；map_edges 表示空间路径、剧情推进或调查关联。
+- map_rooms 的 x/y/w/h 必须生成可读地图布局：优先按楼层、区域、剧情阶段分组；同一主线用横向或蛇形流向排列；房间间距至少 40；避免节点重叠、文字互相覆盖、跨整张图的长斜线。没有明确空间关系时，用 3-4 列蛇形剧情流程图，而不是每行结束后斜连到下一行最左侧。
 - 把可检索信息拆成 lorebook 和 knowledge_documents，粒度适合 RAG 检索。
 - 把所有重要人物、地点、组织、道具、线索和威胁写入 world_entities。
+
+{GM_SCENE_GUIDANCE}
 
 阶段 4 - 一致性校验：
 - 检查 node_id、next_node_id、map room node_id、map edge from_id/to_id 都指向存在的对象。
@@ -661,7 +1036,7 @@ def _campaign_structure_prompt(filename: str, *, source_hint: str = "") -> str:
 - source_markdown: string，按原文顺序整理出的 Markdown 正文，用于写入知识库；保留章节、表格要点、手卡、规则、线索和剧情流程。
 - worldview: string，概括但不要丢失核心世界观、背景、真相和跑团基调。
 - session_memory: string，初始化跑团记忆日志。
-- characters: array，元素包含 name, role, hp, san, inventory, personality, status；role 只能是 PC 或 NPC。
+- characters: array，元素包含 name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status；role 只能是 PC 或 NPC；这里优先输出可扮演角色，核心 NPC 或与事件有直接利害关系的人也应作为 role=PC 的可选角色进入此数组。
 - nodes: array，元素包含 id, name, summary, content, scene_image；id 从 1 开始。
 - options: array，元素包含 node_id, text, next_node_id。
 - lorebook: array，元素包含 keywords, content。
@@ -675,10 +1050,10 @@ def _campaign_structure_prompt(filename: str, *, source_hint: str = "") -> str:
 1. 这不是摘要任务。请把 PDF/图片里的剧本内容拆成可主持、可游玩的结构。
 2. nodes 至少覆盖主要剧情场景、调查地点、关键冲突、结局或分支；每个节点 content 写清「场景描述 / 可见信息 / 隐藏信息 / 线索 / NPC 状态 / 判定 / 后果」。
 3. options 形成可走的主线和关键分支，不能只有空数组；每条 option 的 text 用玩家可理解的行动短句。
-4. characters 要区分 PC/NPC；预设调查员或玩家角色列为 PC；技能、属性、物品、秘密、动机写进 inventory/personality。
+4. characters 是玩家进入单人/多人房间时可选的角色池。预设调查员或玩家角色列为 PC；若原文没有预设 PC，就按题材选择最有可玩性的核心人物：推动事件的人、被事件牵连的人、知道部分真相的人、与主线关系最密切的人、能代表不同阵营/价值观/关系线的人。不要只生成“调查员”占位。技能、属性、物品写进 inventory；性格、动机、秘密写进 personality。role_brief 用 120-320 字只写该角色的身份、关系、目标、秘密和可用优势，不重复姓名标题、剧本简介、物品清单或通用行动建议。script_brief 用 180-500 字只写玩家进入剧本前应知道的故事背景、公开开局处境和主要利害关系，不写“作为某角色”或“你的第一步”。opening_prompt 写 1-2 句选角确认后可直接展示的角色入场提示，并根据题材调整关注点：调查剧强调线索与嫌疑，恐怖剧强调异常与退路，恋爱/社交剧强调关系与选择，规则怪谈强调规则边界与禁忌，冒险剧强调目标与资源，政治/商业剧强调筹码与阵营。role_brief/script_brief/opening_prompt 是玩家可见文本，不能照抄 worldview、nodes 隐藏信息或 lorebook 中面向主持人的规则段落；不能包含 AI、GM/KP/守秘人、HP/SAN 机制解释、知识库路径、RAG、推演约束、系统提示、导入说明、后台编辑说明、核心规则或基本设定。不要在 nodes.content 里重复这些人物介绍。
 5. lorebook 拆分世界观、真相、时间线、规则、线索、道具、手卡、重要地点和组织；不要把全文塞进单条。
 6. world_entities 记录 NPC、地点、组织、物品、威胁、隐藏线索和当前状态。
-7. map_rooms 从场景地点生成，并尽量绑定 node_id；没有明确空间关系时按剧情/调查顺序生成 map_edges。
+7. map_rooms 从场景地点生成，并尽量绑定 node_id；坐标要美观可读，默认房间宽 150-190、高 72-96，横向间距 50-90，纵向间距 36-70。没有明确空间关系时按剧情/调查顺序生成蛇形流程图，让相邻剧情节点距离接近，避免长对角线。
 8. OCR/视觉识别可能有噪声；忽略页眉页脚、页码、目录重复、断行和明显乱码。
 9. 无法识别的局部用「[无法识别]」标记，不要编造原文没有的关键事实。
 10. 输出前自检 JSON 可解析性：双引号、逗号、数组和对象必须合法；只输出 JSON，不要 Markdown 代码块，不要解释。
@@ -738,13 +1113,16 @@ def _structured_payload_source_text(payload: dict, title: str) -> str:
             if not isinstance(item, dict):
                 continue
             lines.append(
-                "## {name}\nrole: {role}\nhp: {hp}\nsan: {san}\n{inventory}\n{personality}".format(
+                "## {name}\nrole: {role}\nhp: {hp}\nsan: {san}\n{inventory}\n{personality}\nscript_brief: {script_brief}\nrole_brief: {role_brief}\nopening_prompt: {opening_prompt}".format(
                     name=str(item.get("name") or "未命名角色"),
                     role=str(item.get("role") or ""),
                     hp=str(item.get("hp") or ""),
                     san=str(item.get("san") or ""),
                     inventory=str(item.get("inventory") or ""),
                     personality=str(item.get("personality") or ""),
+                    script_brief=str(item.get("script_brief") or ""),
+                    role_brief=str(item.get("role_brief") or ""),
+                    opening_prompt=str(item.get("opening_prompt") or ""),
                 ).strip()
             )
         parts.append("\n\n".join(lines))
@@ -796,6 +1174,7 @@ def multimodal_extract_campaign_document(
     filename: str,
     assets_dir: str,
     progress_callback: Callable[[int, str, list[str]], None] | None = None,
+    owner_account_id: int | None = None,
 ) -> tuple[str, list[str], list[str], dict | None]:
     """Use the configured campaign model as a PDF/vision fallback when MinerU returns no text."""
     warnings: list[str] = []
@@ -807,15 +1186,15 @@ def multimodal_extract_campaign_document(
     suffix = re.sub(r".*(\.[^.]+)$", r"\1", filename or "").lower()
     notify(39, "MinerU 未提取到正文，正在准备多模态剧本解析兜底")
 
-    if not ai_provider.is_configured():
+    if not ai_provider.is_configured(owner_account_id=owner_account_id):
         warnings.append("多模态 OCR 兜底不可用：OpenAI 兼容端点尚未配置。")
         payload = prepare_document_vision_fallback(raw, filename, assets_dir, max_images=VISION_FALLBACK_MAX_IMAGES)
         warnings.extend(item for item in payload.warnings if item and item not in warnings)
         return _clean_import_text(payload.text), payload.assets, warnings, None
 
-    campaign_model = ai_provider.get_active_model("campaign").strip()
+    campaign_model = ai_provider.get_active_model("campaign", owner_account_id=owner_account_id).strip()
     if not campaign_model:
-        campaign_model = ai_provider.get_active_model("chat").strip()
+        campaign_model = ai_provider.get_active_model("chat", owner_account_id=owner_account_id).strip()
         warnings.append("未配置剧本解析模型，多模态 OCR 兜底已回退使用 Chat Model。")
     if not campaign_model:
         warnings.append("多模态 OCR 兜底不可用：未选择剧本解析模型或 Chat Model。")
@@ -834,6 +1213,7 @@ def multimodal_extract_campaign_document(
                 filename,
                 campaign_model,
                 timeout_seconds=timeout_seconds,
+                owner_account_id=owner_account_id,
             )
             source_text = _structured_payload_source_text(parsed, filename)
             warnings.append("MinerU 未返回正文，已由剧本解析模型直接识别 PDF 并输出结构化剧本。")
@@ -888,6 +1268,7 @@ def multimodal_extract_campaign_document(
             campaign_model,
             local_text,
             timeout_seconds=timeout_seconds,
+            owner_account_id=owner_account_id,
         )
         source_text = _structured_payload_source_text(parsed, filename)
         warnings.append("MinerU 未返回正文，已由剧本解析模型识别本地文本/图片并输出结构化剧本。")
@@ -917,6 +1298,7 @@ def multimodal_extract_campaign_document(
                 campaign_model,
                 local_text if batch_index == 1 else "",
                 timeout_seconds=timeout_seconds,
+                owner_account_id=owner_account_id,
             )
             if recognized.strip():
                 recognized_parts.append(
@@ -946,6 +1328,7 @@ def _call_multimodal_pdf_campaign(
     model: str,
     *,
     timeout_seconds: float,
+    owner_account_id: int | None = None,
 ) -> dict:
     from . import ai_provider as provider
 
@@ -977,6 +1360,7 @@ def _call_multimodal_pdf_campaign(
                 json_mode=True,
                 timeout=timeout_seconds,
                 apply_token_policy=False,
+                owner_account_id=owner_account_id,
             )
             result = response.choices[0].message.content
             if not result:
@@ -994,6 +1378,7 @@ def _call_multimodal_images_campaign(
     local_text: str = "",
     *,
     timeout_seconds: float = 45.0,
+    owner_account_id: int | None = None,
 ) -> dict:
     from . import ai_provider as provider
 
@@ -1017,6 +1402,7 @@ def _call_multimodal_images_campaign(
         json_mode=True,
         timeout=timeout_seconds,
         apply_token_policy=False,
+        owner_account_id=owner_account_id,
     )
     result = response.choices[0].message.content
     if not result:
@@ -1031,6 +1417,7 @@ def _call_multimodal_ocr_batch(
     local_text: str = "",
     *,
     timeout_seconds: float = 45.0,
+    owner_account_id: int | None = None,
 ) -> str:
     from . import ai_provider as provider
 
@@ -1038,6 +1425,7 @@ def _call_multimodal_ocr_batch(
         "你是中文 TRPG 剧本文档 OCR 与整理器。"
         "请根据图片逐页识别正文，保留章节、人物、地点、线索、道具、规则、手卡、判定和剧情流程。"
         "不要写摘要，不要编造无法看清的内容；无法识别处用「[无法识别]」标注。"
+        "角色卡、人物背景和手卡必须保留在人物/手卡章节，不要混入每个场景正文开头。"
         "输出 Markdown 正文即可。"
     )
     text_prompt = (
@@ -1045,6 +1433,7 @@ def _call_multimodal_ocr_batch(
         f"本批图片数：{len(images)}\n\n"
         "任务：按图片顺序 OCR 并整理为可继续转换为 Z.R.I.C 剧本的 Markdown 正文。"
         "如果图片是整页扫描，请尽量保留页面里的标题层级和表格/列表信息。"
+        "若同页同时包含角色卡和场景，必须分开标题整理，避免把“你是/你的背景/你的物品”等角色介绍作为场景正文。"
     )
     if local_text:
         text_prompt += (
@@ -1066,6 +1455,7 @@ def _call_multimodal_ocr_batch(
         json_mode=False,
         timeout=timeout_seconds,
         apply_token_policy=False,
+        owner_account_id=owner_account_id,
     )
     result = response.choices[0].message.content
     if not result:
@@ -1074,12 +1464,23 @@ def _call_multimodal_ocr_batch(
 
 
 def fallback_campaign(title: str, text: str, first_image_url: str = "") -> dict:
-    opening = text.strip()[:1800] or "原始文档未能提取出可用正文。请在导入后手动补充开场场景。"
+    opening = _strip_character_card_opening(text.strip()[:1800]) or "原始文档未能提取出可用正文。请在导入后手动补充开场场景。"
     return {
         "worldview": f"【{title}】\n\n由原始剧本文档导入生成。AI 转换不可用时创建了保底剧本，请在客户端继续整理节点、地图与触发器。",
         "session_memory": "【跑团记忆日志已初始化】\n",
         "characters": [
-            {"name": "玩家", "role": "PC", "hp": 100, "san": 80, "inventory": "", "status": "active"}
+            {
+                "name": "玩家",
+                "role": "PC",
+                "hp": 100,
+                "san": 80,
+                "inventory": "",
+                "personality": "暂未明确具体身份，需要在开场中结合人物关系和已知处境逐步确认自己的立场。",
+                "role_brief": "这是一个等待补全细节的玩家角色。入场时先根据开场局势、身边人物和已知风险判断自己的目标，再用行动建立身份、关系和立场。",
+                "script_brief": f"你将进入《{title}》的开场局势。故事从当前场景展开，关键人物、事件起因、可互动地点和迫近风险会随着行动逐步浮现。",
+                "opening_prompt": "先阅读开场场景，确认当前目标、可互动对象、关键线索和最紧迫的风险，再决定下一步行动。",
+                "status": "active",
+            }
         ],
         "nodes": [
             {
@@ -1103,11 +1504,59 @@ def fallback_campaign(title: str, text: str, first_image_url: str = "") -> dict:
     }
 
 
+CAMPAIGN_LIST_FIELDS = {
+    "characters",
+    "nodes",
+    "options",
+    "lorebook",
+    "triggers",
+    "world_entities",
+    "timelines",
+    "rag_library",
+    "memory_l1",
+    "pending_effects",
+    "npc_chat_logs",
+    "knowledge_documents",
+}
+
+
+def _flow_grid_position(idx: int, total: int) -> tuple[int, int]:
+    columns = 3 if total <= 12 else 4
+    cell_w = 210
+    cell_h = 116
+    x0 = 80
+    y0 = 80
+    row = (idx - 1) // columns
+    col_in_row = (idx - 1) % columns
+    col = col_in_row if row % 2 == 0 else columns - 1 - col_in_row
+    return x0 + col * cell_w, y0 + row * cell_h
+
+
+def _safe_int(value: object, fallback: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _finalize_campaign_defaults(campaign: dict, title: str = "") -> dict:
+    for key in CAMPAIGN_LIST_FIELDS:
+        if not isinstance(campaign.get(key), list):
+            campaign[key] = []
+    campaign["worldview"] = str(campaign.get("worldview") or "【默认世界观】")
+    campaign["session_memory"] = str(campaign.get("session_memory") or "【跑团记忆日志已初始化】\n")
+    if title:
+        campaign["_title"] = title
+    campaign = _enrich_character_briefs(campaign)
+    campaign.pop("_title", None)
+    return campaign
+
+
 def heuristic_campaign_from_text(title: str, text: str, image_urls: list[str]) -> tuple[dict, dict]:
     sections = split_campaign_sections(text, max_sections=36)
     campaign = fallback_campaign(title, text, image_urls[0] if image_urls else "")
     if not sections:
-        return campaign, {"map_rooms": [], "map_edges": []}
+        return _finalize_campaign_defaults(campaign, title), {"map_rooms": [], "map_edges": []}
 
     characters = _extract_characters_from_sections(sections) or campaign["characters"]
     campaign["characters"] = characters
@@ -1121,8 +1570,8 @@ def heuristic_campaign_from_text(title: str, text: str, image_urls: list[str]) -
         nodes.append({
             "id": idx,
             "name": section["title"][:80] or f"场景 {idx}",
-            "summary": section["text"][:240].replace("\n", " "),
-            "content": section["text"][:6000],
+            "summary": _clean_player_visible_scene_text(section["text"][:240].replace("\n", " "), 300),
+            "content": _clean_player_visible_scene_text(_strip_character_card_opening(section["text"][:6000]), 6000),
             "expanded_content": "",
             "scene_image": image,
         })
@@ -1169,18 +1618,18 @@ def heuristic_campaign_from_text(title: str, text: str, image_urls: list[str]) -
         {"name": node["name"], "description": node.get("summary") or node.get("content", "")}
         for node in campaign["nodes"][:36]
     ]
-    for idx, source in enumerate(room_sources[:48], start=1):
-        col = (idx - 1) % 4
-        row = (idx - 1) // 4
+    room_sources = room_sources[:48]
+    for idx, source in enumerate(room_sources, start=1):
+        x, y = _flow_grid_position(idx, len(room_sources))
         linked_node = campaign["nodes"][idx - 1]["id"] if idx - 1 < len(campaign["nodes"]) else None
         rooms.append({
             "id": idx,
             "map_id": 1,
             "label": source["name"][:40],
-            "x": 80 + col * 170,
-            "y": 80 + row * 120,
-            "w": 130,
-            "h": 76,
+            "x": x,
+            "y": y,
+            "w": 160,
+            "h": 82,
             "description": source["description"],
             "state": "unknown",
             "color": "#1e3a2f",
@@ -1200,14 +1649,14 @@ def heuristic_campaign_from_text(title: str, text: str, image_urls: list[str]) -
         }
         for idx in range(1, len(rooms))
     ]
-    return campaign, {"map_rooms": rooms, "map_edges": edges}
+    return _finalize_campaign_defaults(campaign, title), {"map_rooms": rooms, "map_edges": edges}
 
 
 def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: list[str]) -> tuple[dict, dict]:
     heuristic_campaign, heuristic_map = heuristic_campaign_from_text(title, text, image_urls)
     campaign = heuristic_campaign
     if not isinstance(raw, dict):
-        return campaign, heuristic_map
+        return _finalize_campaign_defaults(campaign, title), heuristic_map
 
     campaign["worldview"] = str(raw.get("worldview") or campaign["worldview"])
     campaign["session_memory"] = str(raw.get("session_memory") or campaign["session_memory"])
@@ -1223,9 +1672,9 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
         normalized_nodes.append({
             "id": len(normalized_nodes) + 1,
             "name": str(node.get("name") or f"场景 {idx}")[:80],
-            "summary": str(node.get("summary") or "")[:300],
-            "content": str(node.get("content") or "")[:6000],
-            "expanded_content": str(node.get("expanded_content") or ""),
+            "summary": _clean_player_visible_scene_text(str(node.get("summary") or "")[:300], 300),
+            "content": _clean_player_visible_scene_text(_strip_character_card_opening(str(node.get("content") or "")[:6000]), 6000),
+            "expanded_content": _clean_player_visible_scene_text(str(node.get("expanded_content") or ""), 6000),
             "scene_image": str(node.get("scene_image") or ""),
         })
     if normalized_nodes:
@@ -1270,12 +1719,21 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
             for idx, item in enumerate(raw_characters, start=1)
         ]
         if not any(char.get("role") == "PC" for char in campaign["characters"]):
-            campaign["characters"].insert(0, _normalize_character({"name": "调查员", "role": "PC"}, "调查员"))
+            campaign["characters"] = [{**char, "role": "PC"} for char in campaign["characters"]]
     else:
         campaign["characters"] = [
             _normalize_character(item, f"角色 {idx}")
             for idx, item in enumerate(campaign.get("characters", []), start=1)
         ]
+    if not _has_named_playable_character(campaign["characters"]):
+        entity_candidates = _playable_characters_from_entities([
+            *list_of_dicts("world_entities", 160),
+            *heuristic_campaign.get("world_entities", []),
+        ])
+        if entity_candidates:
+            campaign["characters"] = entity_candidates
+        else:
+            campaign["characters"].insert(0, _normalize_character({"name": "调查员", "role": "PC"}, "调查员"))
     campaign["lorebook"] = _normalize_lore_entries(list_of_dicts("lorebook", 160), heuristic_campaign.get("lorebook", []))
     knowledge_documents = []
     for idx, item in enumerate(list_of_dicts("knowledge_documents", 80), start=1):
@@ -1338,9 +1796,12 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
     valid_node_ids = {int(n.get("id")) for n in campaign.get("nodes", []) if str(n.get("id", "")).isdigit()}
     normalized_rooms = []
     old_room_to_new = {}
-    for idx, room in enumerate((map_rooms or heuristic_map.get("map_rooms", []))[:120], start=1):
+    room_source_items = (map_rooms or heuristic_map.get("map_rooms", []))[:120]
+    total_rooms = len(room_source_items)
+    for idx, room in enumerate(room_source_items, start=1):
         if not isinstance(room, dict):
             continue
+        default_x, default_y = _flow_grid_position(idx, total_rooms)
         old_id = room.get("id", idx)
         old_room_to_new[str(old_id)] = len(normalized_rooms) + 1
         node_id = room.get("node_id")
@@ -1352,17 +1813,17 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
             node_id = None
         normalized_rooms.append({
             "id": len(normalized_rooms) + 1,
-            "map_id": int(room.get("map_id") or 1),
+            "map_id": _safe_int(room.get("map_id"), 1),
             "label": str(room.get("label") or room.get("name") or f"房间 {idx}")[:40],
-            "x": int(room.get("x") or (80 + ((idx - 1) % 4) * 170)),
-            "y": int(room.get("y") or (80 + ((idx - 1) // 4) * 120)),
-            "w": int(room.get("w") or 130),
-            "h": int(room.get("h") or 76),
+            "x": _safe_int(room.get("x"), default_x),
+            "y": _safe_int(room.get("y"), default_y),
+            "w": _safe_int(room.get("w"), 160),
+            "h": _safe_int(room.get("h"), 82),
             "description": str(room.get("description") or "")[:1000],
             "state": str(room.get("state") or "unknown"),
             "color": str(room.get("color") or "#1e3a2f"),
             "node_id": node_id,
-            "floor": int(room.get("floor") or 1),
+            "floor": _safe_int(room.get("floor"), 1),
         })
     valid_room_ids = {room["id"] for room in normalized_rooms}
     normalized_edges = []
@@ -1389,20 +1850,25 @@ def normalize_imported_campaign(raw: dict, title: str, text: str, image_urls: li
             "edge_type": str(edge.get("edge_type") or "normal")[:40],
         })
     map_data = {"map_rooms": normalized_rooms, "map_edges": normalized_edges}
-    return campaign, map_data
+    return _finalize_campaign_defaults(campaign, title), map_data
 
 
-def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[dict, dict, list[str]]:
+def ai_convert_campaign(
+    title: str,
+    text: str,
+    image_urls: list[str],
+    owner_account_id: int | None = None,
+) -> tuple[dict, dict, list[str]]:
     warnings = []
     import_settings = get_campaign_import_settings()
-    if not ai_provider.is_configured():
+    if not ai_provider.is_configured(owner_account_id=owner_account_id):
         warnings.append("OpenAI 兼容端点尚未配置，已生成保底剧本。")
         campaign, map_data = heuristic_campaign_from_text(title, text, image_urls)
         return campaign, map_data, warnings
 
-    campaign_model = ai_provider.get_active_model("campaign").strip()
+    campaign_model = ai_provider.get_active_model("campaign", owner_account_id=owner_account_id).strip()
     if not campaign_model:
-        campaign_model = ai_provider.get_active_model("chat").strip()
+        campaign_model = ai_provider.get_active_model("chat", owner_account_id=owner_account_id).strip()
         warnings.append("未配置剧本解析模型，已回退使用 Chat Model。")
 
     clean_text = _clean_import_text(text)
@@ -1413,6 +1879,7 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
         "你是资深 TRPG 剧本结构化转换器和跑团模组编辑。"
         "你的任务不是复述 OCR 文本，而是把剧本文档加工成 Z.R.I.C 引擎可直接导入和游玩的结构："
         "世界观、PC/NPC、场景节点、选项图、百科/线索、世界实体、地图房间与连接。"
+        "场景节点必须采用跑团主持人的场景设置口吻，不要把人物卡介绍塞进每个场景开头。"
         "你必须先理解剧本运行方式，再输出严格 JSON。所有内容用中文。"
     )
     user_prompt = f"""
@@ -1429,6 +1896,8 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
 - 抽取 PC/NPC、组织、地点、物品、线索、怪物/威胁、规则、时间线、背景真相、结局。
 - 对每个场景识别：地点、进入条件、可见信息、隐藏信息、可互动对象、判定、成功/失败后果、可转向节点。
 - 对每个角色识别：身份、公开描述、秘密/动机、关系、属性/技能、HP/SAN、装备/物品。
+- characters 是玩家可选择的扮演角色池。没有明确预设 PC 时，必须按剧本题材和剧情职能，把核心登场人物、行动发起者、见证者、关系纽带、调查者、守护者、竞争者、知情者、边缘卷入者或与危机有直接利害关系的人转成可扮演角色写入 characters，role 设为 PC；不要只放一个默认“调查员”。
+- 这些人物在剧情中的 NPC 状态仍要同步写入 world_entities，entity_type 设为 npc，state_desc 写明动机、秘密、关系、当前立场。
 
 阶段 3：设计可玩结构
 - nodes 是 GM 现场主持用的节点，不是章节摘要。每个 content 必须包含足够主持的信息。
@@ -1436,6 +1905,9 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
 - lorebook 是检索百科，按世界观、线索、道具、规则、手卡、重要地点、真相、时间线拆条。
 - world_entities 是运行时实体表，记录 NPC、地点、组织、物品、线索和威胁的状态。
 - map_rooms 从地点和场景生成；map_edges 表示空间路径、调查关联或剧情顺序。
+- map_rooms 坐标必须适合直接显示：优先分楼层/区域/剧情阶段，采用 3-4 列蛇形或分层布局；相邻剧情节点应相邻，避免回行时从最右连到最左形成长斜线；房间不能重叠，标签不能挤在一起。
+
+{GM_SCENE_GUIDANCE}
 
 阶段 4：校验输出
 - 所有 node_id/next_node_id 必须指向存在节点；map edge 的 from_id/to_id 必须指向存在房间。
@@ -1446,23 +1918,23 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
 请输出字段：
 - worldview: string
 - session_memory: string
-- characters: array，元素包含 name, role, hp, san, inventory, personality, status；inventory/personality 中必须保留原文里的属性、技能、物品、动机、秘密
+- characters: array，元素包含 name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status；这里输出玩家可选角色，核心 NPC 或与事件有直接利害关系的人也要作为 role=PC 的可扮演角色进入此数组；inventory/personality 中必须保留原文里的属性、技能、物品、动机、秘密；role_brief/script_brief/opening_prompt 必须给玩家选角确认后阅读
 - nodes: array，元素包含 id, name, summary, content, scene_image；id 从 1 开始
 - options: array，元素包含 node_id, text, next_node_id
 - lorebook: array，元素包含 keywords, content
 - triggers: array，可为空
 - world_entities: array，元素包含 entity_type, name, location, status, state_desc
-- map_rooms: array，元素包含 id, map_id, label, x, y, w, h, description, state, color, node_id, floor
+- map_rooms: array，元素包含 id, map_id, label, x, y, w, h, description, state, color, node_id, floor；默认 w 150-190、h 72-96，坐标使用整洁网格或分区布局
 - map_edges: array，元素包含 id, map_id, from_id, to_id, label, locked, key_item, edge_type
 
 要求：
 1. 至少生成 {target_node_count} 个关键场景节点，除非原文确实更短；不能只生成“开场”或章节摘要。
 2. 每个节点写清楚 GM 可直接主持的场景信息：地点、可见信息、隐藏信息、NPC状态、线索、判定、成功/失败后果、可能冲突。
 3. options 必须形成可走的主线图；关键调查/分支可以用多个选项连接到不同节点。
-4. characters 要区分 PC/NPC；如果原文有预设调查员/玩家角色，优先列为 PC。没有 HP/SAN 时用 100/80；发现 STR/DEX/技能/物品/秘密等信息时写入 inventory/personality。
+4. characters 要服务于玩家选角。如果原文有预设调查员/玩家角色，优先列为 PC；如果没有预设 PC，就按题材选择最有可玩性的核心人物：推动事件的人、被事件牵连的人、知道部分真相的人、与主线关系最密切的人、能代表不同阵营/价值观/关系线的人。没有 HP/SAN 时用 100/80；发现 STR/DEX/技能/物品/秘密等信息时写入 inventory/personality。每个角色都必须补全 role_brief、script_brief、opening_prompt：role_brief 用 120-320 字只写该角色身份、关系、目标、秘密和可用优势，不重复姓名标题、剧本简介、物品清单或通用行动建议；script_brief 用 180-500 字只写玩家进入剧本前需要知道的故事背景、公开开局处境和主要利害关系，不写“作为某角色”或“你的第一步”；opening_prompt 写 1-2 句选角确认后展示的角色入场提示，并根据题材调整关注点：调查剧强调线索与嫌疑，恐怖剧强调异常与退路，恋爱/社交剧强调关系与选择，规则怪谈强调规则边界与禁忌，冒险剧强调目标与资源，政治/商业剧强调筹码与阵营。role_brief/script_brief/opening_prompt 是玩家可见文本，不能照抄 worldview、nodes 隐藏信息或 lorebook 中面向主持人的规则段落；不能包含 AI、GM/KP/守秘人、HP/SAN 机制解释、知识库路径、RAG、推演约束、系统提示、导入说明、后台编辑说明、核心规则或基本设定。不要让每个节点开头重复这些人物介绍。
 5. lorebook 必须生成可检索百科：世界观、真相、时间线、线索、道具、规则、手卡、重要地点都要拆成独立条目；每条 content 应能独立回答一次检索问题，不要把整篇原文塞进单条 lore。
 6. world_entities 必须记录重要 NPC、组织、地点、物品、威胁和隐藏线索，state_desc 写当前状态、秘密、关系或用途。
-7. map_rooms 必须从场景地点生成，并尽量绑定相关 node_id；map_edges 表示路径、剧情推进或调查关系，没有空间关系时按剧情顺序连接。
+7. map_rooms 必须从场景地点生成，并尽量绑定相关 node_id；map_edges 表示路径、剧情推进或调查关系。没有空间关系时按剧情顺序连接，并用蛇形/分层布局让连续节点相邻，不允许生成跨越整张图的长斜线或重叠房间。
 8. 图片 URL 只在适合的节点 scene_image 中使用，不要改写 URL。
 9. OCR 可能有噪声；忽略页眉页脚、页码、目录重复、断行和明显乱码。
 10. 输出必须是单个 JSON 对象；不要只输出摘要，不要省略 characters/lorebook/world_entities/map_rooms。
@@ -1482,6 +1954,7 @@ def ai_convert_campaign(title: str, text: str, image_urls: list[str]) -> tuple[d
             apply_token_policy=False,
             cacheable=False,
             timeout=float(import_settings["ai_timeout_seconds"]),
+            owner_account_id=owner_account_id,
         )
         if raw.startswith("```"):
             raw = raw.split("```")[1]

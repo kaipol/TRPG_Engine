@@ -7,10 +7,11 @@ L1 短期工作区 / 记忆折叠 / L3 纯文本归档 / REST API。
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from .logger import get_logger
 from . import ai_provider
+from .auth import require_account_from_request
 
 _log = get_logger("memory")
 
@@ -20,7 +21,7 @@ memory_router = APIRouter(tags=["记忆系统"])
 # 依赖注入（由 main.py 启动时设置）
 # ---------------------------------------------------------
 _db_file: str = ""
-_get_embeddings = None  # 兼容旧注入；运行时记忆归档默认不再调用 embedding
+_get_embeddings = None  # 运行时记忆归档默认不再调用 embedding
 
 # 记忆参数
 MEMORY_FOLD_THRESHOLD = 4000
@@ -62,7 +63,8 @@ def safe_db():
 # ---------------------------------------------------------
 def _l1_append(conn, scene_name: str, player_action: str,
                ai_summary: str, thought_process: str = "",
-               entity_updates: str = "", timeline_id: int | None = None):
+               entity_updates: str = "", timeline_id: int | None = None,
+               owner_account_id: int | None = None):
     """
     向 L1 短期工作区追加一条推演快照。
     timeline_id=None 表示主线；传入 int 则隔离到对应时间线。
@@ -93,7 +95,7 @@ def _l1_append(conn, scene_name: str, player_action: str,
             # 后台线程必须获取自己的数据库连接
             bg_conn = get_db_connection()
             try:
-                _l1_evict_to_l3(bg_conn, rows_to_evict)
+                _l1_evict_to_l3(bg_conn, rows_to_evict, owner_account_id=owner_account_id)
             except Exception as e:
                 print(f"[后台任务] L1->L3 淘汰失败: {e}")
             finally:
@@ -102,7 +104,7 @@ def _l1_append(conn, scene_name: str, player_action: str,
         threading.Thread(target=_async_evict_task, args=(overflow,), daemon=True).start()
 
 
-def _l1_evict_to_l3(conn, rows):
+def _l1_evict_to_l3(conn, rows, *, owner_account_id: int | None = None):
     """
     将 L1 溢出的记录批量转化为 L3 长期文本记忆。
     运行时不调用 embedding；写入 rag_chunks 的空向量仍可被关键词检索召回。
@@ -129,6 +131,8 @@ def _l1_evict_to_l3(conn, rows):
 
     # 1. AI 压缩摘要
     try:
+        if owner_account_id is None or not ai_provider.is_configured(owner_account_id=owner_account_id):
+            raise RuntimeError("账号未配置 AI 供应商")
         resp = ai_provider.chat_completion(
             [
                 {"role": "system", "content": (
@@ -140,6 +144,7 @@ def _l1_evict_to_l3(conn, rows):
             ],
             temperature=0.3,
             max_tokens=500,
+            owner_account_id=owner_account_id,
         )
         summary = resp.choices[0].message.content.strip()
     except Exception as e:
@@ -198,7 +203,7 @@ def l1_get_working_context(conn, timeline_id: int | None = None) -> str:
 # ---------------------------------------------------------
 # 记忆折叠 + 追加
 # ---------------------------------------------------------
-def fold_memory_with_ai(current_mem: str) -> str:
+def fold_memory_with_ai(current_mem: str, *, owner_account_id: int | None = None) -> str:
     """
     将过长记忆折叠为「AI摘要 + 最近N行原文」。
     若 AI 调用失败，降级为按行截断。
@@ -214,6 +219,8 @@ def fold_memory_with_ai(current_mem: str) -> str:
     recent_text  = "\n".join(recent_lines)
 
     try:
+        if owner_account_id is None or not ai_provider.is_configured(owner_account_id=owner_account_id):
+            raise RuntimeError("账号未配置 AI 供应商")
         resp = ai_provider.chat_completion(
             [
                 {"role": "system", "content": (
@@ -224,6 +231,7 @@ def fold_memory_with_ai(current_mem: str) -> str:
             ],
             temperature=0.3,
             max_tokens=500,
+            owner_account_id=owner_account_id,
         )
         summary = resp.choices[0].message.content.strip()
         return f"【剧情摘要】{summary}\n【近期详细记录】\n{recent_text}"
@@ -233,12 +241,13 @@ def fold_memory_with_ai(current_mem: str) -> str:
         return "【早期记录已截断】\n" + "\n".join(fallback_lines)
 
 
-def _async_fold_memory_task(target_type: str, text_to_fold: str, tl_id: int = None):
+def _async_fold_memory_task(target_type: str, text_to_fold: str, tl_id: int = None,
+                            owner_account_id: int | None = None):
     """后台专属任务：调用 AI 压缩记忆，然后写回数据库"""
     bg_conn = get_db_connection()
     try:
         # 调用大模型进行折叠（耗时操作，现在在后台发生）
-        folded_text = fold_memory_with_ai(text_to_fold)
+        folded_text = fold_memory_with_ai(text_to_fold, owner_account_id=owner_account_id)
         
         if target_type == "session":
             bg_conn.execute("INSERT OR REPLACE INTO system_state (key, value) VALUES ('session_memory', ?)", (folded_text,))
@@ -252,7 +261,7 @@ def _async_fold_memory_task(target_type: str, text_to_fold: str, tl_id: int = No
         bg_conn.close()
 
 
-def append_to_memory(conn, new_log):
+def append_to_memory(conn, new_log, *, owner_account_id: int | None = None):
     """追加新主线记忆：立即存库防止丢失，超限则丢给后台折叠"""
     row = conn.execute("SELECT value FROM system_state WHERE key = 'session_memory'").fetchone()
     current_mem = row["value"] if row else ""
@@ -265,13 +274,17 @@ def append_to_memory(conn, new_log):
     # 2. 如果超过阈值，派发后台线程去慢慢折叠
     if len(updated_mem) > MEMORY_FOLD_THRESHOLD:
         import threading
-        threading.Thread(target=_async_fold_memory_task, args=("session", updated_mem), daemon=True).start()
+        threading.Thread(
+            target=_async_fold_memory_task,
+            args=("session", updated_mem, None, owner_account_id),
+            daemon=True,
+        ).start()
 
 
 # ---------------------------------------------------------
 # 时间线记忆追加（供 timeline 模块调用）
 # ---------------------------------------------------------
-def _tl_append_memory(conn, tl_id: int, log: str):
+def _tl_append_memory(conn, tl_id: int, log: str, *, owner_account_id: int | None = None):
     """追加时间线记忆：立即存库防止丢失，超限则丢给后台折叠"""
     row = conn.execute("SELECT memory FROM timelines WHERE id=?", (tl_id,)).fetchone()
     if not row: return
@@ -286,7 +299,11 @@ def _tl_append_memory(conn, tl_id: int, log: str):
     # 2. 如果超过阈值，派发后台线程
     if len(updated) > MEMORY_FOLD_THRESHOLD:
         import threading
-        threading.Thread(target=_async_fold_memory_task, args=("timeline", updated, tl_id), daemon=True).start()
+        threading.Thread(
+            target=_async_fold_memory_task,
+            args=("timeline", updated, tl_id, owner_account_id),
+            daemon=True,
+        ).start()
 
 
 # ---------------------------------------------------------
@@ -304,7 +321,8 @@ def get_memory():
 
 
 @memory_router.put("/api/game/memory")
-def update_memory(req: StringContentRequest):
+def update_memory(req: StringContentRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("INSERT OR REPLACE INTO system_state (key, value) VALUES ('session_memory', ?)", (req.content,))
         conn.commit()
@@ -322,7 +340,8 @@ def get_memory_l1():
 
 
 @memory_router.delete("/api/game/memory-l1")
-def clear_memory_l1():
+def clear_memory_l1(request: Request):
+    require_account_from_request(request)
     """清空 L1 短期工作区"""
     with safe_db() as conn:
         conn.execute("DELETE FROM memory_l1")

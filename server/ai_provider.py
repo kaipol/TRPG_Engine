@@ -104,6 +104,7 @@ class OpenAICompatibleConfig:
     image_model: str
     campaign_model: str
     image_size: str
+    owner_account_id: int | None = None
 
     @property
     def configured(self) -> bool:
@@ -113,7 +114,7 @@ class OpenAICompatibleConfig:
 def configure_provider_store(path: str) -> None:
     global _provider_store_base_dir
     config_path = Path(path)
-    if config_path.name in {local_config.CONFIG_FILE_NAME, local_config.LEGACY_CONFIG_FILE_NAME}:
+    if config_path.name == local_config.CONFIG_FILE_NAME:
         _provider_store_base_dir = str(config_path.parent)
     else:
         _provider_store_base_dir = str(config_path)
@@ -150,6 +151,11 @@ def _slug(value: str) -> str:
 def _normalize_record(raw: dict, fallback_id: str = DEFAULT_PROVIDER_ID) -> dict:
     provider_id = _slug(str(raw.get("id") or fallback_id))
     provider_name = str(raw.get("name") or provider_id or DEFAULT_PROVIDER_NAME).strip()
+    owner_account_id = raw.get("owner_account_id")
+    try:
+        owner_account_id = int(owner_account_id) if owner_account_id not in (None, "") else None
+    except (TypeError, ValueError):
+        owner_account_id = None
     return {
         "id": provider_id,
         "name": provider_name,
@@ -160,10 +166,39 @@ def _normalize_record(raw: dict, fallback_id: str = DEFAULT_PROVIDER_ID) -> dict
         "image_model": str(raw.get("image_model") or "").strip(),
         "campaign_model": str(raw.get("campaign_model") or "").strip(),
         "image_size": str(raw.get("image_size") or DEFAULT_IMAGE_SIZE).strip() or DEFAULT_IMAGE_SIZE,
+        "owner_account_id": owner_account_id,
+        "owner_username": str(raw.get("owner_username") or "").strip(),
+        "owner_display_name": str(raw.get("owner_display_name") or "").strip(),
     }
 
 
-def _provider_records(include_default: bool = True) -> tuple[str, list[dict]]:
+def _owner_key(owner_account_id: int | None) -> str:
+    return str(int(owner_account_id)) if owner_account_id is not None else ""
+
+
+def _record_owner_id(record: dict) -> int | None:
+    try:
+        owner = record.get("owner_account_id")
+        return int(owner) if owner not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_visible_to_owner(record: dict, owner_account_id: int | None, include_unowned: bool) -> bool:
+    if owner_account_id is None:
+        return include_unowned or _record_owner_id(record) is None
+    owner_id = _record_owner_id(record)
+    if owner_id == owner_account_id:
+        return True
+    return include_unowned and owner_id is None
+
+
+def _provider_records(
+    include_default: bool = True,
+    *,
+    owner_account_id: int | None = None,
+    include_unowned: bool = True,
+) -> tuple[str, list[dict]]:
     store = _read_store()
     records = []
     seen = set()
@@ -171,15 +206,22 @@ def _provider_records(include_default: bool = True) -> tuple[str, list[dict]]:
         if not isinstance(item, dict):
             continue
         record = _normalize_record(item, f"provider-{idx + 1}")
-        if record["id"] in seen:
+        seen_key = (_record_owner_id(record), record["id"])
+        if seen_key in seen:
             continue
-        seen.add(record["id"])
+        seen.add(seen_key)
+        if not _record_visible_to_owner(record, owner_account_id, include_unowned):
+            continue
         records.append(record)
 
     if include_default and not records:
         records.append(_normalize_record(_default_record(), DEFAULT_PROVIDER_ID))
 
-    active_id = _slug(str(store.get("active_provider") or ""))
+    if owner_account_id is not None:
+        active_map = store.get("active_provider_by_account") if isinstance(store.get("active_provider_by_account"), dict) else {}
+        active_id = _slug(str(active_map.get(_owner_key(owner_account_id)) or ""))
+    else:
+        active_id = _slug(str(store.get("active_provider") or ""))
     if not active_id and records:
         active_id = records[0]["id"]
     if active_id and records and not any(p["id"] == active_id for p in records):
@@ -199,12 +241,17 @@ def _config_from_record(record: dict | None) -> OpenAICompatibleConfig:
         image_model=record["image_model"],
         campaign_model=record["campaign_model"],
         image_size=record["image_size"],
+        owner_account_id=_record_owner_id(record),
     )
 
 
-def get_config(provider_id: str | None = None) -> OpenAICompatibleConfig:
+def get_config(provider_id: str | None = None, *, owner_account_id: int | None = None) -> OpenAICompatibleConfig:
     """Read current runtime configuration from provider profiles or environment variables."""
-    active_id, records = _provider_records(include_default=True)
+    active_id, records = _provider_records(
+        include_default=owner_account_id is None,
+        owner_account_id=owner_account_id,
+        include_unowned=owner_account_id is None,
+    )
     selected_id = _slug(provider_id or active_id)
     for record in records:
         if record["id"] == selected_id:
@@ -214,12 +261,16 @@ def get_config(provider_id: str | None = None) -> OpenAICompatibleConfig:
     return _config_from_record(_default_record())
 
 
-def is_configured(provider_id: str | None = None) -> bool:
-    return get_config(provider_id).configured
+def is_configured(provider_id: str | None = None, *, owner_account_id: int | None = None) -> bool:
+    return get_config(provider_id, owner_account_id=owner_account_id).configured
 
 
-def list_provider_profiles() -> list[dict]:
-    active_id, records = _provider_records(include_default=True)
+def list_provider_profiles(*, owner_account_id: int | None = None, include_unowned: bool = True) -> list[dict]:
+    active_id, records = _provider_records(
+        include_default=owner_account_id is None,
+        owner_account_id=owner_account_id,
+        include_unowned=include_unowned,
+    )
     profiles = []
     for record in records:
         cfg = _config_from_record(record)
@@ -234,18 +285,34 @@ def list_provider_profiles() -> list[dict]:
             "image_model": cfg.image_model,
             "campaign_model": cfg.campaign_model,
             "image_size": cfg.image_size,
+            "owner_account_id": cfg.owner_account_id,
         })
     return profiles
 
 
-def get_active_provider_id() -> str:
-    active_id, _ = _provider_records(include_default=True)
+def get_active_provider_id(*, owner_account_id: int | None = None) -> str:
+    active_id, _ = _provider_records(
+        include_default=owner_account_id is None,
+        owner_account_id=owner_account_id,
+        include_unowned=owner_account_id is None,
+    )
     return active_id
 
 
-def _store_from_records(active_id: str, records: list[dict]) -> dict:
+def _store_from_records(active_id: str, records: list[dict], *, owner_account_id: int | None = None) -> dict:
     store = _read_store()
-    store["active_provider"] = active_id
+    if owner_account_id is None:
+        store["active_provider"] = active_id
+    else:
+        active_map = store.get("active_provider_by_account")
+        if not isinstance(active_map, dict):
+            active_map = {}
+        key = _owner_key(owner_account_id)
+        if active_id:
+            active_map[key] = active_id
+        else:
+            active_map.pop(key, None)
+        store["active_provider_by_account"] = active_map
     store["providers"] = records
     return store
 
@@ -296,16 +363,25 @@ def upsert_provider_profile(
     campaign_model: str | None = None,
     image_size: str | None = None,
     make_active: bool = True,
+    owner_account_id: int | None = None,
+    owner_username: str = "",
+    owner_display_name: str = "",
 ) -> OpenAICompatibleConfig:
-    active_id, records = _provider_records(include_default=True)
+    active_id, records = _provider_records(include_default=False, include_unowned=True)
     target_id = _slug(provider_id or provider_name or DEFAULT_PROVIDER_ID)
 
     existing = None
     for record in records:
-        if record["id"] == target_id:
+        if record["id"] == target_id and _record_owner_id(record) == owner_account_id:
             existing = record
             break
     if existing is None:
+        base_id = target_id
+        suffix = 1
+        used = {record["id"] for record in records}
+        while target_id in used:
+            suffix += 1
+            target_id = _slug(f"{base_id}-{suffix}")
         existing = _normalize_record({"id": target_id, "name": provider_name or target_id}, target_id)
         records.append(existing)
 
@@ -313,6 +389,9 @@ def upsert_provider_profile(
         return value.strip() if value is not None and value.strip() else old
 
     existing["name"] = pick(provider_name, existing["name"])
+    existing["owner_account_id"] = owner_account_id
+    existing["owner_username"] = (owner_username or "").strip()
+    existing["owner_display_name"] = (owner_display_name or "").strip()
     existing["api_key"] = pick(api_key, existing["api_key"])
     existing["base_url"] = pick(base_url, existing["base_url"])
     existing["chat_model"] = pick(chat_model, existing["chat_model"])
@@ -325,36 +404,59 @@ def upsert_provider_profile(
         active_id = existing["id"]
         _active_models.clear()
 
-    _write_store(_store_from_records(active_id or existing["id"], records))
+    _write_store(_store_from_records(active_id or existing["id"], records, owner_account_id=owner_account_id))
     return _config_from_record(existing)
 
 
-def set_active_provider(provider_id: str) -> OpenAICompatibleConfig:
-    active_id, records = _provider_records(include_default=True)
+def set_active_provider(provider_id: str, *, owner_account_id: int | None = None) -> OpenAICompatibleConfig:
+    _active_id, records = _provider_records(
+        include_default=owner_account_id is None,
+        owner_account_id=owner_account_id,
+        include_unowned=owner_account_id is None,
+    )
     target_id = _slug(provider_id)
     for record in records:
         if record["id"] == target_id:
-            _write_store(_store_from_records(target_id, records))
+            all_records = _provider_records(include_default=False, include_unowned=True)[1]
+            _write_store(_store_from_records(target_id, all_records, owner_account_id=owner_account_id))
             _active_models.clear()
             return _config_from_record(record)
     raise ValueError("provider not found")
 
 
-def delete_provider_profile(provider_id: str) -> str:
-    active_id, records = _provider_records(include_default=False)
+def delete_provider_profile(provider_id: str, *, owner_account_id: int | None = None) -> str:
+    active_id, visible = _provider_records(
+        include_default=False,
+        owner_account_id=owner_account_id,
+        include_unowned=owner_account_id is None,
+    )
+    _global_active_id, records = _provider_records(include_default=False, include_unowned=True)
     target_id = _slug(provider_id)
-    remaining = [record for record in records if record["id"] != target_id]
+    target_record = next((record for record in visible if record["id"] == target_id), None)
+    if not target_record:
+        raise ValueError("provider not found")
+    target_owner = _record_owner_id(target_record)
+    remaining = [
+        record for record in records
+        if not (record["id"] == target_id and _record_owner_id(record) == target_owner)
+    ]
     if len(remaining) == len(records):
         raise ValueError("provider not found")
     if active_id == target_id:
-        active_id = remaining[0]["id"] if remaining else ""
+        replacement = [record for record in remaining if _record_visible_to_owner(record, owner_account_id, owner_account_id is None)]
+        active_id = replacement[0]["id"] if replacement else ""
         _active_models.clear()
-    _write_store(_store_from_records(active_id, remaining))
+    _write_store(_store_from_records(active_id, remaining, owner_account_id=owner_account_id))
     return active_id
 
 
-def get_client(timeout: float | None = None, provider_id: str | None = None) -> OpenAI:
-    cfg = get_config(provider_id)
+def get_client(
+    timeout: float | None = None,
+    provider_id: str | None = None,
+    *,
+    owner_account_id: int | None = None,
+) -> OpenAI:
+    cfg = get_config(provider_id, owner_account_id=owner_account_id)
     if not cfg.configured:
         raise RuntimeError("OpenAI-compatible endpoint is not configured.")
     kwargs = {
@@ -367,10 +469,15 @@ def get_client(timeout: float | None = None, provider_id: str | None = None) -> 
     return OpenAI(**kwargs)
 
 
-def get_active_model(capability: str = "chat") -> str:
-    if capability in _active_models and _active_models[capability]:
-        return _active_models[capability]
-    cfg = get_config()
+def _active_model_key(capability: str, owner_account_id: int | None) -> str:
+    return f"{_owner_key(owner_account_id) or 'global'}:{capability}"
+
+
+def get_active_model(capability: str = "chat", *, owner_account_id: int | None = None) -> str:
+    key = _active_model_key(capability, owner_account_id)
+    if key in _active_models and _active_models[key]:
+        return _active_models[key]
+    cfg = get_config(owner_account_id=owner_account_id)
     defaults = {
         "chat": cfg.chat_model,
         "embedding": cfg.embedding_model,
@@ -380,24 +487,34 @@ def get_active_model(capability: str = "chat") -> str:
     return defaults.get(capability, "")
 
 
-def _persist_active_model(capability: str, model: str) -> None:
+def _persist_active_model(capability: str, model: str, *, owner_account_id: int | None = None) -> None:
     field = MODEL_CAPABILITY_FIELDS.get(capability)
     if not field:
         return
-    active_id, records = _provider_records(include_default=True)
+    active_id, records = _provider_records(
+        include_default=owner_account_id is None,
+        owner_account_id=owner_account_id,
+        include_unowned=owner_account_id is None,
+    )
+    _global_active_id, all_records = _provider_records(include_default=False, include_unowned=True)
+    target_records = all_records or records
     for record in records:
         if record["id"] == active_id:
-            record[field] = model
-            _write_store(_store_from_records(active_id, records))
+            owner_id = _record_owner_id(record)
+            for target in target_records:
+                if target["id"] == record["id"] and _record_owner_id(target) == owner_id:
+                    target[field] = model
+                    break
+            _write_store(_store_from_records(active_id, target_records, owner_account_id=owner_account_id))
             return
 
 
-def set_active_model(model: str, capability: str = "chat") -> str:
+def set_active_model(model: str, capability: str = "chat", *, owner_account_id: int | None = None) -> str:
     model = (model or "").strip()
     if not model:
         raise ValueError("model is required")
-    _active_models[capability] = model
-    _persist_active_model(capability, model)
+    _active_models[_active_model_key(capability, owner_account_id)] = model
+    _persist_active_model(capability, model, owner_account_id=owner_account_id)
     return model
 
 
@@ -423,12 +540,17 @@ def _list_models_with_client(client: OpenAI, *, search: str, provider_name: str,
     return models
 
 
-def list_remote_models(search: str = "", provider_id: str | None = None) -> list[dict]:
+def list_remote_models(
+    search: str = "",
+    provider_id: str | None = None,
+    *,
+    owner_account_id: int | None = None,
+) -> list[dict]:
     """Fetch /models from a saved compatible endpoint."""
-    cfg = get_config(provider_id)
+    cfg = get_config(provider_id, owner_account_id=owner_account_id)
     if not cfg.configured:
         return []
-    client = get_client(timeout=30, provider_id=cfg.provider_id)
+    client = get_client(timeout=30, provider_id=cfg.provider_id, owner_account_id=owner_account_id)
     return _list_models_with_client(
         client,
         search=search,
@@ -475,8 +597,9 @@ def chat_completion(
     stream: bool = False,
     timeout: float = 120,
     apply_token_policy: bool = False,
+    owner_account_id: int | None = None,
 ):
-    model_id = (model or get_active_model("chat")).strip()
+    model_id = (model or get_active_model("chat", owner_account_id=owner_account_id)).strip()
     if not model_id:
         raise RuntimeError("No OpenAI-compatible chat model is selected.")
     json_mode = json_mode or (isinstance(response_format, dict) and response_format.get("type") == "json_object")
@@ -495,7 +618,7 @@ def chat_completion(
     }
     if json_mode:
         kwargs["response_format"] = response_format or {"type": "json_object"}
-    client = get_client(timeout=timeout)
+    client = get_client(timeout=timeout, owner_account_id=owner_account_id)
     try:
         return client.chat.completions.create(**kwargs)
     except Exception as exc:
@@ -536,19 +659,19 @@ def _with_json_instruction(messages: list[dict]) -> list[dict]:
     return updated
 
 
-def embedding_create(texts: list[str]):
-    model_id = get_active_model("embedding").strip()
+def embedding_create(texts: list[str], *, owner_account_id: int | None = None):
+    model_id = get_active_model("embedding", owner_account_id=owner_account_id).strip()
     if not model_id:
         raise RuntimeError("No OpenAI-compatible embedding model is configured.")
-    return get_client(timeout=90).embeddings.create(model=model_id, input=texts)
+    return get_client(timeout=90, owner_account_id=owner_account_id).embeddings.create(model=model_id, input=texts)
 
 
-def image_generate(prompt: str, *, model: str = "", size: str = ""):
-    cfg = get_config()
-    model_id = (model or get_active_model("image")).strip()
+def image_generate(prompt: str, *, model: str = "", size: str = "", owner_account_id: int | None = None):
+    cfg = get_config(owner_account_id=owner_account_id)
+    model_id = (model or get_active_model("image", owner_account_id=owner_account_id)).strip()
     if not model_id:
         raise RuntimeError("No OpenAI-compatible image model is configured.")
-    client = get_client(timeout=120)
+    client = get_client(timeout=120, owner_account_id=owner_account_id)
     kwargs = {
         "model": model_id,
         "prompt": prompt,

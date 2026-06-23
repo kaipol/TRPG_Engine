@@ -26,6 +26,7 @@ __pycache__/
 
 # Application runtime data
 .runtime/
+saves/
 .mineru/
 .mineru-*/
 mineru_output/

@@ -51,7 +51,19 @@ def init_db(
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, summary TEXT, content TEXT, scene_image TEXT DEFAULT '')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS options (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER, text TEXT, next_node_id INTEGER)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, role TEXT, hp INTEGER, san INTEGER, inventory TEXT DEFAULT '', status TEXT DEFAULT 'active')''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS characters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        role TEXT,
+        hp INTEGER,
+        san INTEGER,
+        inventory TEXT DEFAULT '',
+        personality TEXT DEFAULT '',
+        role_brief TEXT DEFAULT '',
+        script_brief TEXT DEFAULT '',
+        opening_prompt TEXT DEFAULT '',
+        status TEXT DEFAULT 'active'
+    )''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS ai_response_cache (
         cache_key          TEXT PRIMARY KEY,
@@ -145,6 +157,12 @@ def init_db(
     try: cursor.execute("ALTER TABLE characters ADD COLUMN status TEXT DEFAULT 'active'")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE characters ADD COLUMN personality TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN role_brief TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN script_brief TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN opening_prompt TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE map_rooms ADD COLUMN floor INTEGER NOT NULL DEFAULT 1")
     except sqlite3.OperationalError: pass

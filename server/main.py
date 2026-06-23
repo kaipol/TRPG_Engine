@@ -15,6 +15,7 @@ import uvicorn
 import sqlite3
 import json
 import json_repair 
+import html
 import os
 import io
 import glob
@@ -43,6 +44,10 @@ from .local_config import (
 app = fastapi.FastAPI(title="RPG 桌游控制台 API - V5")
 BASE_DIR = resolve_base_dir()
 SERVER_HOST, SERVER_PORT = get_server_bind(BASE_DIR)
+_load_campaign_lock = threading.Lock()
+_rag_rebuild_lock = threading.Lock()
+HIDDEN_ROOM_SAVE_PREFIX = "__room_"
+MULTIPLAYER_ROOM_SAVE_PREFIX = "__room_mp_"
 
 # CORS 默认仅允许当前端口的本机访问；部署时可在 config.json 的 server.allowed_origins 中配置。
 _allowed_origins = get_allowed_origins(BASE_DIR, SERVER_PORT)
@@ -54,6 +59,42 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Auth-Token", "X-Room-Token", "X-Member-Token"],
 )
+
+
+def _is_internal_scene_name(name: str) -> bool:
+    return bool(re.search(r"(?:守秘人|GM|KP|幕后|真相|后台|导入|索引|规则说明|系统信息)", str(name or ""), re.I))
+
+
+def _scene_looks_player_visible_value(name: str, summary: str = "", content: str = "") -> bool:
+    if _is_internal_scene_name(name):
+        return False
+    sample = re.sub(r"\s+", " ", f"{summary or ''} {content or ''}").strip()
+    return not bool(re.search(r"(?:守秘人|KP|GM|主持|英雄们|模组|危险的谎言|邪恶的超自然力量|玩家们|NPC角色)", sample, re.I))
+
+
+def _first_player_visible_scene_id(config: dict) -> int | None:
+    fallback = None
+    for node in config.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        try:
+            parsed_id = int(node_id)
+        except (TypeError, ValueError):
+            continue
+        if fallback is None:
+            fallback = parsed_id
+        if _scene_looks_player_visible_value(node.get("name", ""), node.get("summary", ""), node.get("content", "")):
+            return parsed_id
+    return fallback
+
+
+def _is_hidden_room_save(name: str) -> bool:
+    return str(name or "").strip().startswith(HIDDEN_ROOM_SAVE_PREFIX)
+
+
+def _is_multiplayer_room_save_name(name: str) -> bool:
+    return str(name or "").strip().startswith(MULTIPLAYER_ROOM_SAVE_PREFIX)
 
 # ---------------------------------------------------------
 # 【统一错误处理】：所有异常统一为 {"status":"error","message":"..."}
@@ -93,6 +134,7 @@ from .rag import rag_router, configure_rag, init_rag_tables
 from .rag import chunk_text as _chunk_text, get_embeddings as _get_embeddings
 from .rag import rag_retrieve as _rag_retrieve, cosine_similarity as _cosine_similarity
 from .rag import refresh_vector_cache as _refresh_vector_cache
+from .rag import sanitize_knowledge_text as _sanitize_knowledge_text
 app.include_router(rag_router)
 
 # ---------------------------------------------------------
@@ -142,7 +184,7 @@ app.include_router(dice_router)
 # ---------------------------------------------------------
 # 【模块化】：挂载配置管理接口
 # ---------------------------------------------------------
-from .config_api import config_router, configure_config_api, require_admin_config_access
+from .config_api import config_router, configure_config_api
 app.include_router(config_router)
 
 # ---------------------------------------------------------
@@ -184,13 +226,13 @@ from .document_extraction import MINERU_FLASH_MAX_BYTES
 # ---------------------------------------------------------
 # 【模块化】：挂载全局账号认证
 # ---------------------------------------------------------
-from .auth import account_from_request, auth_router, configure_auth, init_auth_tables, is_admin_account, require_account_from_request
+from .auth import account_from_request, auth_router, configure_auth, init_auth_tables, require_account_from_request
 app.include_router(auth_router)
 
 # ---------------------------------------------------------
 # 【模块化】：挂载多人联机融合模块
 # ---------------------------------------------------------
-from .multiplayer import MAX_ROOM_PLAYERS, multiplayer_router, configure_multiplayer, init_multiplayer_tables
+from .multiplayer import MAX_ROOM_PLAYERS, multiplayer_router, configure_multiplayer, init_multiplayer_tables, export_room_state_for_save_name
 app.include_router(multiplayer_router)
 
 # ---------------------------------------------------------
@@ -204,6 +246,10 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 mount_asset_files(app, WEB_DIR, ASSETS_DIR)
 CAMPAIGNS_DIR = os.path.join(BASE_DIR, "campaigns")  # 模块化剧本文件夹
+SAVES_DIR = os.path.join(BASE_DIR, "saves")          # 按剧本分组的运行存档
+CAMPAIGN_IMPORT_MAX_BYTES = 100 * 1024 * 1024
+CAMPAIGN_IMPORT_MAX_ASSETS = 24
+CAMPAIGN_IMPORT_MAX_ASSET_BYTES = 20 * 1024 * 1024
 CAMPAIGN_PACKAGE_MAX_BYTES = 500 * 1024 * 1024
 CAMPAIGN_PACKAGE_MAX_UNCOMPRESSED_BYTES = 750 * 1024 * 1024
 CAMPAIGN_PACKAGE_MAX_FILES = 3000
@@ -213,6 +259,7 @@ ai_provider.configure_provider_store(str(provider_store_path(BASE_DIR)))
 
 DB_FILE = os.path.join(BASE_DIR, "rpg_game.db")
 os.makedirs(CAMPAIGNS_DIR, exist_ok=True)
+os.makedirs(SAVES_DIR, exist_ok=True)
 RAG_AUTO_REBUILD_EMBEDDINGS = bool(get_rag_settings(BASE_DIR).get("auto_rebuild_embeddings"))
 
 # 【模块化】：将 DB 路径注入地图模块
@@ -241,6 +288,15 @@ configure_multiplayer(
     fn_chunk_text=_chunk_text,
     fn_get_embeddings=_get_embeddings,
     fn_refresh_vector_cache=_refresh_vector_cache,
+    fn_load_campaign_path=lambda filename, owner_account_id=None: _load_campaign_from_path(
+        filename,
+        request_account={
+            "id": owner_account_id,
+            "username": "",
+            "display_name": "",
+        },
+        preserve_multiplayer_state=True,
+    ),
 )
 
 # ---------------------------------------------------------
@@ -279,6 +335,7 @@ configure_auth(DB_FILE)
 init_core_db(init_map_tables=init_map_tables, init_rag_tables=init_rag_tables)
 init_auth_tables()
 init_multiplayer_tables()
+configure_trigger(DB_FILE)
 
 # ---------------------------------------------------------
 # 【模块化】：配置 Agent 模块（注入所有依赖函数）
@@ -337,14 +394,91 @@ class AIContextRequest(BaseModel): scene_name: str = ""; content: str = ""
 class CharUpdateRequest(BaseModel):
     name: str | None = None
     hp: int; san: int; inventory: str = ""; personality: str = ""
+    role_brief: str | None = None
+    script_brief: str | None = None
+    opening_prompt: str | None = None
     status: str = "active"
 class NodeCreateRequest(BaseModel): name: str; summary: str; content: str
 class NodeUpdateRequest(BaseModel): name: str; summary: str; content: str
 class OptionCreateRequest(BaseModel): node_id: int; text: str; next_node_id: int
 class StringContentRequest(BaseModel): content: str
-class LoadCampaignRequest(BaseModel): filename: str
+class LoadCampaignRequest(BaseModel):
+    filename: str
+    preserve_multiplayer_state: bool = False
 class ReparseCampaignRequest(BaseModel): campaign_path: str
 class LorebookRequest(BaseModel): keywords: str; content: str
+
+def _json_list_text(value, *, max_items: int = 50, max_len: int = 80) -> str:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            items = []
+        else:
+            try:
+                parsed = json.loads(raw)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except (json.JSONDecodeError, TypeError):
+                items = [raw]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
+    cleaned = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:max_len])
+        if len(cleaned) >= max_items:
+            break
+    return json.dumps(cleaned, ensure_ascii=False)
+
+def _json_array_text(value) -> str:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return "[]"
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return "[]"
+        value = parsed
+    if not isinstance(value, list):
+        return "[]"
+    return json.dumps(value, ensure_ascii=False)
+
+def _int_value(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _clean_player_visible_text(value: object, *, max_len: int = 0) -> str:
+    """Remove OCR/Markdown artifacts that should not be shown in the play surface."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return ""
+    image_refs: list[str] = []
+
+    def keep_image(match: re.Match) -> str:
+        image_refs.append(match.group(0))
+        return f"@@ZRIC_IMAGE_{len(image_refs) - 1}@@"
+
+    text = re.sub(r"!\[[^\]]*\]\(/api/campaign-assets/[^)]+\)", keep_image, text)
+    text = re.sub(r"<table\b[^>]*>.*?</table>", "\n", text, flags=re.I | re.S)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:p|div|li|tr|h[1-6])\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = re.sub(r"\$=\s*\\mathbf\{([^}]+)\}\s*=\$", r"= \1 =", text)
+    text = re.sub(r"\$\\mathbf\{([^}]+)\}\$", r"\1", text)
+    text = re.sub(r"\\([*_{}\[\]()#+.!-])", r"\1", text)
+    text = re.sub(r"(?m)^\s*(?:类型\s*[:：]\s*\w+|材料\s*\d+)\s*$", "", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    for idx, image in enumerate(image_refs):
+        text = text.replace(f"@@ZRIC_IMAGE_{idx}@@", image)
+    return text[:max_len] if max_len and len(text) > max_len else text
+
 class CharCreateRequest(BaseModel):
     name: str
     role: str = "PC"
@@ -352,6 +486,9 @@ class CharCreateRequest(BaseModel):
     san: int = 80
     inventory: str = ""
     personality: str = ""
+    role_brief: str = ""
+    script_brief: str = ""
+    opening_prompt: str = ""
     status: str = "active"
 class AutoNPCRequest(BaseModel):
     scene_name: str
@@ -377,7 +514,7 @@ class TimelineDynamicRequest(BaseModel):
 # 【地图系统】：数据模型已移至 map.py（通过 map_router 自动注册）
 
 # ---------------------------------------------------------
-# API 接口：剧本与存档管理（支持模块化文件夹结构）
+# API 接口：剧本与存档管理（文件夹结构）
 # ---------------------------------------------------------
 # 文件夹结构：
 #   campaigns/
@@ -386,7 +523,6 @@ class TimelineDynamicRequest(BaseModel):
 #       map.json         ← 地图（房间、通道）
 #       knowledge/       ← 知识库
 #         *.txt / *.md   ← RAG 文档
-#   *.json               ← 兼容旧版单文件存档（平铺在 BASE_DIR 下）
 # ---------------------------------------------------------
 
 def _campaign_player_limits(path: str) -> tuple[bool, dict[str, int]]:
@@ -418,17 +554,51 @@ def _campaign_player_limits(path: str) -> tuple[bool, dict[str, int]]:
     }
 
 
-def _is_legacy_campaign_file(path: str) -> bool:
-    """Only accept root-level JSON files that look like old campaign saves."""
+def _is_campaign_file(path: str) -> bool:
     valid, _limits = _campaign_player_limits(path)
     return valid
 
 
-configure_campaign_storage(BASE_DIR, CAMPAIGNS_DIR, _is_legacy_campaign_file)
+configure_campaign_storage(BASE_DIR, CAMPAIGNS_DIR, _is_campaign_file)
 
 
 def _campaign_json_data_valid(data: object) -> bool:
     return isinstance(data, dict) and isinstance(data.get("nodes"), list)
+
+
+_CAMPAIGN_LIST_FIELDS = {
+    "characters",
+    "nodes",
+    "options",
+    "lorebook",
+    "triggers",
+    "world_entities",
+    "timelines",
+    "rag_library",
+    "memory_l1",
+    "pending_effects",
+    "npc_chat_logs",
+    "knowledge_documents",
+}
+_MAP_LIST_FIELDS = {"map_rooms", "map_edges"}
+
+
+def _normalize_imported_campaign_file_data(data: object) -> dict:
+    campaign = data if isinstance(data, dict) else {}
+    for key in _CAMPAIGN_LIST_FIELDS:
+        if not isinstance(campaign.get(key), list):
+            campaign[key] = []
+    campaign["worldview"] = str(campaign.get("worldview") or "【默认世界观】")
+    campaign["session_memory"] = str(campaign.get("session_memory") or "【跑团记忆日志已初始化】\n")
+    return campaign
+
+
+def _normalize_imported_map_file_data(data: object) -> dict:
+    map_data = data if isinstance(data, dict) else {}
+    for key in _MAP_LIST_FIELDS:
+        if not isinstance(map_data.get(key), list):
+            map_data[key] = []
+    return map_data
 
 
 def _safe_zip_member_name(name: str) -> str:
@@ -524,6 +694,157 @@ def _unique_campaign_folder_name(base_name: str) -> tuple[str, str]:
     return candidate, os.path.join(CAMPAIGNS_DIR, candidate)
 
 
+def _save_asset_url(campaign_name: str, save_name: str, asset_name: str) -> str:
+    return (
+        f"/api/campaign-assets/saves/{urllib.parse.quote(campaign_name, safe='')}/"
+        f"{urllib.parse.quote(save_name, safe='')}/{urllib.parse.quote(asset_name, safe='')}"
+    )
+
+
+def _safe_save_path_part(value: str, label: str) -> str:
+    part = urllib.parse.unquote(str(value or "").strip())
+    if not part or os.path.isabs(part) or "\x00" in part or "/" in part or "\\" in part or part in {".", ".."}:
+        raise fastapi.HTTPException(status_code=400, detail=f"非法{label}")
+    return part
+
+
+def _save_folder_path(campaign_name: str, save_name: str) -> str:
+    campaign = _safe_save_path_part(campaign_name, "剧本名")
+    save = _safe_save_path_part(save_name, "存档名")
+    root = os.path.realpath(SAVES_DIR)
+    folder = os.path.realpath(os.path.join(root, campaign, save))
+    try:
+        if os.path.commonpath([root, folder]) != root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=400, detail="非法存档路径") from None
+    return folder
+
+
+def _resolve_save_ref(save_ref: str) -> tuple[str, str, str, str]:
+    ref = urllib.parse.unquote(str(save_ref or "").strip()).replace("\\", "/")
+    parts = [part for part in ref.split("/") if part]
+    if parts[:1] == ["saves"] and len(parts) == 3:
+        campaign_name, save_name = parts[1], parts[2]
+        folder = _save_folder_path(campaign_name, save_name)
+    elif len(parts) == 2:
+        campaign_name, save_name = parts
+        folder = _save_folder_path(campaign_name, save_name)
+    else:
+        raise fastapi.HTTPException(status_code=400, detail="仅支持 saves/<剧本名>/<存档名> 存档路径")
+    campaign_json = os.path.join(folder, "campaign.json")
+    if not os.path.isdir(folder) or not _is_campaign_file(campaign_json):
+        raise fastapi.HTTPException(status_code=404, detail="存档不存在或格式无效")
+    return campaign_name, save_name, folder, campaign_json
+
+
+def _save_ref_path(campaign_name: str, save_name: str) -> str:
+    return f"saves/{campaign_name}/{save_name}"
+
+
+def _save_download_url(path: str) -> str:
+    return f"/api/game/saves/{urllib.parse.quote(path, safe='')}/download"
+
+
+def _save_play_mode(folder: str, name: str) -> tuple[str, str]:
+    if str(name or "").startswith("__room_solo_"):
+        return "solo", "单人"
+    if str(name or "").startswith("__room_mp_"):
+        return "multiplayer", "多人"
+    manifest = _read_save_manifest(folder)
+    manifest_mode = str(manifest.get("play_mode") or manifest.get("mode") or "").strip().lower()
+    if manifest_mode in {"solo", "single", "singleplayer"}:
+        return "solo", "单人"
+    if manifest_mode in {"multiplayer", "multi", "room"}:
+        return "multiplayer", "多人"
+    try:
+        with open(os.path.join(folder, "campaign.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    state = data.get("system_state") if isinstance(data, dict) else {}
+    if isinstance(state, dict):
+        solo_state = state.get("solo_session_state")
+        if isinstance(solo_state, str):
+            try:
+                solo_state = json.loads(solo_state)
+            except (json.JSONDecodeError, TypeError):
+                solo_state = {}
+        if isinstance(solo_state, dict) and (
+            solo_state.get("confirmedCharacterIds")
+            or solo_state.get("selectedCharacterIds")
+            or solo_state.get("actionLog")
+        ):
+            return "solo", "单人"
+    return "general", "通用"
+
+
+def _base_campaign_from_export_request(base_campaign_path: str, system_state: dict) -> tuple[str, str]:
+    raw = str(base_campaign_path or system_state.get("base_campaign_path") or system_state.get("current_campaign_path") or "").strip().replace("\\", "/")
+    parts = [part for part in raw.split("/") if part]
+    if parts[:1] == ["campaigns"] and len(parts) >= 2:
+        name = _safe_save_path_part(parts[1], "剧本名")
+        return name, f"campaigns/{name}"
+    if parts[:1] == ["saves"] and len(parts) >= 2:
+        name = _safe_save_path_part(parts[1], "剧本名")
+        return name, f"campaigns/{name}"
+    fallback = str(system_state.get("base_campaign_name") or system_state.get("current_campaign_name") or "未命名剧本").strip()
+    name = _sanitize_campaign_name(fallback)
+    return name, f"campaigns/{name}"
+
+
+def _default_save_name(base_campaign_name: str) -> str:
+    return _sanitize_campaign_name(f"{datetime.now().strftime('%Y%m%d_%H%M%S')}-{base_campaign_name or '未命名剧本'}")
+
+
+def _unique_save_folder_name(base_campaign_name: str, requested_name: str) -> tuple[str, str]:
+    base = _sanitize_campaign_name(requested_name)
+    candidate = base
+    suffix = 1
+    while os.path.exists(_save_folder_path(base_campaign_name, candidate)):
+        trimmed = base[: max(1, 56 - len(str(suffix)))]
+        candidate = f"{trimmed}_{suffix}"
+        suffix += 1
+    return candidate, _save_folder_path(base_campaign_name, candidate)
+
+
+def _resolve_asset_from_campaign_asset_url(url: str) -> str:
+    prefix = "/api/campaign-assets/"
+    if not str(url or "").startswith(prefix):
+        raise fastapi.HTTPException(status_code=400, detail="不是剧本资源 URL")
+    rel = str(url)[len(prefix):]
+    parts = [urllib.parse.unquote(part) for part in rel.split("/") if part]
+    if parts[:1] == ["saves"] and len(parts) >= 4:
+        return _resolve_save_asset(parts[1], parts[2], "/".join(parts[3:]))
+    if len(parts) >= 2:
+        return _resolve_campaign_asset(parts[0], "/".join(parts[1:]))
+    raise fastapi.HTTPException(status_code=400, detail="资源 URL 无效")
+
+
+def _resolve_save_asset(campaign_name: str, save_name: str, asset_name: str) -> str:
+    folder = _save_folder_path(campaign_name, save_name)
+    assets_root = os.path.realpath(os.path.join(folder, "assets"))
+    clean_asset_name = urllib.parse.unquote(asset_name or "").strip()
+    if (
+        not clean_asset_name
+        or os.path.isabs(clean_asset_name)
+        or "\x00" in clean_asset_name
+        or "/" in clean_asset_name
+        or "\\" in clean_asset_name
+        or clean_asset_name in {".", ".."}
+    ):
+        raise fastapi.HTTPException(status_code=400, detail="非法资源名")
+    target = os.path.realpath(os.path.join(assets_root, clean_asset_name))
+    try:
+        if os.path.commonpath([assets_root, target]) != assets_root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
+    if os.path.isfile(target):
+        return target
+    raise fastapi.HTTPException(status_code=404, detail="资源不存在")
+
+
 def _copy_campaign_package_root(
     zf: zipfile.ZipFile,
     infos: list[tuple[zipfile.ZipInfo, str]],
@@ -556,37 +877,21 @@ def _copy_campaign_package_root(
 
 @app.get("/api/campaigns")
 def list_campaigns(request: Request):
-    """列出所有可加载的剧本（兼容旧版单文件 + 新版文件夹结构）"""
+    """列出所有可加载的文件夹剧本。"""
     account = account_from_request(request)
     results = []
 
-    # 旧版：BASE_DIR 下的 *.json（向后兼容）
-    for f in glob.glob(os.path.join(BASE_DIR, "*.json")):
-        fname = os.path.basename(f)
-        if fname in {"config.json", "openai_providers.json"}: continue
-        if fname.startswith("persona_mode"): continue
-        valid, limits = _campaign_player_limits(f)
-        if not valid: continue
-        results.append({
-            "name": fname,
-            "type": "legacy",
-            "path": fname,
-            "updated_at": _format_mtime(f),
-            "size_bytes": os.path.getsize(f) if os.path.exists(f) else 0,
-            "download_url": "",
-            "deletable": False,
-            **limits,
-            **_campaign_summary(f),
-        })
-
-    # 新版：campaigns/ 下的子文件夹（含 campaign.json）
     if os.path.isdir(CAMPAIGNS_DIR):
         for d in sorted(os.listdir(CAMPAIGNS_DIR)):
+            if _is_hidden_room_save(d):
+                continue
             folder = os.path.join(CAMPAIGNS_DIR, d)
             campaign_json = os.path.join(folder, "campaign.json")
             valid, limits = _campaign_player_limits(campaign_json)
             if os.path.isdir(folder) and valid:
                 manifest = _read_save_manifest(folder)
+                if manifest.get("exported_at") and not manifest.get("imported_at"):
+                    continue
                 if not _save_visible_to_account(manifest, account):
                     continue
                 owner_id = _manifest_owner_id(manifest)
@@ -618,19 +923,81 @@ def list_campaigns(request: Request):
                     "asset_count": asset_count,
                     "updated_at": _format_mtime(campaign_json),
                     "size_bytes": _folder_size_bytes(folder),
-                    "download_url": f"/api/game/saves/{urllib.parse.quote(d)}/download" if owned_by_me else "",
-                    "package_export_url": f"/api/campaigns/package/{urllib.parse.quote(d)}/export" if is_admin_account(account) else "",
-                    "deletable": owned_by_me and is_admin_account(account),
+                    "download_url": "",
+                    "package_export_url": f"/api/campaigns/package/{urllib.parse.quote(d)}/export" if owned_by_me else "",
+                    "deletable": owned_by_me,
                     **limits,
                     **_campaign_summary(campaign_json),
                 })
 
-    # 向后兼容：同时返回旧版字符串数组格式（供未升级的前端使用）
-    files_legacy = [r["path"] for r in results]
-    return {"status": "success", "files": results, "files_legacy": files_legacy}
+    return {"status": "success", "files": results}
 
 
-def _resolve_campaign_load_target(filename: str) -> tuple[str, bool, str, str | None, str | None]:
+@app.get("/api/game/saves")
+def list_game_saves(request: Request):
+    """列出独立 saves/<剧本>/<存档> 存档，供恢复入口与存档管理使用。"""
+    account = account_from_request(request)
+    results = []
+
+    def append_save(folder: str, name: str, path: str, campaign_name: str = ""):
+        campaign_json = os.path.join(folder, "campaign.json")
+        valid, limits = _campaign_player_limits(campaign_json)
+        if not os.path.isdir(folder) or not valid:
+            return
+        manifest = _read_save_manifest(folder)
+        if not _save_visible_to_account(manifest, account):
+            return
+        owner_id = _manifest_owner_id(manifest)
+        owned_by_me = owner_id is not None and owner_id == _account_id(account)
+        base_campaign_name = str(manifest.get("base_campaign_name") or campaign_name or "").strip()
+        base_campaign_path = str(manifest.get("base_campaign_path") or (f"campaigns/{base_campaign_name}" if base_campaign_name else "")).strip()
+        play_mode, play_mode_label = _save_play_mode(folder, name)
+        assets_dir = os.path.join(folder, "assets")
+        asset_count = len(glob.glob(os.path.join(assets_dir, "*"))) if os.path.isdir(assets_dir) else 0
+        item = {
+            "name": name,
+            "type": "save",
+            "path": path,
+            "campaign_name": base_campaign_name,
+            "campaign_path": base_campaign_path,
+            "play_mode": play_mode,
+            "play_mode_label": play_mode_label,
+            "scope": "private",
+            "owned_by_me": owned_by_me,
+            "owner_account_id": owner_id,
+            "owner_username": manifest.get("owner_username", ""),
+            "updated_at": _format_mtime(campaign_json),
+            "size_bytes": _folder_size_bytes(folder),
+            "asset_count": asset_count,
+            "download_url": _save_download_url(path) if owned_by_me else "",
+            "deletable": owned_by_me,
+            "renamable": owned_by_me and not _is_hidden_room_save(name),
+            "room_internal": _is_hidden_room_save(name),
+            "legacy": False,
+            **limits,
+            **_campaign_summary(campaign_json),
+        }
+        results.append(item)
+
+    if os.path.isdir(SAVES_DIR):
+        for campaign_name in sorted(os.listdir(SAVES_DIR)):
+            campaign_dir = os.path.realpath(os.path.join(SAVES_DIR, campaign_name))
+            try:
+                if os.path.commonpath([os.path.realpath(SAVES_DIR), campaign_dir]) != os.path.realpath(SAVES_DIR):
+                    continue
+            except ValueError:
+                continue
+            if not os.path.isdir(campaign_dir):
+                continue
+            for save_name in sorted(os.listdir(campaign_dir)):
+                folder = os.path.realpath(os.path.join(campaign_dir, save_name))
+                append_save(folder, save_name, _save_ref_path(campaign_name, save_name), campaign_name)
+
+    results.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    return {"status": "success", "files": results}
+
+
+def _resolve_campaign_load_target(filename: str) -> tuple[str, bool, str, str | None, str | None, str, dict]:
     requested = (filename or "").strip().replace("\\", "/")
     if not requested or os.path.isabs(requested) or "\x00" in requested:
         raise fastapi.HTTPException(status_code=400, detail="非法剧本路径")
@@ -649,17 +1016,492 @@ def _resolve_campaign_load_target(filename: str) -> tuple[str, bool, str, str | 
         except ValueError:
             raise fastapi.HTTPException(status_code=400, detail="非法剧本路径") from None
         campaign_path = os.path.join(target, "campaign.json")
-        return target, True, campaign_path, os.path.join(target, "map.json"), os.path.join(target, "knowledge")
+        manifest = _read_save_manifest(target)
+        if manifest.get("exported_at") and not manifest.get("imported_at"):
+            raise fastapi.HTTPException(status_code=400, detail="campaigns 目录下的旧存档已不支持恢复，请使用 saves 目录中的存档")
+        kind = "campaign"
+        return target, True, campaign_path, os.path.join(target, "map.json"), os.path.join(target, "knowledge"), kind, {
+            "campaign_name": parts[1],
+            "loaded_path": f"campaigns/{parts[1]}",
+        }
 
-    if len(parts) != 1 or os.path.splitext(parts[0])[1].lower() != ".json":
-        raise fastapi.HTTPException(status_code=400, detail="仅支持根目录旧版 JSON 存档或 campaigns/<剧本名>")
-    root = os.path.realpath(BASE_DIR)
-    target = os.path.realpath(os.path.join(root, parts[0]))
-    if os.path.dirname(target) != root:
-        raise fastapi.HTTPException(status_code=400, detail="非法剧本路径")
-    if os.path.exists(target) and not _is_legacy_campaign_file(target):
-        raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
-    return target, False, target, None, None
+    if parts[:1] == ["saves"]:
+        if len(parts) != 3:
+            raise fastapi.HTTPException(status_code=400, detail="仅支持 saves/<剧本名>/<存档名> 格式")
+        campaign_name, save_name = parts[1], parts[2]
+        target = _save_folder_path(campaign_name, save_name)
+        campaign_path = os.path.join(target, "campaign.json")
+        return target, True, campaign_path, os.path.join(target, "map.json"), os.path.join(target, "knowledge"), "save", {
+            "campaign_name": campaign_name,
+            "save_name": save_name,
+            "loaded_path": _save_ref_path(campaign_name, save_name),
+        }
+
+    raise fastapi.HTTPException(status_code=400, detail="仅支持 campaigns/<剧本名> 或 saves/<剧本名>/<存档名> 路径")
+
+
+def _load_campaign_from_path(filename: str, request_account: dict, *, preserve_multiplayer_state: bool = False):
+    request_owner_id = _account_id(request_account)
+    target, is_folder, campaign_path, map_path, kb_dir, target_kind, target_meta = _resolve_campaign_load_target(filename)
+    if is_folder:
+        _ensure_save_readable(target, request_account)
+
+    if not os.path.exists(campaign_path):
+        raise fastapi.HTTPException(status_code=404, detail=f"文件不存在: {campaign_path}")
+
+    conn = None
+    load_lock_acquired = False
+    try:
+        load_lock_acquired = _load_campaign_lock.acquire(timeout=30)
+        if not load_lock_acquired:
+            raise fastapi.HTTPException(status_code=409, detail="正在载入其他剧本，请稍后重试")
+
+        with open(campaign_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        if not isinstance(config, dict) or not isinstance(config.get("nodes"), list):
+            raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
+
+        def list_field(key: str) -> list:
+            value = config.get(key)
+            return value if isinstance(value, list) else []
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # ── 清空所有业务数据表（含 RAG 知识库）──────────────────────
+        for tbl in ("nodes", "options", "characters", "system_state",
+                    "lorebook", "triggers", "timelines", "world_entities",
+                    "map_rooms", "map_edges",
+                    "rag_documents", "rag_chunks", "game_flags",
+                    "memory_l1", "pending_effects", "npc_chat_logs"):
+            try:
+                cursor.execute(f"DELETE FROM {tbl}")
+            except sqlite3.OperationalError:
+                pass
+        if not preserve_multiplayer_state:
+            for sql in (
+                "DELETE FROM multiplayer_character_claims",
+                "DELETE FROM multiplayer_tokens WHERE kind='pc' OR linked_character_id IS NOT NULL",
+                "UPDATE multiplayer_rooms SET current_scene_id=NULL, current_room_id=NULL",
+            ):
+                try:
+                    cursor.execute(sql)
+                except sqlite3.OperationalError:
+                    pass
+
+        # 正确重置自增序列：只更新已存在行，不删整张表
+        sequence_tables = ["nodes", "options", "characters", "lorebook",
+                    "triggers", "timelines", "world_entities",
+                    "map_rooms", "map_edges",
+                    "rag_documents", "rag_chunks",
+                    "memory_l1", "pending_effects", "npc_chat_logs"]
+        if not preserve_multiplayer_state:
+            sequence_tables.append("multiplayer_character_claims")
+        for tbl in sequence_tables:
+            try:
+                cursor.execute(
+                    "UPDATE sqlite_sequence SET seq=0 WHERE name=?", (tbl,)
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        # ── 写入系统状态 ───────────────────────────────────────────
+        saved_system_state = config.get("system_state") if isinstance(config.get("system_state"), dict) else {}
+        worldview      = saved_system_state.get("worldview", config.get("worldview", "【默认世界观】"))
+        session_memory = saved_system_state.get("session_memory", config.get("session_memory", "【跑团记忆日志已初始化】\n"))
+        default_scene_id = _first_player_visible_scene_id(config)
+        saved_scene_id = str(saved_system_state.get("player_current_scene_id") or "").strip()
+        if not saved_scene_id and default_scene_id is not None:
+            saved_system_state = dict(saved_system_state)
+            saved_system_state["player_current_scene_id"] = str(default_scene_id)
+        cursor.execute("INSERT INTO system_state (key, value) VALUES ('worldview', ?)",       (worldview,))
+        cursor.execute("INSERT INTO system_state (key, value) VALUES ('session_memory', ?)",  (session_memory,))
+        for key, value in saved_system_state.items():
+            key_text = str(key or "").strip()
+            if key_text in {"worldview", "session_memory"} or not key_text:
+                continue
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+                (key_text[:120], str(value or "")),
+            )
+        for key in (
+            "player_current_scene_id", "player_scene_image", "player_scene_prompt",
+            "player_scene_ai_text", "player_bgm_url", "player_bgm_name",
+            "current_room_id",
+        ):
+            cursor.execute(
+                "INSERT OR IGNORE INTO system_state (key, value) VALUES (?, ?)",
+                (key, str(saved_system_state.get(key) or "")),
+            )
+
+        # ── 还原业务数据 ───────────────────────────────────────────
+        for char in list_field("characters"):
+            cursor.execute(
+                "INSERT INTO characters "
+                "(id, name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (char.get("id"), char.get("name"), char.get("role"),
+                 char.get("hp"), char.get("san"), char.get("inventory", ""),
+                 char.get("personality", ""), char.get("role_brief", ""),
+                 char.get("script_brief", ""), char.get("opening_prompt", ""),
+                 char.get("status", "active"))
+            )
+        for node in list_field("nodes"):
+            node_summary = _clean_player_visible_text(node.get("summary"), max_len=1200)
+            node_content = _clean_player_visible_text(node.get("content"), max_len=12000)
+            node_expanded = _clean_player_visible_text(node.get("expanded_content", ""), max_len=12000)
+            cursor.execute(
+                "INSERT INTO nodes (id, name, summary, content, expanded_content, scene_image) VALUES (?,?,?,?,?,?)",
+                (node.get("id"), node.get("name"),
+                 node_summary, node_content,
+                 node_expanded,
+                 node.get("scene_image", ""))
+            )
+        for opt in list_field("options"):
+            cursor.execute(
+                "INSERT INTO options (id, node_id, text, next_node_id) VALUES (?,?,?,?)",
+                (opt.get("id"), opt.get("node_id"), opt.get("text"), opt.get("next_node_id"))
+            )
+        explicit_lore_keywords: set[str] = set()
+        for lore in list_field("lorebook"):
+            keywords = str(lore.get("keywords") or "").strip()
+            if keywords:
+                explicit_lore_keywords.add(keywords.lower())
+            lore_content = lore.get("content")
+            if keywords.startswith("场景："):
+                lore_content = _clean_player_visible_text(lore_content, max_len=12000)
+            cursor.execute(
+                "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
+                (keywords, lore_content)
+            )
+        for t in list_field("triggers"):
+            conditions_raw = t.get("conditions", [])
+            if isinstance(conditions_raw, str):
+                try:
+                    conditions_raw = json.loads(conditions_raw)
+                except (json.JSONDecodeError, TypeError):
+                    conditions_raw = {}
+            if not isinstance(conditions_raw, dict) or "op" not in conditions_raw:
+                conditions_raw = {"op": "and", "children": []}
+            cond_type = t.get("cond_type", "")
+            cond_value = t.get("cond_value", "")
+            if not cond_type:
+                first = (conditions_raw.get("children") or [{}])[0]
+                if isinstance(first, dict):
+                    cond_type = first.get("type", "")
+                    cond_value = first.get("value", "")
+            cursor.execute(
+                "INSERT INTO triggers "
+                "(id, label, target_node_id, mode, cond_type, cond_value, conditions, fired, "
+                "fire_count, cooldown, last_fired_at, prerequisite_trigger_ids, exclude_trigger_ids, "
+                "max_fire_count, actions) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (t.get("id"), t.get("label", ""), t.get("target_node_id", 0),
+                 t.get("mode", "soft"), cond_type or "", cond_value or "",
+                 json.dumps(conditions_raw, ensure_ascii=False),
+                 _int_value(t.get("fired")), _int_value(t.get("fire_count")),
+                 _int_value(t.get("cooldown")), _int_value(t.get("last_fired_at")),
+                 _json_list_text(t.get("prerequisite_trigger_ids", []), max_items=60, max_len=20),
+                 _json_list_text(t.get("exclude_trigger_ids", []), max_items=60, max_len=20),
+                 _int_value(t.get("max_fire_count")),
+                 _json_array_text(t.get("actions", [])))
+            )
+        for tl in list_field("timelines"):
+            cursor.execute(
+                "INSERT INTO timelines (id, label, color, current_node_id, current_room_id, memory, char_ids, status, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (tl.get("id"), tl.get("label", "时间线"), tl.get("color", "#5b9cf5"),
+                 tl.get("current_node_id"), tl.get("current_room_id"), tl.get("memory", ""),
+                 tl.get("char_ids", ""), tl.get("status", "active"),
+                 tl.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            )
+        clear_map_data(conn)
+        if is_folder and map_path and os.path.exists(map_path):
+            with open(map_path, "r", encoding="utf-8") as mf:
+                map_data = json.load(mf)
+            import_map_data(conn, map_data)
+
+        for we in list_field("world_entities"):
+            cursor.execute(
+                "INSERT INTO world_entities "
+                "(id, entity_type, name, location, status, last_seen_by, state_desc, updated_at, room_id, aliases) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (we.get("id"), we.get("entity_type", "npc"), we.get("name", ""),
+                 we.get("location", ""), we.get("status", "active"),
+                 we.get("last_seen_by", ""), we.get("state_desc", ""),
+                 we.get("updated_at", ""), we.get("room_id"),
+                 _json_list_text(we.get("aliases", []), max_items=20, max_len=40))
+            )
+
+        for ml in list_field("memory_l1"):
+            cursor.execute(
+                "INSERT INTO memory_l1 (scene_name, player_action, ai_summary, "
+                "thought_process, entity_updates, timeline_id) VALUES (?,?,?,?,?,?)",
+                (ml.get("scene_name", ""), ml.get("player_action", ""),
+                 ml.get("ai_summary", ""), ml.get("thought_process", ""),
+                 ml.get("entity_updates", ""), ml.get("timeline_id"))
+            )
+
+        for pe in list_field("pending_effects"):
+            cursor.execute(
+                "INSERT INTO pending_effects (node_id, payload) VALUES (?,?)",
+                (pe.get("node_id"), pe.get("payload", "{}"))
+            )
+
+        for flag in list_field("game_flags"):
+            key = str(flag.get("key") or "").strip()
+            if not key:
+                continue
+            cursor.execute(
+                "INSERT OR REPLACE INTO game_flags (key, value) VALUES (?, ?)",
+                (key[:120], str(flag.get("value") or ""))
+            )
+
+        for log in list_field("npc_chat_logs"):
+            cursor.execute(
+                "INSERT INTO npc_chat_logs (npc_name, sender, message, created_at) VALUES (?,?,?,?)",
+                (log.get("npc_name", ""), log.get("sender", "player"),
+                 log.get("message", ""), log.get("created_at", ""))
+            )
+
+        raw_library = []
+        if is_folder and kb_dir and os.path.isdir(kb_dir):
+            for kb_file in sorted(glob.glob(os.path.join(kb_dir, "*.txt")) +
+                                  glob.glob(os.path.join(kb_dir, "*.md"))):
+                try:
+                    with open(kb_file, "r", encoding="utf-8") as kf:
+                        kb_text = kf.read().strip()
+                    if kb_text:
+                        raw_library.append({
+                            "title": os.path.splitext(os.path.basename(kb_file))[0],
+                            "source": f"knowledge/{os.path.basename(kb_file)}",
+                            "text": kb_text
+                        })
+                except Exception as e:
+                    _log.warning("知识库文件读取失败: %s — %s", kb_file, e)
+
+        auto_lore_count = 0
+        for raw_item in raw_library:
+            title = str(raw_item.get("title") or "").strip()
+            text = str(raw_item.get("text") or "").strip()
+            if not title or not text or title.lower() in explicit_lore_keywords:
+                continue
+            cursor.execute(
+                "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
+                (title, _sanitize_knowledge_text(text)[:12000])
+            )
+            explicit_lore_keywords.add(title.lower())
+            auto_lore_count += 1
+
+        rag_library = list_field("rag_library")
+        load_type = "存档" if target_kind == "save" else ("文件夹" if is_folder else "单文件")
+        manifest = _read_save_manifest(target) if is_folder else {}
+        loaded_campaign_name = target_meta.get("save_name") or (os.path.basename(target) if is_folder else os.path.basename(campaign_path))
+        loaded_campaign_path = target_meta.get("loaded_path") or (f"campaigns/{loaded_campaign_name}" if is_folder else filename)
+        if target_kind == "save":
+            base_campaign_name = str(manifest.get("base_campaign_name") or target_meta.get("campaign_name") or "").strip()
+            base_campaign_path = str(manifest.get("base_campaign_path") or (f"campaigns/{base_campaign_name}" if base_campaign_name else "")).strip()
+            current_save_name = loaded_campaign_name
+            current_save_path = loaded_campaign_path
+        else:
+            base_campaign_name = str(manifest.get("base_campaign_name") or loaded_campaign_name).strip()
+            base_campaign_path = str(manifest.get("base_campaign_path") or f"campaigns/{base_campaign_name}").strip()
+            current_save_name = ""
+            current_save_path = ""
+        loaded_current_scene_id = str(saved_system_state.get("player_current_scene_id") or "").strip()
+        saved_solo_session_state = saved_system_state.get("solo_session_state")
+        if isinstance(saved_solo_session_state, str):
+            try:
+                parsed_solo_session_state = json.loads(saved_solo_session_state)
+                saved_solo_session_state = parsed_solo_session_state if isinstance(parsed_solo_session_state, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                saved_solo_session_state = {}
+        elif not isinstance(saved_solo_session_state, dict):
+            saved_solo_session_state = {}
+        saved_multiplayer_room_state = config.get("multiplayer_room_state")
+        if not isinstance(saved_multiplayer_room_state, dict):
+            saved_multiplayer_room_state = {}
+        cursor.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES ('current_campaign_name', ?)",
+            (loaded_campaign_name,),
+        )
+        cursor.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES ('current_campaign_path', ?)",
+            (loaded_campaign_path,),
+        )
+        for key, value in (
+            ("base_campaign_name", base_campaign_name),
+            ("base_campaign_path", base_campaign_path),
+            ("current_save_name", current_save_name),
+            ("current_save_path", current_save_path),
+        ):
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+
+        has_precomputed = bool(rag_library) and all("chunks" in item for item in rag_library)
+
+        if has_precomputed:
+            for doc_item in rag_library:
+                cur_doc = cursor.execute(
+                    "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
+                    (doc_item["title"][:100], doc_item.get("source", "")[:200],
+                     len(doc_item.get("chunks", [])))
+                )
+                doc_id = cur_doc.lastrowid
+                for chunk in doc_item.get("chunks", []):
+                    chunk_text = _sanitize_knowledge_text(chunk.get("text", ""))
+                    cursor.execute(
+                        "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
+                        "VALUES (?,?,?,?)",
+                        (doc_id, chunk["index"], chunk_text, chunk.get("embedding", "[]"))
+                    )
+            conn.commit()
+            conn.close()
+            _refresh_vector_cache()
+            _log.info("RAG 知识库从存档直接恢复，共 %d 个文档，跳过 embedding 重建", len(rag_library))
+            return {
+                "status": "success",
+                "campaign_path": loaded_campaign_path,
+                "campaign_name": loaded_campaign_name,
+                "base_campaign_path": base_campaign_path,
+                "base_campaign_name": base_campaign_name,
+                "current_save_path": current_save_path,
+                "current_save_name": current_save_name,
+                "solo_session_state": saved_solo_session_state,
+                "current_scene_id": int(loaded_current_scene_id) if loaded_current_scene_id.isdigit() else None,
+                "message": (
+                    f"成功加载 {filename}（{load_type}，含 {len(rag_library)} 个RAG文档"
+                    f"，自动百科 {auto_lore_count} 条）"
+                ),
+                "auto_setup": {
+                    "rag_documents": len(rag_library),
+                    "auto_lore": auto_lore_count,
+                    "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
+                    "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
+                },
+            }
+
+        for rag_item in raw_library:
+            title  = rag_item.get("title", "未命名")
+            source = rag_item.get("source", "")
+            text   = rag_item.get("text", "")
+            if not text.strip():
+                continue
+            chunks = _chunk_text(text)
+            cur_doc = cursor.execute(
+                "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
+                (title[:100], source[:200], len(chunks))
+            )
+            doc_id = cur_doc.lastrowid
+            for idx, chunk in enumerate(chunks):
+                cursor.execute(
+                    "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
+                    "VALUES (?,?,?,?)",
+                    (doc_id, idx, chunk, "[]")
+                )
+
+        conn.commit()
+
+        if raw_library and RAG_AUTO_REBUILD_EMBEDDINGS and request_owner_id is not None:
+            if not _rag_rebuild_lock.acquire(blocking=False):
+                _log.info("已有 RAG embedding 重建任务在运行，本次载入跳过重复重建。")
+            else:
+                def _rebuild_embeddings():
+                    _conn = None
+                    try:
+                        _conn = get_db_connection()
+                        rows = _conn.execute(
+                            "SELECT id, chunk_text FROM rag_chunks WHERE embedding='[]' ORDER BY id"
+                        ).fetchall()
+                        if not rows:
+                            return
+                        _log.info("后台 RAG embedding 重建开始，共 %d 个 chunks", len(rows))
+                        texts = [r["chunk_text"] for r in rows]
+                        ids   = [r["id"] for r in rows]
+                        BATCH = 16
+                        embedded_count = 0
+                        for i in range(0, len(texts), BATCH):
+                            batch_texts = texts[i:i+BATCH]
+                            batch_ids   = ids[i:i+BATCH]
+                            try:
+                                vecs = _get_embeddings(batch_texts, owner_account_id=request_owner_id)
+                                for rid, vec in zip(batch_ids, vecs):
+                                    _conn.execute(
+                                        "UPDATE rag_chunks SET embedding=? WHERE id=?",
+                                        (json.dumps(vec), rid)
+                                    )
+                                _conn.commit()
+                                embedded_count += len(batch_texts)
+                            except Exception as e:
+                                _log.warning("RAG embedding 批次写入失败 (batch %d): %s", i // BATCH, e)
+                        _log.info("后台 RAG embedding 重建完成，成功 %d/%d", embedded_count, len(rows))
+                        _refresh_vector_cache()
+                    except Exception as e:
+                        _log.error("后台 RAG embedding 重建线程异常: %s", e, exc_info=True)
+                    finally:
+                        if _conn is not None:
+                            _conn.close()
+                        _rag_rebuild_lock.release()
+                threading.Thread(target=_rebuild_embeddings, daemon=True).start()
+        elif raw_library:
+            _log.info(
+                "跳过后台 RAG embedding 重建；运行时使用关键词检索。"
+                "如需重建，在 config.json 的 rag.auto_rebuild_embeddings 设为 true 后重新载入剧本。"
+            )
+
+        conn.close()
+        _refresh_vector_cache()
+        return {
+            "status": "success",
+            "campaign_path": loaded_campaign_path,
+            "campaign_name": loaded_campaign_name,
+            "base_campaign_path": base_campaign_path,
+            "base_campaign_name": base_campaign_name,
+            "current_save_path": current_save_path,
+            "current_save_name": current_save_name,
+            "solo_session_state": saved_solo_session_state,
+            "multiplayer_room_state": saved_multiplayer_room_state,
+            "current_scene_id": int(loaded_current_scene_id) if loaded_current_scene_id.isdigit() else None,
+            "message": (
+                f"成功加载 {filename}（{load_type}，含 {len(raw_library)} 个RAG文档"
+                f"，自动百科 {auto_lore_count} 条）"
+            ),
+            "auto_setup": {
+                "rag_documents": len(raw_library),
+                "auto_lore": auto_lore_count,
+                "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
+                "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
+            },
+        }
+
+    except fastapi.HTTPException:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _log.error("load_campaign 异常: %s", e, exc_info=True)
+        raise fastapi.HTTPException(status_code=500, detail=f"加载失败: {str(e)}")
+    finally:
+        if load_lock_acquired:
+            _load_campaign_lock.release()
 
 
 
@@ -697,6 +1539,9 @@ def campaign_import_formats():
         ],
         "asset_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"],
         "mineru_flash_max_bytes": MINERU_FLASH_MAX_BYTES,
+        "max_upload_bytes": CAMPAIGN_IMPORT_MAX_BYTES,
+        "max_assets": CAMPAIGN_IMPORT_MAX_ASSETS,
+        "max_asset_bytes": CAMPAIGN_IMPORT_MAX_ASSET_BYTES,
     }
 
 
@@ -708,21 +1553,26 @@ async def import_campaign_from_document(
     main_file: UploadFile = File(...),
     assets: list[UploadFile] | None = File(None),
 ):
-    require_admin_config_access(request)
     account = require_account_from_request(request)
     filename = main_file.filename or "scenario.txt"
     suffix = os.path.splitext(filename)[1].lower()
     if suffix not in {".pdf", ".docx", ".doc", ".txt", ".md", ".markdown"}:
         raise fastapi.HTTPException(status_code=400, detail="仅支持 PDF、DOCX、DOC、TXT、Markdown 剧本文件")
 
-    raw = await main_file.read()
+    raw = await main_file.read(CAMPAIGN_IMPORT_MAX_BYTES + 1)
     if not raw:
         raise fastapi.HTTPException(status_code=400, detail="文件内容为空")
+    if len(raw) > CAMPAIGN_IMPORT_MAX_BYTES:
+        raise fastapi.HTTPException(status_code=413, detail="剧本文件体积过大")
 
-    buffered_assets = [
-        ImportAsset(filename=asset.filename or "", data=await asset.read())
-        for asset in (assets or [])
-    ]
+    if assets and len(assets) > CAMPAIGN_IMPORT_MAX_ASSETS:
+        raise fastapi.HTTPException(status_code=413, detail="附加图片数量过多")
+    buffered_assets = []
+    for asset in (assets or []):
+        data = await asset.read(CAMPAIGN_IMPORT_MAX_ASSET_BYTES + 1)
+        if len(data) > CAMPAIGN_IMPORT_MAX_ASSET_BYTES:
+            raise fastapi.HTTPException(status_code=413, detail=f"附加图片体积过大：{asset.filename or '未命名文件'}")
+        buffered_assets.append(ImportAsset(filename=asset.filename or "", data=data))
     job = _campaign_import_workflow.create_job(
         requested_name=name,
         filename=filename,
@@ -754,10 +1604,9 @@ def get_campaign_import_job(job_id: str, request: Request):
 
 @app.post("/api/campaigns/reparse")
 def reparse_imported_campaign(req: ReparseCampaignRequest, request: Request):
-    require_admin_config_access(request)
     account = require_account_from_request(request)
-    target, is_folder, _campaign_path, _map_path, _kb_dir = _resolve_campaign_load_target(req.campaign_path)
-    if not is_folder:
+    target, is_folder, _campaign_path, _map_path, _kb_dir, target_kind, _target_meta = _resolve_campaign_load_target(req.campaign_path)
+    if not is_folder or target_kind != "campaign":
         raise fastapi.HTTPException(status_code=400, detail="仅支持重新识别 campaigns/<剧本名> 文件夹剧本")
     manifest = _require_private_save_owner(target, account)
     campaign_name = os.path.basename(target)
@@ -775,12 +1624,32 @@ def reparse_imported_campaign(req: ReparseCampaignRequest, request: Request):
     return {"status": "accepted", "job_id": job.id, "job": job.to_dict()}
 
 
+@app.delete("/api/campaigns/{campaign_name}")
+def delete_campaign_folder(campaign_name: str, request: Request):
+    """删除账号拥有的 campaigns/<name> 剧本文件夹。"""
+    account = require_account_from_request(request)
+    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    _require_private_save_owner(folder, account)
+    root = os.path.realpath(CAMPAIGNS_DIR)
+    target = os.path.realpath(folder)
+    try:
+        if os.path.commonpath([root, target]) != root or target == root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=400, detail="非法剧本路径") from None
+    try:
+        shutil.rmtree(target)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=500, detail=f"删除剧本失败：{exc}") from exc
+    return {"status": "success", "name": name, "message": f"已删除剧本：{name}"}
+
+
 @app.get("/api/campaigns/package/{campaign_name}/export")
 def export_campaign_package(campaign_name: str, request: Request):
     """导出已解析剧本迁移包，用于跨服务器迁移 campaigns/<name>。"""
-    require_admin_config_access(request)
-    require_account_from_request(request)
+    account = require_account_from_request(request)
     name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    _require_private_save_owner(folder, account)
     tmp = tempfile.NamedTemporaryFile(
         prefix=f"zric_campaign_{_sanitize_asset_name(name, '.zip')}_",
         suffix=".zip",
@@ -815,8 +1684,7 @@ async def import_campaign_package(
     package_file: UploadFile = File(...),
     name: str = Form(""),
 ):
-    """导入已解析剧本迁移包。仅管理员可用。"""
-    require_admin_config_access(request)
+    """导入已解析剧本迁移包。登录账号会成为导入剧本的所有者。"""
     account = require_account_from_request(request)
     filename = package_file.filename or "campaign_package.zip"
     if os.path.splitext(filename)[1].lower() != ".zip":
@@ -848,6 +1716,11 @@ async def import_campaign_package(
             copied_count = _copy_campaign_package_root(zf, infos, root, target_folder)
 
         campaign_json = os.path.join(target_folder, "campaign.json")
+        campaign_data = _normalize_imported_campaign_file_data(campaign_data)
+        if not _campaign_json_data_valid(campaign_data):
+            raise fastapi.HTTPException(status_code=400, detail="迁移包中的 campaign.json 格式无效")
+        with open(campaign_json, "w", encoding="utf-8") as f:
+            json.dump(campaign_data, f, ensure_ascii=False, indent=4)
         valid, limits = _campaign_player_limits(campaign_json)
         if not valid:
             raise fastapi.HTTPException(status_code=400, detail="迁移包中的 campaign.json 格式无效")
@@ -857,10 +1730,11 @@ async def import_campaign_package(
             try:
                 with open(map_path, "r", encoding="utf-8") as f:
                     map_data = json.load(f)
-                if not isinstance(map_data, dict):
-                    map_data = {}
             except (OSError, json.JSONDecodeError):
                 map_data = {}
+        map_data = _normalize_imported_map_file_data(map_data)
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(map_data, f, ensure_ascii=False, indent=4)
         kb_dir = os.path.join(target_folder, "knowledge")
         assets_dir = os.path.join(target_folder, "assets")
         knowledge_count = 0
@@ -913,356 +1787,61 @@ async def import_campaign_package(
 
 @app.post("/api/game/load")
 def load_campaign(req: LoadCampaignRequest, request: Request):
-    """
-    加载剧本。支持两种格式：
-    1. 旧版单文件：req.filename = "save_xxx.json"
-    2. 新版文件夹：req.filename = "campaigns/我的剧本"
-       自动加载 campaign.json + map.json + knowledge/*.txt
-    """
-    # 判断是文件夹还是单文件，并限制到可加载剧本白名单路径形态。
-    target, is_folder, campaign_path, map_path, kb_dir = _resolve_campaign_load_target(req.filename)
-    if is_folder:
-        _ensure_save_readable(target, account_from_request(request))
-
-    if not os.path.exists(campaign_path):
-        raise fastapi.HTTPException(status_code=404, detail=f"文件不存在: {campaign_path}")
-
-    try:
-        with open(campaign_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        if not isinstance(config, dict) or not isinstance(config.get("nodes"), list):
-            raise fastapi.HTTPException(status_code=400, detail="文件不是有效剧本存档")
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # ── 清空所有业务数据表（含 RAG 知识库）──────────────────────
-        for tbl in ("nodes", "options", "characters", "system_state",
-                    "lorebook", "triggers", "timelines", "world_entities",
-                    "map_rooms", "map_edges",
-                    "rag_documents", "rag_chunks",
-                    "memory_l1", "pending_effects", "npc_chat_logs"):
-            try:
-                cursor.execute(f"DELETE FROM {tbl}")
-            except sqlite3.OperationalError:
-                pass   # 表不存在时静默跳过（旧存档兼容）
-        for sql in (
-            "DELETE FROM multiplayer_character_claims",
-            "DELETE FROM multiplayer_tokens WHERE kind='pc' OR linked_character_id IS NOT NULL",
-            "UPDATE multiplayer_rooms SET current_scene_id=NULL, current_room_id=NULL",
-        ):
-            try:
-                cursor.execute(sql)
-            except sqlite3.OperationalError:
-                pass   # 多人房间表尚未创建时兼容启动
-
-        # 正确重置自增序列：只更新已存在行，不删整张表
-        for tbl in ("nodes", "options", "characters", "lorebook",
-                    "triggers", "timelines", "world_entities",
-                    "map_rooms", "map_edges",
-                    "rag_documents", "rag_chunks",
-                    "memory_l1", "pending_effects", "npc_chat_logs",
-                    "multiplayer_character_claims"):
-            try:
-                cursor.execute(
-                    "UPDATE sqlite_sequence SET seq=0 WHERE name=?", (tbl,)
-                )
-            except sqlite3.OperationalError:
-                pass
-
-        # ── 写入系统状态 ───────────────────────────────────────────
-        worldview      = config.get("worldview", "【默认世界观】")
-        session_memory = config.get("session_memory", "【跑团记忆日志已初始化】\n")
-        cursor.execute("INSERT INTO system_state (key, value) VALUES ('worldview', ?)",       (worldview,))
-        cursor.execute("INSERT INTO system_state (key, value) VALUES ('session_memory', ?)",  (session_memory,))
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_current_scene_id', '')")
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_image', '')")
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_prompt', '')")
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_scene_ai_text', '')")
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_bgm_url', '')")
-        cursor.execute("INSERT OR IGNORE INTO system_state (key, value) VALUES ('player_bgm_name', '')")
-
-        # ── 还原业务数据 ───────────────────────────────────────────
-        for char in config.get("characters", []):
-            cursor.execute(
-                "INSERT INTO characters (name, role, hp, san, inventory, personality, status) VALUES (?,?,?,?,?,?,?)",
-                (char.get("name"), char.get("role"),
-                 char.get("hp"), char.get("san"), char.get("inventory", ""),
-                 char.get("personality", ""), char.get("status", "active"))
-            )
-        for node in config.get("nodes", []):
-            cursor.execute(
-                "INSERT INTO nodes (id, name, summary, content, expanded_content, scene_image) VALUES (?,?,?,?,?,?)",
-                (node.get("id"), node.get("name"),
-                 node.get("summary"), node.get("content"),
-                 node.get("expanded_content", ""),
-                 node.get("scene_image", ""))
-            )
-        for opt in config.get("options", []):
-            cursor.execute(
-                "INSERT INTO options (node_id, text, next_node_id) VALUES (?,?,?)",
-                (opt.get("node_id"), opt.get("text"), opt.get("next_node_id"))
-            )
-        explicit_lore_keywords: set[str] = set()
-        for lore in config.get("lorebook", []):
-            keywords = str(lore.get("keywords") or "").strip()
-            if keywords:
-                explicit_lore_keywords.add(keywords.lower())
-            cursor.execute(
-                "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
-                (keywords, lore.get("content"))
-            )
-        for t in config.get("triggers", []):
-            # 兼容旧存档：可能只有 cond_type/cond_value，没有 conditions
-            conditions_raw = t.get("conditions", [])
-            # 导出时 conditions 列是 DB TEXT 字段，写入 JSON 后变成字符串 —— 需先反序列化
-            if isinstance(conditions_raw, str):
-                try:
-                    conditions_raw = json.loads(conditions_raw)
-                except (json.JSONDecodeError, TypeError):
-                    conditions_raw = []
-            if not conditions_raw:
-                conditions_raw = []
-            if not conditions_raw and t.get("cond_type") and t.get("cond_value"):
-                conditions_raw = [{"type": t["cond_type"], "value": t["cond_value"]}]
-            cond_type = t.get("cond_type", "")
-            cond_value = t.get("cond_value", "")
-            # 旧存档 cond_type 可能是 None；兼容 list 和 dict（树）两种格式
-            if not cond_type:
-                if isinstance(conditions_raw, list) and conditions_raw:
-                    cond_type = conditions_raw[0].get("type", "")
-                    cond_value = conditions_raw[0].get("value", "")
-                elif isinstance(conditions_raw, dict):
-                    first = (conditions_raw.get("children") or [{}])[0]
-                    cond_type = first.get("type", "")
-                    cond_value = first.get("value", "")
-            cursor.execute(
-                "INSERT INTO triggers (label, target_node_id, mode, cond_type, cond_value, conditions, fired) "
-                "VALUES (?,?,?,?,?,?,0)",
-                (t.get("label", ""), t.get("target_node_id", 0),
-                 t.get("mode", "soft"), cond_type or "", cond_value or "",
-                 json.dumps(conditions_raw, ensure_ascii=False))
-            )
-        for tl in config.get("timelines", []):
-            cursor.execute(
-                "INSERT INTO timelines (label, color, current_node_id, memory, char_ids, status, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (tl.get("label", "时间线"), tl.get("color", "#5b9cf5"),
-                 tl.get("current_node_id"), tl.get("memory", ""),
-                 tl.get("char_ids", ""), tl.get("status", "active"),
-                 tl.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            )
-        # 地图数据：优先从独立 map.json 加载，兼容旧版内嵌格式
-        clear_map_data(conn)
-        if is_folder and map_path and os.path.exists(map_path):
-            with open(map_path, "r", encoding="utf-8") as mf:
-                map_data = json.load(mf)
-            import_map_data(conn, map_data)
-        elif config.get("map_rooms"):
-            import_map_data(conn, {
-                "map_rooms": config.get("map_rooms", []),
-                "map_edges": config.get("map_edges", [])
-            })
-
-        # ── 还原世界实体 ───────────────────────────────────────
-        for we in config.get("world_entities", []):
-            cursor.execute(
-                "INSERT INTO world_entities "
-                "(entity_type, name, location, status, last_seen_by, state_desc, updated_at, room_id) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (we.get("entity_type", "npc"), we.get("name", ""),
-                 we.get("location", ""), we.get("status", "active"),
-                 we.get("last_seen_by", ""), we.get("state_desc", ""),
-                 we.get("updated_at", ""), we.get("room_id"))
-            )
-
-        # ── 还原 memory_l1 ─────────────────────────────────────────
-        for ml in config.get("memory_l1", []):
-            cursor.execute(
-                "INSERT INTO memory_l1 (scene_name, player_action, ai_summary, "
-                "thought_process, entity_updates, timeline_id) VALUES (?,?,?,?,?,?)",
-                (ml.get("scene_name", ""), ml.get("player_action", ""),
-                 ml.get("ai_summary", ""), ml.get("thought_process", ""),
-                 ml.get("entity_updates", ""), ml.get("timeline_id"))
-            )
-
-        # ── 还原 pending_effects ────────────────────────────────────
-        for pe in config.get("pending_effects", []):
-            cursor.execute(
-                "INSERT INTO pending_effects (node_id, payload) VALUES (?,?)",
-                (pe.get("node_id"), pe.get("payload", "{}"))
-            )
-
-        # ── 还原 npc_chat_logs ──────────────────────────────────────
-        for log in config.get("npc_chat_logs", []):
-            cursor.execute(
-                "INSERT INTO npc_chat_logs (npc_name, sender, message, created_at) VALUES (?,?,?,?)",
-                (log.get("npc_name", ""), log.get("sender", "player"),
-                 log.get("message", ""), log.get("created_at", ""))
-            )
-
-        # ── knowledge/ 资料：无论 RAG 是否预计算，都先灌入百科库 ───────
-        raw_library = []
-        if is_folder and kb_dir and os.path.isdir(kb_dir):
-            for kb_file in sorted(glob.glob(os.path.join(kb_dir, "*.txt")) +
-                                  glob.glob(os.path.join(kb_dir, "*.md"))):
-                try:
-                    with open(kb_file, "r", encoding="utf-8") as kf:
-                        kb_text = kf.read().strip()
-                    if kb_text:
-                        raw_library.append({
-                            "title": os.path.splitext(os.path.basename(kb_file))[0],
-                            "source": f"knowledge/{os.path.basename(kb_file)}",
-                            "text": kb_text
-                        })
-                except Exception as e:
-                    _log.warning("知识库文件读取失败: %s — %s", kb_file, e)
-
-        auto_lore_count = 0
-        for raw_item in raw_library:
-            title = str(raw_item.get("title") or "").strip()
-            text = str(raw_item.get("text") or "").strip()
-            if not title or not text or title.lower() in explicit_lore_keywords:
-                continue
-            cursor.execute(
-                "INSERT INTO lorebook (keywords, content) VALUES (?,?)",
-                (title, text[:12000])
-            )
-            explicit_lore_keywords.add(title.lower())
-            auto_lore_count += 1
-
-        # ── 还原 RAG 知识库 ────────────────────────────────────
-        rag_library = config.get("rag_library", [])
-        load_type = "文件夹" if is_folder else "单文件"
-
-        # 判断是否为含预计算 embedding 的导出存档（items 有 chunks 字段而非 text 字段）
-        has_precomputed = bool(rag_library) and all("chunks" in item for item in rag_library)
-
-        if has_precomputed:
-            # 直接恢复预计算数据，跳过 embedding API，毫秒级完成
-            for doc_item in rag_library:
-                cur_doc = cursor.execute(
-                    "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
-                    (doc_item["title"][:100], doc_item.get("source", "")[:200],
-                     len(doc_item.get("chunks", [])))
-                )
-                doc_id = cur_doc.lastrowid
-                for chunk in doc_item.get("chunks", []):
-                    cursor.execute(
-                        "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
-                        "VALUES (?,?,?,?)",
-                        (doc_id, chunk["index"], chunk["text"], chunk.get("embedding", "[]"))
-                    )
-            conn.commit()
-            conn.close()
-            _refresh_vector_cache()
-            _log.info("RAG 知识库从存档直接恢复，共 %d 个文档，跳过 embedding 重建", len(rag_library))
-            return {
-                "status": "success",
-                "message": (
-                    f"成功加载 {req.filename}（{load_type}，含 {len(rag_library)} 个RAG文档"
-                    f"，自动百科 {auto_lore_count} 条）"
-                ),
-                "auto_setup": {
-                    "rag_documents": len(rag_library),
-                    "auto_lore": auto_lore_count,
-                    "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
-                    "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
-                },
-            }
-
-        for rag_item in raw_library:
-            title  = rag_item.get("title", "未命名")
-            source = rag_item.get("source", "")
-            text   = rag_item.get("text", "")
-            if not text.strip():
-                continue
-            chunks = _chunk_text(text)
-            cur_doc = cursor.execute(
-                "INSERT INTO rag_documents (title, source, chunk_size) VALUES (?,?,?)",
-                (title[:100], source[:200], len(chunks))
-            )
-            doc_id = cur_doc.lastrowid
-            for idx, chunk in enumerate(chunks):
-                cursor.execute(
-                    "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, embedding) "
-                    "VALUES (?,?,?,?)",
-                    (doc_id, idx, chunk, "[]")
-                )
-
-        conn.commit()
-
-        # ── 可选异步重建 RAG embedding（默认关闭，避免载入剧本后批量请求 embedding）────
-        if raw_library and RAG_AUTO_REBUILD_EMBEDDINGS:
-            import threading
-            def _rebuild_embeddings():
-                try:
-                    _conn = get_db_connection()
-                    rows = _conn.execute(
-                        "SELECT id, chunk_text FROM rag_chunks WHERE embedding='[]' ORDER BY id"
-                    ).fetchall()
-                    if not rows:
-                        _conn.close()
-                        return
-                    _log.info("后台 RAG embedding 重建开始，共 %d 个 chunks", len(rows))
-                    texts = [r["chunk_text"] for r in rows]
-                    ids   = [r["id"] for r in rows]
-                    BATCH = 16
-                    embedded_count = 0
-                    for i in range(0, len(texts), BATCH):
-                        batch_texts = texts[i:i+BATCH]
-                        batch_ids   = ids[i:i+BATCH]
-                        try:
-                            vecs = _get_embeddings(batch_texts)
-                            for rid, vec in zip(batch_ids, vecs):
-                                _conn.execute(
-                                    "UPDATE rag_chunks SET embedding=? WHERE id=?",
-                                    (json.dumps(vec), rid)
-                                )
-                            _conn.commit()
-                            embedded_count += len(batch_texts)
-                        except Exception as e:
-                            _log.warning("RAG embedding 批次写入失败 (batch %d): %s", i // BATCH, e)
-                    _conn.close()
-                    _log.info("后台 RAG embedding 重建完成，成功 %d/%d", embedded_count, len(rows))
-                    _refresh_vector_cache()  # 重建完成后刷新内存缓存
-                except Exception as e:
-                    _log.error("后台 RAG embedding 重建线程异常: %s", e, exc_info=True)
-            threading.Thread(target=_rebuild_embeddings, daemon=True).start()
-        elif raw_library:
-            _log.info(
-                "跳过后台 RAG embedding 重建；运行时使用关键词检索。"
-                "如需重建，在 config.json 的 rag.auto_rebuild_embeddings 设为 true 后重新载入剧本。"
-            )
-
-        conn.close()
-        # 加载完成后立即刷新向量缓存（embedding 为空的 chunks 会在后台线程重建后再次刷新）
-        _refresh_vector_cache()
-        return {
-            "status": "success",
-            "message": (
-                f"成功加载 {req.filename}（{load_type}，含 {len(raw_library)} 个RAG文档"
-                f"，自动百科 {auto_lore_count} 条）"
-            ),
-            "auto_setup": {
-                "rag_documents": len(raw_library),
-                "auto_lore": auto_lore_count,
-                "explicit_lore": len(explicit_lore_keywords) - auto_lore_count,
-                "has_map": bool(map_path and os.path.exists(map_path)) or bool(config.get("map_rooms")),
-            },
-        }
-
-    except Exception as e:
-        _log.error("load_campaign 异常: %s", e, exc_info=True)
-        raise fastapi.HTTPException(status_code=500, detail=f"加载失败: {str(e)}")
+    """加载 campaigns/<剧本名> 文件夹剧本。"""
+    request_account = require_account_from_request(request)
+    return _load_campaign_from_path(
+        req.filename,
+        request_account,
+        preserve_multiplayer_state=bool(req.preserve_multiplayer_state),
+    )
 
 class ExportSaveRequest(BaseModel):
     save_name: str = ""
+    base_campaign_path: str = ""
+    room_code: str = ""
+    solo_session_state: dict = {}
+
+class RenameSaveRequest(BaseModel):
+    new_name: str = ""
+
+def _replace_campaign_asset_prefix(value, old_name: str, new_name: str):
+    old_prefix = f"/api/campaign-assets/{urllib.parse.quote(old_name)}/"
+    new_prefix = f"/api/campaign-assets/{urllib.parse.quote(new_name)}/"
+    if isinstance(value, str):
+        return value.replace(old_prefix, new_prefix)
+    if isinstance(value, list):
+        return [_replace_campaign_asset_prefix(item, old_name, new_name) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_campaign_asset_prefix(item, old_name, new_name) for key, item in value.items()}
+    return value
+
+def _replace_save_asset_prefix(value, campaign_name: str, old_save_name: str, new_save_name: str):
+    old_prefix = (
+        f"/api/campaign-assets/saves/{urllib.parse.quote(campaign_name, safe='')}/"
+        f"{urllib.parse.quote(old_save_name, safe='')}/"
+    )
+    new_prefix = (
+        f"/api/campaign-assets/saves/{urllib.parse.quote(campaign_name, safe='')}/"
+        f"{urllib.parse.quote(new_save_name, safe='')}/"
+    )
+    if isinstance(value, str):
+        return value.replace(old_prefix, new_prefix)
+    if isinstance(value, list):
+        return [_replace_save_asset_prefix(item, campaign_name, old_save_name, new_save_name) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_save_asset_prefix(item, campaign_name, old_save_name, new_save_name) for key, item in value.items()}
+    return value
 
 @app.post("/api/game/export")
 def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest()):
-    """导出存档到 campaigns/ 文件夹，支持自定义名。"""
+    """导出当前游戏进度到 saves/<剧本>/<存档>。"""
     account = require_account_from_request(request)
+    requested_room_code = re.sub(r"[^A-Za-z0-9_-]", "", str(req.room_code or "").strip()).upper()[:80]
+    requested_save_name = (
+        f"{MULTIPLAYER_ROOM_SAVE_PREFIX}{requested_room_code}"
+        if requested_room_code
+        else str(req.save_name or "").strip()
+    )
     conn = get_db_connection()
     nodes = [dict(row) for row in conn.execute("SELECT * FROM nodes").fetchall()]
     options = [dict(row) for row in conn.execute("SELECT * FROM options").fetchall()]
@@ -1270,6 +1849,7 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
     lorebook = [dict(row) for row in conn.execute("SELECT * FROM lorebook").fetchall()]
     wv_row = conn.execute("SELECT value FROM system_state WHERE key = 'worldview'").fetchone()
     mem_row = conn.execute("SELECT value FROM system_state WHERE key = 'session_memory'").fetchone()
+    system_state = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM system_state").fetchall()}
     triggers = [dict(row) for row in conn.execute("SELECT * FROM triggers").fetchall()]
     timelines = [dict(row) for row in conn.execute("SELECT * FROM timelines").fetchall()]
     world_entities = [dict(row) for row in conn.execute("SELECT * FROM world_entities").fetchall()]
@@ -1288,18 +1868,24 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
         })
     memory_l1 = [dict(row) for row in conn.execute("SELECT * FROM memory_l1").fetchall()]
     pending_effects = [dict(row) for row in conn.execute("SELECT * FROM pending_effects").fetchall()]
+    game_flags = [dict(row) for row in conn.execute("SELECT * FROM game_flags").fetchall()]
     npc_chat_logs = [dict(row) for row in conn.execute("SELECT npc_name, sender, message, created_at FROM npc_chat_logs ORDER BY id").fetchall()]
+    room_token = request.headers.get("X-Room-Token") or ""
+    multiplayer_room_state = export_room_state_for_save_name(conn, requested_save_name, account, room_token)
     conn.close()
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     staged_assets_dir = ""
     try:
-        if req.save_name.strip():
-            safe_name = _sanitize_campaign_name(req.save_name.strip())
-            folder_name = safe_name or f"save_{timestamp}"
+        base_campaign_name, base_campaign_path = _base_campaign_from_export_request(req.base_campaign_path, system_state)
+        raw_save_name = requested_save_name
+        requested_multiplayer_room_save = _is_multiplayer_room_save_name(raw_save_name)
+        if raw_save_name:
+            folder_name = _sanitize_campaign_name(raw_save_name)
+            folder_path = _save_folder_path(base_campaign_name, folder_name)
         else:
-            folder_name = f"save_{timestamp}"
-        folder_path = os.path.join(CAMPAIGNS_DIR, folder_name)
+            folder_name, folder_path = _unique_save_folder_name(base_campaign_name, _default_save_name(base_campaign_name))
+        save_path = _save_ref_path(base_campaign_name, folder_name)
         staged_assets_dir = tempfile.mkdtemp(prefix="zric_export_assets_")
         staged_assets: dict[str, str] = {}
         for node in nodes:
@@ -1307,28 +1893,27 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
             prefix = "/api/campaign-assets/"
             if not scene_image.startswith(prefix):
                 continue
-            rel = scene_image[len(prefix):]
-            parts = rel.split("/", 1)
-            if len(parts) != 2:
-                continue
-            src_campaign = urllib.parse.unquote(parts[0])
-            src_asset = urllib.parse.unquote(parts[1])
-            dst_name = _sanitize_asset_name(os.path.basename(src_asset))
+            dst_name = _sanitize_asset_name(os.path.basename(urllib.parse.unquote(scene_image.rstrip("/").split("/")[-1])))
             if dst_name in staged_assets:
                 continue
             try:
-                src_path = _resolve_campaign_asset(src_campaign, src_asset)
+                src_path = _resolve_asset_from_campaign_asset_url(scene_image)
                 staged_path = os.path.join(staged_assets_dir, dst_name)
                 shutil.copy2(src_path, staged_path)
                 staged_assets[dst_name] = staged_path
             except (fastapi.HTTPException, OSError):
                 continue
+        is_multiplayer_room_save = requested_multiplayer_room_save or _is_multiplayer_room_save_name(folder_name)
+        if is_multiplayer_room_save and not multiplayer_room_state:
+            raise fastapi.HTTPException(status_code=403, detail="只有房主可以保存当前房间进度")
         if os.path.isdir(folder_path):
             existing_campaign = os.path.join(folder_path, "campaign.json")
-            if not os.path.exists(existing_campaign) or not _is_legacy_campaign_file(existing_campaign):
+            if not os.path.exists(existing_campaign) or not _is_campaign_file(existing_campaign):
                 raise fastapi.HTTPException(status_code=400, detail="目标存档格式无效，已拒绝覆盖")
-            _require_private_save_owner(folder_path, account)
+            if not is_multiplayer_room_save:
+                _require_private_save_owner(folder_path, account)
             _cleanup_managed_campaign_folder(folder_path)
+        os.makedirs(os.path.dirname(folder_path), exist_ok=True)
         os.makedirs(folder_path, exist_ok=True)
         export_nodes = [dict(n) for n in nodes]
         for node in export_nodes:
@@ -1336,24 +1921,41 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
             prefix = "/api/campaign-assets/"
             if not scene_image.startswith(prefix):
                 continue
-            rel = scene_image[len(prefix):]
-            parts = rel.split("/", 1)
-            if len(parts) != 2:
-                continue
-            asset_name = _sanitize_asset_name(os.path.basename(urllib.parse.unquote(parts[1])))
-            node["scene_image"] = _campaign_asset_url(folder_name, asset_name)
+            asset_name = _sanitize_asset_name(os.path.basename(urllib.parse.unquote(scene_image.rstrip("/").split("/")[-1])))
+            node["scene_image"] = _save_asset_url(base_campaign_name, folder_name, asset_name)
+
+        export_system_state = dict(system_state)
+        export_system_state.update({
+            "base_campaign_name": base_campaign_name,
+            "base_campaign_path": base_campaign_path,
+            "current_save_name": folder_name,
+            "current_save_path": save_path,
+            "current_campaign_name": folder_name,
+            "current_campaign_path": save_path,
+        })
+        play_mode = "general"
+        if folder_name.startswith("__room_mp_"):
+            play_mode = "multiplayer"
+        elif folder_name.startswith("__room_solo_") or (isinstance(req.solo_session_state, dict) and req.solo_session_state):
+            play_mode = "solo"
+        if isinstance(req.solo_session_state, dict) and req.solo_session_state:
+            export_system_state["solo_session_state"] = json.dumps(req.solo_session_state, ensure_ascii=False)
 
         campaign_data = {
             "worldview": wv_row["value"] if wv_row else "",
             "session_memory": mem_row["value"] if mem_row else "",
+            "system_state": export_system_state,
             "characters": characters, "nodes": export_nodes, "options": options,
             "lorebook": lorebook, "triggers": triggers,
             "timelines": timelines, "world_entities": world_entities,
             "rag_library": rag_export,
             "memory_l1": memory_l1,
             "pending_effects": pending_effects,
+            "game_flags": game_flags,
             "npc_chat_logs": npc_chat_logs,
         }
+        if multiplayer_room_state:
+            campaign_data["multiplayer_room_state"] = multiplayer_room_state
         with open(os.path.join(folder_path, "campaign.json"), "w", encoding="utf-8") as f:
             json.dump(campaign_data, f, ensure_ascii=False, indent=4)
         with open(os.path.join(folder_path, "map.json"), "w", encoding="utf-8") as f:
@@ -1379,7 +1981,10 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
 
         manifest = {
             "name": folder_name,
-            "path": f"campaigns/{folder_name}",
+            "path": save_path,
+            "base_campaign_name": base_campaign_name,
+            "base_campaign_path": base_campaign_path,
+            "play_mode": play_mode,
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             **_account_owner_metadata(account),
             "node_count": len(nodes),
@@ -1389,17 +1994,26 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
             "map_room_count": len(map_data.get("map_rooms") or []),
             "asset_count": len(copied_assets),
         }
+        if multiplayer_room_state:
+            manifest["multiplayer_room_state"] = {
+                "source_room_code": multiplayer_room_state.get("source_room_code", ""),
+                "character_claim_count": len(multiplayer_room_state.get("character_claims") or []),
+                "member_count": len(multiplayer_room_state.get("members") or []),
+                "token_count": len(multiplayer_room_state.get("tokens") or []),
+            }
         with open(os.path.join(folder_path, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
         return {
             "status": "success",
             "folder": folder_name,
-            "path": f"campaigns/{folder_name}",
-            "download_url": f"/api/game/saves/{urllib.parse.quote(folder_name)}/download",
+            "path": save_path,
+            "base_campaign_name": base_campaign_name,
+            "base_campaign_path": base_campaign_path,
+            "download_url": _save_download_url(save_path),
             "updated_at": _format_mtime(os.path.join(folder_path, "campaign.json")),
             "summary": manifest,
-            "message": f"已导出到 campaigns/{folder_name}/"
+            "message": f"已保存到 saves/{base_campaign_name}/{folder_name}/"
         }
     except Exception as e:
         if isinstance(e, fastapi.HTTPException):
@@ -1410,11 +2024,11 @@ def export_campaign(request: Request, req: ExportSaveRequest = ExportSaveRequest
             shutil.rmtree(staged_assets_dir, ignore_errors=True)
 
 
-@app.get("/api/game/saves/{campaign_name}/download")
-def download_save_archive(campaign_name: str, request: Request):
+@app.get("/api/game/saves/{save_ref:path}/download")
+def download_save_archive(save_ref: str, request: Request):
     """将文件夹存档打包为 ZIP 下载。"""
     account = require_account_from_request(request)
-    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    _campaign_name, name, folder, _campaign_json = _resolve_save_ref(save_ref)
     _require_private_save_owner(folder, account)
     tmp = tempfile.NamedTemporaryFile(prefix=f"zric_{_sanitize_asset_name(name, '.zip')}_", suffix=".zip", delete=False)
     tmp_path = tmp.name
@@ -1440,18 +2054,96 @@ def download_save_archive(campaign_name: str, request: Request):
     )
 
 
-@app.delete("/api/game/saves/{campaign_name}")
-def delete_save_folder(campaign_name: str, request: Request):
-    """删除 campaigns/<name> 文件夹存档。旧版根目录 JSON 不允许通过此接口删除。"""
-    require_admin_config_access(request)
+@app.delete("/api/game/saves/{save_ref:path}")
+def delete_save_folder(save_ref: str, request: Request):
+    """删除 saves/<剧本>/<存档>。"""
     account = require_account_from_request(request)
-    name, folder, _campaign_json = _resolve_campaign_folder_name(campaign_name)
+    campaign_name, name, folder, _campaign_json = _resolve_save_ref(save_ref)
     _require_private_save_owner(folder, account)
+    root = os.path.realpath(SAVES_DIR)
+    target = os.path.realpath(folder)
     try:
-        shutil.rmtree(folder)
+        if os.path.commonpath([root, target]) != root or target == root:
+            raise ValueError
+    except ValueError:
+        raise fastapi.HTTPException(status_code=400, detail="非法存档路径") from None
+    try:
+        shutil.rmtree(target)
+        campaign_dir = os.path.realpath(os.path.join(SAVES_DIR, campaign_name))
+        try:
+            if os.path.isdir(campaign_dir) and not os.listdir(campaign_dir):
+                os.rmdir(campaign_dir)
+        except OSError:
+            pass
     except Exception as exc:
         raise fastapi.HTTPException(status_code=500, detail=f"删除存档失败：{exc}") from exc
     return {"status": "success", "name": name, "message": f"已删除存档：{name}"}
+
+
+@app.patch("/api/game/saves/{save_ref:path}/rename")
+def rename_save_folder(save_ref: str, req: RenameSaveRequest, request: Request):
+    """重命名账号拥有的 saves/<剧本>/<存档>。"""
+    account = require_account_from_request(request)
+    campaign_name, old_name, old_folder, _campaign_json = _resolve_save_ref(save_ref)
+    manifest = _require_private_save_owner(old_folder, account)
+    raw_new_name = req.new_name.strip()
+    new_name = _sanitize_campaign_name(raw_new_name) if raw_new_name else _default_save_name(campaign_name)
+    if _is_hidden_room_save(new_name):
+        raise fastapi.HTTPException(status_code=400, detail="该名称保留给房间内部存档")
+    if new_name == old_name:
+        return {
+            "status": "success",
+            "name": old_name,
+            "path": _save_ref_path(campaign_name, old_name),
+            "message": "存档名称未变化",
+        }
+    new_folder = _save_folder_path(campaign_name, new_name)
+    if os.path.exists(new_folder):
+        raise fastapi.HTTPException(status_code=409, detail="同名存档已存在")
+    old_path = _save_ref_path(campaign_name, old_name)
+    new_path = _save_ref_path(campaign_name, new_name)
+    try:
+        os.rename(old_folder, new_folder)
+        campaign_json = os.path.join(new_folder, "campaign.json")
+        try:
+            with open(campaign_json, "r", encoding="utf-8") as f:
+                campaign_data = json.load(f)
+            campaign_data = _replace_save_asset_prefix(campaign_data, campaign_name, old_name, new_name)
+            saved_state = campaign_data.get("system_state")
+            if isinstance(saved_state, dict):
+                saved_state.update({
+                    "current_save_name": new_name,
+                    "current_save_path": new_path,
+                    "current_campaign_name": new_name,
+                    "current_campaign_path": new_path,
+                })
+            with open(campaign_json, "w", encoding="utf-8") as f:
+                json.dump(campaign_data, f, ensure_ascii=False, indent=4)
+        except (OSError, json.JSONDecodeError):
+            pass
+        updated_manifest = _write_save_manifest(new_folder, {
+            **manifest,
+            "name": new_name,
+            "path": new_path,
+            "base_campaign_name": manifest.get("base_campaign_name") or campaign_name,
+            "base_campaign_path": manifest.get("base_campaign_path") or f"campaigns/{campaign_name}",
+            "renamed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    except fastapi.HTTPException:
+        raise
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=500, detail=f"重命名存档失败：{exc}") from exc
+    return {
+        "status": "success",
+        "old_name": old_name,
+        "old_path": old_path,
+        "name": new_name,
+        "path": new_path,
+        "download_url": _save_download_url(new_path),
+        "updated_at": _format_mtime(os.path.join(new_folder, "campaign.json")),
+        "summary": updated_manifest,
+        "message": f"已重命名存档：{old_name} → {new_name}",
+    }
 
 # ---------------------------------------------------------
 # 【记忆系统】：已迁移至 memory.py（通过 app.include_router(memory_router) 自动注册）
@@ -1465,14 +2157,16 @@ def get_lorebook():
     return {"status": "success", "lorebook": r}
 
 @app.post("/api/game/lorebook")
-def create_lore(req: LorebookRequest):
+def create_lore(req: LorebookRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("INSERT INTO lorebook (keywords, content) VALUES (?, ?)", (req.keywords, req.content))
         conn.commit()
     return {"status": "success"}
 
 @app.delete("/api/game/lorebook/{lore_id}")
-def delete_lore(lore_id: int):
+def delete_lore(lore_id: int, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM lorebook WHERE id = ?", (lore_id,))
         conn.commit()
@@ -1488,7 +2182,8 @@ def get_worldview():
     return {"status": "success", "content": r["value"] if r else ""}
 
 @app.put("/api/game/worldview")
-def update_worldview(req: StringContentRequest):
+def update_worldview(req: StringContentRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("INSERT OR REPLACE INTO system_state (key, value) VALUES ('worldview', ?)", (req.content,))
         conn.commit()
@@ -1507,7 +2202,8 @@ class StatLabelsRequest(BaseModel):
     san_label: str = "SAN"
 
 @app.put("/api/game/stat-labels")
-def update_stat_labels(req: StatLabelsRequest):
+def update_stat_labels(req: StatLabelsRequest, request: Request):
+    require_account_from_request(request)
     """更新 HP/SAN 显示名。"""
     with safe_db() as conn:
         conn.execute("INSERT OR REPLACE INTO system_state (key, value) VALUES ('hp_label', ?)", (req.hp_label[:20],))
@@ -1523,6 +2219,20 @@ def get_game_state():
         c = [dict(row) for row in conn.execute("SELECT * FROM characters").fetchall()]
         wv_row = conn.execute("SELECT value FROM system_state WHERE key='worldview'").fetchone()
         worldview = wv_row["value"] if wv_row else ""
+        current_scene_row = conn.execute("SELECT value FROM system_state WHERE key='player_current_scene_id'").fetchone()
+        current_scene_raw = current_scene_row["value"] if current_scene_row else ""
+        campaign_name_row = conn.execute("SELECT value FROM system_state WHERE key='current_campaign_name'").fetchone()
+        campaign_path_row = conn.execute("SELECT value FROM system_state WHERE key='current_campaign_path'").fetchone()
+        base_campaign_name_row = conn.execute("SELECT value FROM system_state WHERE key='base_campaign_name'").fetchone()
+        base_campaign_path_row = conn.execute("SELECT value FROM system_state WHERE key='base_campaign_path'").fetchone()
+        current_save_name_row = conn.execute("SELECT value FROM system_state WHERE key='current_save_name'").fetchone()
+        current_save_path_row = conn.execute("SELECT value FROM system_state WHERE key='current_save_path'").fetchone()
+        current_campaign_name = campaign_name_row["value"] if campaign_name_row else ""
+        current_campaign_path = campaign_path_row["value"] if campaign_path_row else ""
+        base_campaign_name = base_campaign_name_row["value"] if base_campaign_name_row else ""
+        base_campaign_path = base_campaign_path_row["value"] if base_campaign_path_row else ""
+        current_save_name = current_save_name_row["value"] if current_save_name_row else ""
+        current_save_path = current_save_path_row["value"] if current_save_path_row else ""
     for node in n:
         node["options"] = [opt for opt in o if opt["node_id"] == node["id"]]
     active_characters = [char for char in c if (char.get("status") or "active") != "hidden"]
@@ -1534,22 +2244,50 @@ def get_game_state():
         "playable_characters": playable_characters,
         "all_characters": c,
         "worldview": worldview,
+        "current_scene_id": int(current_scene_raw) if str(current_scene_raw or "").isdigit() else None,
+        "current_campaign_name": current_campaign_name,
+        "current_campaign_path": current_campaign_path,
+        "base_campaign_name": base_campaign_name,
+        "base_campaign_path": base_campaign_path,
+        "current_save_name": current_save_name,
+        "current_save_path": current_save_path,
     }
 
 @app.post("/api/game/character/{char_id}")
-def update_character(char_id: int, req: CharUpdateRequest):
+def update_character(char_id: int, req: CharUpdateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
+        existing = conn.execute(
+            "SELECT role_brief, script_brief, opening_prompt FROM characters WHERE id=?",
+            (char_id,),
+        ).fetchone()
+        role_brief = req.role_brief if req.role_brief is not None else (existing["role_brief"] if existing else "")
+        script_brief = req.script_brief if req.script_brief is not None else (existing["script_brief"] if existing else "")
+        opening_prompt = req.opening_prompt if req.opening_prompt is not None else (existing["opening_prompt"] if existing else "")
         if req.name is not None and req.name.strip():
-            conn.execute("UPDATE characters SET name=?, hp=?, san=?, inventory=?, personality=?, status=? WHERE id=?",
-                         (req.name.strip()[:50], req.hp, req.san, req.inventory, req.personality, req.status, char_id))
+            conn.execute(
+                "UPDATE characters SET name=?, hp=?, san=?, inventory=?, personality=?, role_brief=?, script_brief=?, opening_prompt=?, status=? WHERE id=?",
+                (
+                    req.name.strip()[:50], req.hp, req.san, req.inventory, req.personality,
+                    str(role_brief or "")[:1800], str(script_brief or "")[:2400],
+                    str(opening_prompt or "")[:800], req.status, char_id,
+                ),
+            )
         else:
-            conn.execute("UPDATE characters SET hp=?, san=?, inventory=?, personality=?, status=? WHERE id=?",
-                         (req.hp, req.san, req.inventory, req.personality, req.status, char_id))
+            conn.execute(
+                "UPDATE characters SET hp=?, san=?, inventory=?, personality=?, role_brief=?, script_brief=?, opening_prompt=?, status=? WHERE id=?",
+                (
+                    req.hp, req.san, req.inventory, req.personality,
+                    str(role_brief or "")[:1800], str(script_brief or "")[:2400],
+                    str(opening_prompt or "")[:800], req.status, char_id,
+                ),
+            )
         conn.commit()
     return {"status": "success"}
 
 @app.post("/api/game/node")
-def create_node(req: NodeCreateRequest):
+def create_node(req: NodeCreateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         c = conn.execute("INSERT INTO nodes (name, summary, content) VALUES (?,?,?)", (req.name, req.summary, req.content))
         i = c.lastrowid
@@ -1557,14 +2295,16 @@ def create_node(req: NodeCreateRequest):
     return {"status": "success", "id": i}
 
 @app.put("/api/game/node/{node_id}")
-def update_node(node_id: int, req: NodeUpdateRequest):
+def update_node(node_id: int, req: NodeUpdateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("UPDATE nodes SET name=?, summary=?, content=? WHERE id=?", (req.name, req.summary, req.content, node_id))
         conn.commit()
     return {"status": "success"}
 
 @app.delete("/api/game/node/{node_id}")
-def delete_node(node_id: int):
+def delete_node(node_id: int, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM nodes WHERE id=?", (node_id,))
         conn.execute("DELETE FROM options WHERE node_id=? OR next_node_id=?", (node_id, node_id))
@@ -1572,7 +2312,8 @@ def delete_node(node_id: int):
     return {"status": "success"}
 
 @app.post("/api/game/option")
-def create_option(req: OptionCreateRequest):
+def create_option(req: OptionCreateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         c = conn.execute("INSERT INTO options (node_id, text, next_node_id) VALUES (?,?,?)", (req.node_id, req.text, req.next_node_id))
         i = c.lastrowid
@@ -1580,7 +2321,8 @@ def create_option(req: OptionCreateRequest):
     return {"status": "success", "id": i}
 
 @app.delete("/api/game/option/{option_id}")
-def delete_option(option_id: int):
+def delete_option(option_id: int, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         conn.execute("DELETE FROM options WHERE id=?", (option_id,))
         conn.commit()
@@ -1820,21 +2562,32 @@ def _get_current_room_id(conn, timeline_id: int | None = None) -> int | None:
 # API 接口：角色管理 (新增/删除)
 # ---------------------------------------------------------
 @app.post("/api/game/character")
-def create_character(req: CharCreateRequest):
+def create_character(req: CharCreateRequest, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         _existing_char = conn.execute(
             "SELECT id FROM characters WHERE name=?", (req.name[:50],)
         ).fetchone()
         if _existing_char:
             conn.execute(
-                "UPDATE characters SET role=?, hp=?, san=?, inventory=?, personality=?, status=? WHERE id=?",
-                (req.role[:10], req.hp, req.san, req.inventory[:200], req.personality[:500], req.status, _existing_char["id"])
+                "UPDATE characters SET role=?, hp=?, san=?, inventory=?, personality=?, role_brief=?, script_brief=?, opening_prompt=?, status=? WHERE id=?",
+                (
+                    req.role[:10], req.hp, req.san, req.inventory[:800], req.personality[:1600],
+                    req.role_brief[:1800], req.script_brief[:2400], req.opening_prompt[:800],
+                    req.status, _existing_char["id"],
+                )
             )
             new_id = _existing_char["id"]
         else:
             new_id = conn.execute(
-                "INSERT INTO characters (name, role, hp, san, inventory, personality, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (req.name[:50], req.role[:10], req.hp, req.san, req.inventory[:200], req.personality[:500], req.status)
+                "INSERT INTO characters "
+                "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    req.name[:50], req.role[:10], req.hp, req.san, req.inventory[:800],
+                    req.personality[:1600], req.role_brief[:1800],
+                    req.script_brief[:2400], req.opening_prompt[:800], req.status,
+                )
             ).lastrowid
         # NPC 自动创建世界实体条目（使情绪状态机可用）
         if req.role.upper() == 'NPC':
@@ -1856,7 +2609,8 @@ def create_character(req: CharCreateRequest):
     return {"status": "success", "id": new_id}
 
 @app.delete("/api/game/character/{char_id}")
-def delete_character(char_id: int):
+def delete_character(char_id: int, request: Request):
+    require_account_from_request(request)
     with safe_db() as conn:
         result = conn.execute("SELECT id FROM characters WHERE id = ?", (char_id,)).fetchone()
         if not result:
@@ -1865,8 +2619,12 @@ def delete_character(char_id: int):
         conn.commit()
     return {"status": "success"}
 
+def _request_owner_account_id(request: Request) -> int:
+    return _account_id(require_account_from_request(request))
+
+
 @app.post("/api/ai/generate-npc")
-def generate_npc(request: AutoNPCRequest):
+def generate_npc(request: AutoNPCRequest, http_request: Request):
     """根据当前剧情场景，AI自动生成一个合适的NPC并写入数据库"""
     conn = get_db_connection()
     worldview, party_status, relevant_lore, session_memory, l1_context, world_entities_text, rag_context, map_context = get_system_context(
@@ -1894,6 +2652,7 @@ def generate_npc(request: AutoNPCRequest):
             temperature=0.9,
             max_tokens=300,
             json_mode=True,
+            owner_account_id=_request_owner_account_id(http_request),
         )
         ai_result = response.choices[0].message.content.strip()
         npc_data = json_repair.loads(ai_result)
@@ -1908,14 +2667,20 @@ def generate_npc(request: AutoNPCRequest):
         _existing = conn2.execute("SELECT id FROM characters WHERE name=?", (name,)).fetchone()
         if _existing:
             conn2.execute(
-                "UPDATE characters SET hp=?, san=?, inventory=? WHERE id=?",
-                (hp, san, inv, _existing["id"]))
+                "UPDATE characters SET hp=?, san=?, inventory=?, personality=COALESCE(NULLIF(personality,''), ?) WHERE id=?",
+                (hp, san, inv, backstory[:1600], _existing["id"]))
             new_id = _existing["id"]
         else:
             new_id = conn2.execute(
-                "INSERT INTO characters (name, role, hp, san, inventory) VALUES (?, 'NPC', ?, ?, ?)",
-                (name, hp, san, inv)).lastrowid
-        append_to_memory(conn2, f"NPC [{name}] 登场于 [{request.scene_name}]。背景：{backstory}")
+                "INSERT INTO characters "
+                "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+                "VALUES (?, 'NPC', ?, ?, ?, ?, ?, '', '', 'active')",
+                (name, hp, san, inv, backstory[:1600], backstory[:1800])).lastrowid
+        append_to_memory(
+            conn2,
+            f"NPC [{name}] 登场于 [{request.scene_name}]。背景：{backstory}",
+            owner_account_id=_request_owner_account_id(http_request),
+        )
         conn2.commit()
         conn2.close()
 
@@ -1931,7 +2696,7 @@ class CheckNPCRequest(BaseModel):
     scene_content: str
 
 @app.post("/api/ai/check-npc")
-def check_npc_on_enter(request: CheckNPCRequest):
+def check_npc_on_enter(request: CheckNPCRequest, http_request: Request):
     """
     跳转到新场景时调用。
     AI 轻量判断：该场景是否暗示一个新NPC应当出现？
@@ -1968,6 +2733,7 @@ def check_npc_on_enter(request: CheckNPCRequest):
             temperature=0.7,
             max_tokens=250,
             json_mode=True,
+            owner_account_id=_request_owner_account_id(http_request),
         )
         parsed = json_repair.loads(response.choices[0].message.content.strip())
         npc_data = parsed.get("npc")
@@ -1989,12 +2755,18 @@ def check_npc_on_enter(request: CheckNPCRequest):
         npc_back = npc_data.get("backstory", "")
 
         cur = conn.execute(
-            "INSERT INTO characters (name, role, hp, san, inventory) VALUES (?, 'NPC', ?, ?, ?)",
-            (npc_name, npc_hp, npc_san, npc_inv)
+            "INSERT INTO characters "
+            "(name, role, hp, san, inventory, personality, role_brief, script_brief, opening_prompt, status) "
+            "VALUES (?, 'NPC', ?, ?, ?, ?, ?, '', '', 'active')",
+            (npc_name, npc_hp, npc_san, npc_inv, npc_back[:1600], npc_back[:1800])
         )
         spawned_npc = {"id": cur.lastrowid, "name": npc_name, "role": "NPC",
                        "hp": npc_hp, "san": npc_san, "inventory": npc_inv, "backstory": npc_back}
-        append_to_memory(conn, f"NPC [{npc_name}] 登场于新场景 [{request.scene_name}]。{npc_back}")
+        append_to_memory(
+            conn,
+            f"NPC [{npc_name}] 登场于新场景 [{request.scene_name}]。{npc_back}",
+            owner_account_id=_request_owner_account_id(http_request),
+        )
         conn.commit()
         conn.close()
         return {"status": "success", "spawned_npc": spawned_npc}
@@ -2012,7 +2784,7 @@ def check_npc_on_enter(request: CheckNPCRequest):
 # 【核心增强】：AI 图片生成（场景感知 + OpenAI 兼容端点）
 # ---------------------------------------------------------
 @app.post("/api/ai/generate-image")
-def generate_image(request: ImageGenRequest):
+def generate_image(request: ImageGenRequest, http_request: Request):
     """
     图片生成（场景感知版）：
       Step 1 - 自动从当前场景提取上下文（场景名、正文、世界观、地图位置）
@@ -2075,6 +2847,7 @@ def generate_image(request: ImageGenRequest):
         context_parts.append(request.description or "一个神秘的奇幻场景")
 
     context_text = "\n".join(context_parts)
+    owner_account_id = _request_owner_account_id(http_request)
     try:
         resp = ai_provider.chat_completion(
             [
@@ -2088,6 +2861,7 @@ def generate_image(request: ImageGenRequest):
             ],
             temperature=0.7,
             max_tokens=420,
+            owner_account_id=owner_account_id,
         )
         scene_prompt = resp.choices[0].message.content.strip().strip('"').replace("\n", "，")
     except Exception as e:
@@ -2106,7 +2880,7 @@ def generate_image(request: ImageGenRequest):
         model_override = ""
 
     try:
-        resp = ai_provider.image_generate(full_prompt, model=model_override)
+        resp = ai_provider.image_generate(full_prompt, model=model_override, owner_account_id=owner_account_id)
         img_item = resp.data[0] if getattr(resp, "data", None) else None
 
         if not img_item:
@@ -2153,7 +2927,7 @@ def debug_battle_report_state():
 
 # ---------------------------------------------------------
 @app.post("/api/ai/export-battle-report")
-def export_battle_report():
+def export_battle_report(request: Request):
     """
     增量式战报生成：
       - 输入源不再是 session_memory，而是 chronicle_log 中 id > last_chronicle_position 的所有新场景快照
@@ -2161,6 +2935,7 @@ def export_battle_report():
       - 生成完成后将 last_chronicle_position 推进到本次最大 id
       - 每次另存为一个新的 .md 文件，不重复生成之前已写过的部分
     """
+    owner_account_id = _request_owner_account_id(request)
     conn = get_db_connection()
     pos_row = conn.execute(
         "SELECT value FROM system_state WHERE key='last_chronicle_position'"
@@ -2264,6 +3039,7 @@ def export_battle_report():
             ],
             temperature=0.8,
             max_tokens=8000,
+            owner_account_id=owner_account_id,
         )
         report = resp.choices[0].message.content.strip()
 
@@ -2300,13 +3076,14 @@ def export_battle_report():
 # =============================================================
 
 @app.post("/api/timelines/{tl_id}/dynamic-options")
-def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
+def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest, request: Request):
     """
     时间线分支推演——委托给 agent.py 的统一推演引擎。
     时间线专属上下文在此构建，AI 调用和后处理由 agent 模块完成。
     """
     from .agent import _call_ai, _build_dynamic_system_prompt, _post_process_dynamic_result, _trim_prompt_context
 
+    owner_account_id = _request_owner_account_id(request)
     conn = get_db_connection()
     tl = conn.execute("SELECT * FROM timelines WHERE id=?", (tl_id,)).fetchone()
     if not tl:
@@ -2363,7 +3140,14 @@ def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
     user_prompt = f"场景：{req.scene_name}\n内容：{req.content}\n玩家动作：{req.player_action}\n先思考，再生成分支。"
 
     try:
-        ai_result = _call_ai(system_prompt, user_prompt, temperature=0.8, max_tokens=2500, json_mode=True)
+        ai_result = _call_ai(
+            system_prompt,
+            user_prompt,
+            temperature=0.8,
+            max_tokens=2500,
+            json_mode=True,
+            owner_account_id=owner_account_id,
+        )
         if ai_result.startswith("```"):
             ai_result = ai_result.split("```")[1]
             if ai_result.startswith("json"): ai_result = ai_result[4:]
@@ -2373,7 +3157,8 @@ def timeline_dynamic_options(tl_id: int, req: TimelineDynamicRequest):
             _post_process_dynamic_result(
                 conn, parsed, req.scene_name, req.player_action,
                 req.current_node_id, timeline_id=tl_id, tl_id_for_memory=tl_id,
-                action_type=req.action_type
+                action_type=req.action_type,
+                owner_account_id=owner_account_id,
             )
         conn.close()
         return {"status": "success", "new_options": new_options,
@@ -2521,13 +3306,14 @@ class SceneVisitRequest(BaseModel):
     option_text:  str = ""   # 玩家点击的选项文本，为空时表示直接跳转
 
 @app.post("/api/game/log-scene-visit")
-def log_scene_visit(req: SceneVisitRequest):
+def log_scene_visit(req: SceneVisitRequest, request: Request):
+    account = require_account_from_request(request)
     # 只有通过预设选项跳转才记录，直接跳转不写记忆流
     if not req.option_text.strip():
         return {"status": "skipped"}
     conn = get_db_connection()
     log = f"玩家选择「{req.option_text}」→ 进入场景【{req.node_name}】"
-    append_to_memory(conn, log)
+    append_to_memory(conn, log, owner_account_id=_account_id(account))
 
     # 同步写入战报史册：抓取当前场景 content/expanded_content 作为快照
     try:
@@ -2570,7 +3356,8 @@ class CheckpointRequest(BaseModel):
     label: str = ""
 
 @app.post("/api/game/checkpoint")
-def create_checkpoint(req: CheckpointRequest):
+def create_checkpoint(req: CheckpointRequest, request: Request):
+    require_account_from_request(request)
     """保存当前游戏状态快照，用于返回上一回合。"""
     with safe_db() as conn:
         def rows(sql, *args):
@@ -2604,6 +3391,7 @@ def create_checkpoint(req: CheckpointRequest):
                                for r in conn.execute("SELECT id,expanded_content FROM nodes").fetchall()},
             "triggers":       rows("SELECT id,fired,fire_count,last_fired_at FROM triggers"),
             "pending_effects": rows("SELECT * FROM pending_effects"),
+            "game_flags": rows("SELECT * FROM game_flags"),
             "session_memory": system_state.get("session_memory", ""),
             "system_state": system_state,
             "map_rooms_state": {str(r["id"]): r["state"]
@@ -2631,7 +3419,8 @@ def list_checkpoints():
 
 
 @app.post("/api/game/rollback")
-def rollback_checkpoint():
+def rollback_checkpoint(request: Request):
+    require_account_from_request(request)
     """恢复最近一次快照，返回应导航到的节点ID。快照消费后自动删除。"""
     with safe_db() as conn:
         row = conn.execute(
@@ -2659,29 +3448,34 @@ def rollback_checkpoint():
 
         # ── characters ──────────────────────────────────────────
         conn.execute("DELETE FROM characters")
-        for c in snap["characters"]:
+        for c in snap.get("characters") or []:
             conn.execute(
-                "INSERT INTO characters (id,name,role,hp,san,inventory,personality,status) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO characters "
+                "(id,name,role,hp,san,inventory,personality,role_brief,script_brief,opening_prompt,status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (c["id"], c["name"], c["role"], c["hp"], c["san"],
-                 c.get("inventory",""), c.get("personality",""), c.get("status","active"))
+                 c.get("inventory",""), c.get("personality",""),
+                 c.get("role_brief",""), c.get("script_brief",""),
+                 c.get("opening_prompt",""), c.get("status","active"))
             )
 
         # ── world_entities ───────────────────────────────────────
         conn.execute("DELETE FROM world_entities")
-        for e in snap["world_entities"]:
+        for e in snap.get("world_entities") or []:
             conn.execute(
-                "INSERT INTO world_entities (id,entity_type,name,location,status,last_seen_by,state_desc,updated_at,room_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO world_entities (id,entity_type,name,location,status,last_seen_by,state_desc,updated_at,room_id,aliases) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (e["id"], e["entity_type"], e["name"], e["location"],
                  e["status"], e["last_seen_by"], e["state_desc"],
-                 e["updated_at"], e.get("room_id"))
+                 e["updated_at"], e.get("room_id"),
+                 _json_list_text(e.get("aliases", []), max_items=20, max_len=40))
             )
 
         # ── memory_l1（删除快照之后新增的条目）──────────────────
-        conn.execute("DELETE FROM memory_l1 WHERE id > ?", (snap["memory_l1_max_id"],))
+        conn.execute("DELETE FROM memory_l1 WHERE id > ?", (_int_value(snap.get("memory_l1_max_id")),))
 
         # ── timelines ────────────────────────────────────────────
         conn.execute("DELETE FROM timelines")
-        for tl in snap["timelines"]:
+        for tl in snap.get("timelines") or []:
             conn.execute(
                 "INSERT INTO timelines (id,label,color,current_node_id,current_room_id,memory,char_ids,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (tl["id"], tl["label"], tl["color"],
@@ -2690,12 +3484,12 @@ def rollback_checkpoint():
             )
 
         # ── nodes.expanded_content ───────────────────────────────
-        for node_id_str, content in snap["node_expanded"].items():
+        for node_id_str, content in (snap.get("node_expanded") or {}).items():
             conn.execute("UPDATE nodes SET expanded_content=? WHERE id=?",
                          (content, int(node_id_str)))
 
         # ── triggers 状态字段 ─────────────────────────────────────
-        for tr in snap["triggers"]:
+        for tr in snap.get("triggers") or []:
             conn.execute(
                 "UPDATE triggers SET fired=?,fire_count=?,last_fired_at=? WHERE id=?",
                 (tr["fired"], tr.get("fire_count",0), tr.get("last_fired_at"), tr["id"])
@@ -2703,10 +3497,21 @@ def rollback_checkpoint():
 
         # ── pending_effects ──────────────────────────────────────
         conn.execute("DELETE FROM pending_effects")
-        for pe in snap["pending_effects"]:
+        for pe in snap.get("pending_effects") or []:
             conn.execute(
                 "INSERT INTO pending_effects (id,node_id,payload,created_at) VALUES (?,?,?,?)",
-                (pe["id"], pe["node_id"], pe["payload"], pe["created_at"])
+                (pe["id"], pe["node_id"], pe.get("payload", "{}"), pe.get("created_at", ""))
+            )
+
+        # ── game_flags ───────────────────────────────────────────
+        conn.execute("DELETE FROM game_flags")
+        for flag in snap.get("game_flags") or []:
+            key = str(flag.get("key") or "").strip()
+            if not key:
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO game_flags (key,value) VALUES (?,?)",
+                (key[:120], str(flag.get("value") or ""))
             )
 
         # ── session_memory ───────────────────────────────────────
@@ -2718,7 +3523,7 @@ def rollback_checkpoint():
             )
 
         # ── map_rooms.state ──────────────────────────────────────
-        for room_id_str, state in snap["map_rooms_state"].items():
+        for room_id_str, state in (snap.get("map_rooms_state") or {}).items():
             conn.execute("UPDATE map_rooms SET state=? WHERE id=?",
                          (state, int(room_id_str)))
 
@@ -2732,7 +3537,7 @@ def rollback_checkpoint():
 
 @app.get("/api/player/state")
 def get_player_state():
-    """REST 轮询接口（向后兼容，投屏端已升级为 WebSocket 则不再需要此接口）。"""
+    """投屏端 REST 状态接口。"""
     with safe_db() as conn:
         def _get(k):
             r = conn.execute("SELECT value FROM system_state WHERE key=?", (k,)).fetchone()
@@ -2749,7 +3554,8 @@ def get_player_state():
     return result
 
 @app.post("/api/player/state")
-async def push_player_state(req: PlayerStateRequest):
+async def push_player_state(req: PlayerStateRequest, request: Request):
+    require_account_from_request(request)
     """GM 推送投屏状态。写入数据库后立即通过 WebSocket 广播给所有投屏端。"""
     with safe_db() as conn:
         conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_current_scene_id',?)", (str(req.current_scene_id),))
@@ -2764,8 +3570,9 @@ async def push_player_state(req: PlayerStateRequest):
     return {"status": "success"}
 
 @app.post("/api/game/gm-event")
-async def publish_gm_control_event(req: GmControlEventRequest):
+async def publish_gm_control_event(req: GmControlEventRequest, request: Request):
     """GM 手动接管：把旁白/裁定同步到当前玩家视图，并写入主线记忆。"""
+    account = require_account_from_request(request)
     content = (req.content or "").strip()
     if not content:
         raise fastapi.HTTPException(status_code=400, detail="GM 事件内容不能为空")
@@ -2789,7 +3596,7 @@ async def publish_gm_control_event(req: GmControlEventRequest):
             conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_scene_image',?)", (scene_image,))
             conn.execute("INSERT OR REPLACE INTO system_state (key,value) VALUES ('player_scene_ai_text',?)", (content,))
         if req.record_to_memory:
-            append_to_memory(conn, f"[{sender}手动接管/{kind}] {content[:1000]}")
+            append_to_memory(conn, f"[{sender}手动接管/{kind}] {content[:1000]}", owner_account_id=_account_id(account))
         else:
             conn.commit()
     if req.sync_player_state:
@@ -2799,6 +3606,15 @@ async def publish_gm_control_event(req: GmControlEventRequest):
 @app.get("/api/campaign-assets/{campaign_name}/{asset_name:path}")
 def serve_campaign_asset(campaign_name: str, asset_name: str):
     """安全访问导入剧本的图片资源。"""
+    if campaign_name == "saves":
+        parts = [urllib.parse.unquote(part) for part in str(asset_name or "").split("/") if part]
+        if len(parts) != 3:
+            raise fastapi.HTTPException(status_code=400, detail="非法存档资源路径")
+        ext = os.path.splitext(parts[2])[1].lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+            raise fastapi.HTTPException(status_code=404, detail="资源不存在")
+        path = _resolve_save_asset(parts[0], parts[1], parts[2])
+        return FileResponse(path)
     if not campaign_name or "/" in campaign_name or "\\" in campaign_name:
         raise fastapi.HTTPException(status_code=400, detail="非法剧本名")
     ext = os.path.splitext(asset_name)[1].lower()
@@ -2806,6 +3622,107 @@ def serve_campaign_asset(campaign_name: str, asset_name: str):
         raise fastapi.HTTPException(status_code=404, detail="资源不存在")
     path = _resolve_campaign_asset(campaign_name, asset_name)
     return FileResponse(path)
+
+@app.get("/api/game/campaign-assets")
+def list_loaded_campaign_assets():
+    """列出当前已载入剧本的图片资源，供资料册查看。"""
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+    with safe_db() as conn:
+        row = conn.execute("SELECT value FROM system_state WHERE key='current_campaign_name'").fetchone()
+        campaign_name = (row["value"] if row else "").strip()
+        path_row = conn.execute("SELECT value FROM system_state WHERE key='current_campaign_path'").fetchone()
+        current_path = (path_row["value"] if path_row else "").strip().replace("\\", "/")
+        scene_rows = conn.execute("SELECT id, name, scene_image FROM nodes WHERE scene_image != ''").fetchall()
+
+    assets_root = ""
+    asset_prefix = ""
+    asset_url = None
+    display_name = campaign_name
+    parts = [part for part in current_path.split("/") if part]
+    if parts[:1] == ["saves"] and len(parts) == 3:
+        save_campaign_name, save_name, folder, _campaign_json = _resolve_save_ref(current_path)
+        display_name = save_name
+        assets_root = os.path.realpath(os.path.join(folder, "assets"))
+        asset_prefix = (
+            f"/api/campaign-assets/saves/{urllib.parse.quote(save_campaign_name, safe='')}/"
+            f"{urllib.parse.quote(save_name, safe='')}/"
+        )
+        asset_url = lambda name: _save_asset_url(save_campaign_name, save_name, name)
+    elif parts[:1] == ["campaigns"] and len(parts) == 2:
+        campaign_name = _safe_save_path_part(parts[1], "剧本名")
+        display_name = campaign_name
+        campaign_root = os.path.realpath(os.path.join(CAMPAIGNS_DIR, campaign_name))
+        assets_root = os.path.realpath(os.path.join(campaign_root, "assets"))
+        try:
+            if os.path.commonpath([os.path.realpath(CAMPAIGNS_DIR), campaign_root]) != os.path.realpath(CAMPAIGNS_DIR):
+                raise ValueError
+        except ValueError:
+            raise fastapi.HTTPException(status_code=403, detail="禁止访问") from None
+        asset_prefix = f"/api/campaign-assets/{urllib.parse.quote(campaign_name, safe='')}/"
+        asset_url = lambda name: _campaign_asset_url(campaign_name, name)
+    else:
+        for scene in scene_rows:
+            url = str(scene["scene_image"] or "")
+            prefix = "/api/campaign-assets/"
+            if not url.startswith(prefix):
+                continue
+            rel = url[len(prefix):]
+            ref_parts = [urllib.parse.unquote(part) for part in rel.split("/") if part]
+            if ref_parts[:1] == ["saves"] and len(ref_parts) >= 4:
+                save_campaign_name, save_name = ref_parts[1], ref_parts[2]
+                folder = _save_folder_path(save_campaign_name, save_name)
+                display_name = save_name
+                assets_root = os.path.realpath(os.path.join(folder, "assets"))
+                asset_prefix = (
+                    f"/api/campaign-assets/saves/{urllib.parse.quote(save_campaign_name, safe='')}/"
+                    f"{urllib.parse.quote(save_name, safe='')}/"
+                )
+                asset_url = lambda name, c=save_campaign_name, s=save_name: _save_asset_url(c, s, name)
+                break
+            if len(ref_parts) >= 2:
+                campaign_name = _safe_save_path_part(ref_parts[0], "剧本名")
+                display_name = campaign_name
+                campaign_root = os.path.realpath(os.path.join(CAMPAIGNS_DIR, campaign_name))
+                assets_root = os.path.realpath(os.path.join(campaign_root, "assets"))
+                asset_prefix = f"/api/campaign-assets/{urllib.parse.quote(campaign_name, safe='')}/"
+                asset_url = lambda name, c=campaign_name: _campaign_asset_url(c, name)
+                break
+
+    if not assets_root or asset_url is None:
+        return {"status": "success", "campaign_name": "", "assets": []}
+    if not os.path.isdir(assets_root):
+        return {"status": "success", "campaign_name": display_name, "assets": []}
+
+    scene_refs: dict[str, list[dict]] = {}
+    for scene in scene_rows:
+        url = str(scene["scene_image"] or "")
+        if not url.startswith(asset_prefix):
+            continue
+        asset_name = urllib.parse.unquote(url[len(asset_prefix):]).strip()
+        if not asset_name:
+            continue
+        scene_refs.setdefault(asset_name, []).append({"id": scene["id"], "name": scene["name"]})
+
+    assets = []
+    for name in sorted(os.listdir(assets_root)):
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in image_exts:
+            continue
+        try:
+            path = os.path.realpath(os.path.join(assets_root, name))
+            if os.path.commonpath([assets_root, path]) != assets_root or not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+        except OSError:
+            continue
+        assets.append({
+            "name": name,
+            "url": asset_url(name),
+            "size_bytes": stat.st_size,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "scenes": scene_refs.get(name, []),
+        })
+    return {"status": "success", "campaign_name": display_name, "assets": assets}
 
 # ---------------------------------------------------------
 # 【模块化】：静态前端路由必须最后挂载，避免捕获 API 路径
